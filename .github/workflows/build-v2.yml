@@ -32,27 +32,21 @@ jobs:
           ndk-version: r27c
           add-to-path: true
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
 
       - name: Build Sing-box libbox Core (v1.14.0 arm64-v8a)
         run: |
           mkdir -p app/libs
-          
-          # 克隆 sing-box 官方源码基线
           git clone https://github.com/SagerNet/sing-box.git --branch v1.14.0 --depth 1 sing-box-src
           cd sing-box-src
-          
-          # 使用官方内置工具构建 Android arm64 库
           go run ./cmd/internal/build_libbox -target android -platform android/arm64 || true
-          
-          # 复制生成的 AAR 库
           find . -name "*.aar" -exec cp {} ../app/libs/libbox.aar \; || true
           cd ..
 
-          # 自动保底机制：若环境差异导致未生成，自动拉取官方同版本 arm64-v8a 二进制
           if [ ! -f app/libs/libbox.aar ]; then
-            echo "Using Official Sing-box v1.14.0 arm64 Release Core"
             DOWNLOAD_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.0 | grep -o 'https://[^"]*SFA-1.14.0-arm64-v8a.apk' | head -n 1 || echo "")
             if [ -n "$DOWNLOAD_URL" ]; then
               curl -sSL -o sfa.apk "$DOWNLOAD_URL"
@@ -61,7 +55,6 @@ jobs:
               cp sfa_out/lib/arm64-v8a/libbox.so app/src/main/jniLibs/arm64-v8a/
             fi
           fi
-          ls -lh app/libs/ || true
 
       - name: Setup Signing Keystore
         run: |
