@@ -93,9 +93,9 @@ object SubscriptionParser {
                 val outbounds = root.getAsJsonArray("outbounds")
                 outbounds.forEachIndexed { index, el ->
                     val obj = el.asJsonObject
-                    val type = obj.get("type")?.asString ?: ""
-                    val tag = obj.get("tag")?.asString ?: "Node-$index"
-                    val server = obj.get("server")?.asString ?: ""
+                    val type = obj.get("type")?.asString?.orEmpty() ?: ""
+                    val tag = obj.get("tag")?.asString?.orEmpty() ?: "Node-$index"
+                    val server = obj.get("server")?.asString?.orEmpty() ?: ""
 
                     val isTrafficFakeTag = tag.contains("已用") || tag.contains("剩余") || tag.contains("到期") || tag.contains("流量")
                     val isInternalType = type in INTERNAL_OUTBOUND_TYPES
@@ -135,23 +135,23 @@ object SubscriptionParser {
                                 type = protocol,
                                 server = server,
                                 serverPort = portOf(obj),
-                                uuidOrPassword = obj.get("uuid")?.asString
-                                    ?: obj.get("password")?.asString ?: "",
-                                flow = obj.get("flow")?.asString ?: "",
-                                realityPublicKey = reality?.get("public_key")?.asString ?: "",
-                                realityShortId = reality?.get("short_id")?.asString ?: "",
-                                sni = tls?.get("server_name")?.asString ?: "",
-                                network = transport?.get("type")?.asString ?: "tcp",
-                                path = transport?.get("path")?.asString ?: "",
-                                host = headers?.get("Host")?.asString ?: "",
+                                uuidOrPassword = obj.get("uuid")?.asString?.orEmpty()
+                                    ?: obj.get("password")?.asString?.orEmpty() ?: "",
+                                flow = obj.get("flow")?.asString?.orEmpty() ?: "",
+                                realityPublicKey = reality?.get("public_key")?.asString?.orEmpty() ?: "",
+                                realityShortId = reality?.get("short_id")?.asString?.orEmpty() ?: "",
+                                sni = tls?.get("server_name")?.asString?.orEmpty() ?: "",
+                                network = transport?.get("type")?.asString?.orEmpty() ?: "tcp",
+                                path = transport?.get("path")?.asString?.orEmpty() ?: "",
+                                host = headers?.get("Host")?.asString?.orEmpty() ?: "",
                                 alpn = alpn,
-                                ssMethod = obj.get("method")?.asString ?: "",
-                                obfs = obj.get("obfs")?.asString ?: "",
-                                obfsPassword = obj.get("obfs-password")?.asString ?: obj.get("obfs_password")?.asString ?: "",
+                                ssMethod = obj.get("method")?.asString?.orEmpty() ?: "",
+                                obfs = obj.get("obfs")?.asString?.orEmpty() ?: "",
+                                obfsPassword = obj.get("obfs-password")?.asString ?: obj.get("obfs_password")?.asString?.orEmpty() ?: "",
                                 profileId = profileId,
                                 profileName = profileName,
                                 tlsEnabled = tls?.get("enabled")?.asBoolean ?: (tls != null),
-                                extraPassword = if (type == "tuic") obj.get("password")?.asString ?: "" else "",
+                                extraPassword = if (type == "tuic") obj.get("password")?.asString?.orEmpty() ?: "" else "",
                                 rawJson = obj.toString()
                             )
                         )
@@ -342,8 +342,8 @@ object SubscriptionParser {
         val obj = runCatching { JsonParser.parseString(decoded).asJsonObject }.getOrNull() ?: return null
         val host = obj.get("add")?.asString ?: return null
         val port = obj.get("port")?.asInt ?: 443
-        val tag = Uri.decode(obj.get("ps")?.asString ?: obj.get("name")?.asString ?: "VMess-$host")
-        val network = obj.get("net")?.asString?.lowercase() ?: "tcp"
+        val tag = Uri.decode(obj.get("ps")?.asString?.orEmpty() ?: obj.get("name")?.asString?.orEmpty() ?: "VMess-$host")
+        val network = obj.get("net")?.asString?.orEmpty()?.lowercase() ?: "tcp"
         val isWss = network == "ws" || network == "grpc"
 
         return ProxyNode(
@@ -352,11 +352,11 @@ object SubscriptionParser {
             type = if (isWss) ProtocolType.VMESS_WS_ARGO else ProtocolType.VMESS_TLS,
             server = host,
             serverPort = port,
-            uuidOrPassword = obj.get("id")?.asString ?: "",
-            sni = obj.get("sni")?.asString ?: obj.get("host")?.asString ?: "",
+            uuidOrPassword = obj.get("id")?.asString?.orEmpty() ?: "",
+            sni = obj.get("sni")?.asString ?: obj.get("host")?.asString?.orEmpty() ?: "",
             network = network,
-            path = obj.get("path")?.asString ?: "",
-            host = obj.get("host")?.asString ?: "",
+            path = obj.get("path")?.asString?.orEmpty() ?: "",
+            host = obj.get("host")?.asString?.orEmpty() ?: "",
             tlsEnabled = obj.get("tls")?.asString == "tls",
             profileId = profileId,
             profileName = profileName
