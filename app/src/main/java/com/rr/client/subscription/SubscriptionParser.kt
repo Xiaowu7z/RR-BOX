@@ -15,7 +15,6 @@ object SubscriptionParser {
         var download = 0L
         var total = 0L
         var expire = 0L
-
         headerValue.split(";").forEach { part ->
             val kv = part.trim().split("=")
             if (kv.size == 2) {
@@ -45,7 +44,6 @@ object SubscriptionParser {
         if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             return parseSingBoxJson(trimmed, profileId, profileName)
         }
-
         val decoded = robustBase64Decode(trimmed) ?: trimmed
         val nodes = mutableListOf<ProxyNode>()
         var index = 0
@@ -70,16 +68,13 @@ object SubscriptionParser {
                 val bytes = Base64.decode(input.trim(), flags)
                 val text = String(bytes, Charsets.UTF_8)
                 if (text.isNotBlank() && text.contains("\n")) return text
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) { }
         }
-        // 单行（可能无换行）也尝试按 base64 解码后按行解析
         try {
             val bytes = Base64.decode(input.trim(), Base64.DEFAULT)
             val text = String(bytes, Charsets.UTF_8)
             if (text.isNotBlank() && (text.contains("://") || text.startsWith("vmess://"))) return text
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) { }
         return null
     }
 
@@ -89,83 +84,99 @@ object SubscriptionParser {
         val list = mutableListOf<ProxyNode>()
         try {
             val root = JsonParser.parseString(jsonStr).asJsonObject
-            if (root.has("outbounds")) {
-                val outbounds = root.getAsJsonArray("outbounds")
-                outbounds.forEachIndexed { index, el ->
-                    val obj = el.asJsonObject
-                    val type = obj.get("type")?.asString?.orEmpty() ?:: ""
-                    val tag = obj.get("tag")?.asString?.orEmpty() ?:: "Node-$index"
-                    val server = obj.get("server")?.asString?.orEmpty() ?:: ""
+            if (!root.has("outbounds")) return list
+            val outbounds = root.getAsJsonArray("outbounds")
+            outbounds.forEachIndexed { index, el ->
+                val obj = el.asJsonObject
+                val type = objString(obj, "type")
+                val tag = objString(obj, "tag").ifBlank { "Node-$index" }
+                val server = objString(obj, "server")
+                if (server.isEmpty()) return@forEachIndexed
+                if (tag.contains("已用") || tag.contains("剩余") || tag.contains("到期") || tag.contains("流量")) return@forEachIndexed
+                if (type in INTERNAL_OUTBOUND_TYPES) return@forEachIndexed
 
-                    val isTrafficFakeTag = tag.contains("已用") || tag.contains("剩余") || tag.contains("到期") || tag.contains("流量")
-                    val isInternalType = type in INTERNAL_OUTBOUND_TYPES
-                    if (server.isNotEmpty() && !isTrafficFakeTag && !isInternalType) {
-                        val protocol = when (type) {
-                            "vless" -> {
-                                val realityEnabled = runCatching {
-                                    obj.getAsJsonObject("tls").getAsJsonObject("reality").get("enabled").asBoolean
-                                }.getOrDefault(false)
-                                if (realityEnabled) ProtocolType.VLESS_REALITY else ProtocolType.VLESS_TLS
-                            }
-                            "hysteria2", "hy2" -> ProtocolType.HYSTERIA2
-                            "tuic" -> ProtocolType.TUIC_V5
-                            "vmess" -> {
-                                val network = runCatching { obj.getAsJsonObject("transport").get("type").asString }.getOrDefault("")
-                                if (network == "ws" || network == "grpc") ProtocolType.VMESS_WS_ARGO else ProtocolType.VMESS_TLS
-                            }
-                            "trojan" -> ProtocolType.TROJAN
-                            "shadowsocks", "ss" -> ProtocolType.SHADOWSOCKS
-                            "anytls" -> ProtocolType.ANYTLS
-                            "naive" -> ProtocolType.NAIVE_H2
-                            else -> ProtocolType.CUSTOM
-                        }
-
-                        val transport = runCatching { obj.getAsJsonObject("transport") }.getOrNull()
-                        val tls = runCatching { obj.getAsJsonObject("tls") }.getOrNull()
-                        val reality = runCatching { tls?.getAsJsonObject("reality") }.getOrNull()
-                        val headers = runCatching { transport?.getAsJsonObject("headers") }.getOrNull()
-                        val alpn = runCatching {
-                            tls?.getAsJsonArray("alpn")?.joinToString(",") { it.asString }
-                        }.getOrDefault("")
-
-                        list.add(
-                            ProxyNode(
-                                id = nodeId(profileId, server, portOf(obj), index),
-                                tag = tag,
-                                type = protocol,
-                                server = server,
-                                serverPort = portOf(obj),
-                                uuidOrPassword = obj.get("uuid")?.asString?.orEmpty()
-                                    ?: obj.get("password")?.asString?.orEmpty() ?:: "",
-                                flow = obj.get("flow")?.asString?.orEmpty() ?:: "",
-                                realityPublicKey = reality?.get("public_key")?.asString?.orEmpty() ?:: "",
-                                realityShortId = reality?.get("short_id")?.asString?.orEmpty() ?:: "",
-                                sni = tls?.get("server_name")?.asString?.orEmpty() ?:: "",
-                                network = transport?.get("type")?.asString?.orEmpty() ?:: "tcp",
-                                path = transport?.get("path")?.asString?.orEmpty() ?:: "",
-                                host = headers?.get("Host")?.asString?.orEmpty() ?:: "",
-                                alpn = alpn,
-                                ssMethod = obj.get("method")?.asString?.orEmpty() ?:: "",
-                                obfs = obj.get("obfs")?.asString?.orEmpty() ?:: "",
-                                obfsPassword = obj.get("obfs-password")?.asString?.orEmpty() ?:: obj.get("obfs_password")?.asString?.orEmpty() ?:: "",
-                                profileId = profileId,
-                                profileName = profileName,
-                                tlsEnabled = tls?.get("enabled")?.asBoolean ?: (tls != null),
-                                extraPassword = if (type == "tuic") obj.get("password")?.asString?.orEmpty() ?:: "" else "",
-                                rawJson = obj.toString()
-                            )
-                        )
+                val protocol = when (type) {
+                    "vless" -> {
+                        val tlsObj = objJsonObject(obj, "tls")
+                        val realityObj = tlsObj?.let { objJsonObject(it, "reality") }
+                        val realityEnabled = realityObj?.bool("enabled") == true
+                        if (realityEnabled) ProtocolType.VLESS_REALITY else ProtocolType.VLESS_TLS
                     }
+                    "hysteria2", "hy2" -> ProtocolType.HYSTERIA2
+                    "tuic" -> ProtocolType.TUIC_V5
+                    "vmess" -> {
+                        val transport = objJsonObject(obj, "transport")
+                        val net = transport?.let { objString(it, "type") } ?: ""
+                        if (net == "ws" || net == "grpc") ProtocolType.VMESS_WS_ARGO else ProtocolType.VMESS_TLS
+                    }
+                    "trojan" -> ProtocolType.TROJAN
+                    "shadowsocks", "ss" -> ProtocolType.SHADOWSOCKS
+                    "anytls" -> ProtocolType.ANYTLS
+                    "naive" -> ProtocolType.NAIVE_H2
+                    else -> ProtocolType.CUSTOM
                 }
+
+                val transport = objJsonObject(obj, "transport")
+                val tls = objJsonObject(obj, "tls")
+                val reality = tls?.let { objJsonObject(it, "reality") }
+                val headers = transport?.let { objJsonObject(it, "headers") }
+                val tlsEnabled = tls != null && tls.bool("enabled") != false
+
+                val alpn = tls?.let {
+                    val arr = it.getAsJsonArray("alpn")
+                    if (arr != null) arr.joinToString(",") { e -> e.asString } else ""
+                } ?: ""
+
+                list.add(
+                    ProxyNode(
+                        id = nodeId(profileId, server, portOf(obj), index),
+                        tag = tag,
+                        type = protocol,
+                        server = server,
+                        serverPort = portOf(obj),
+                        uuidOrPassword = objString(obj, "uuid").ifEmpty { objString(obj, "password") },
+                        flow = objString(obj, "flow"),
+                        realityPublicKey = reality?.let { objString(it, "public_key") } ?: "",
+                        realityShortId = reality?.let { objString(it, "short_id") } ?: "",
+                        sni = tls?.let { objString(it, "server_name") } ?: "",
+                        network = transport?.let { objString(it, "type") } ?: "tcp",
+                        path = transport?.let { objString(it, "path") } ?: "",
+                        host = headers?.let { objString(it, "Host") } ?: "",
+                        alpn = alpn,
+                        ssMethod = objString(obj, "method"),
+                        obfs = objString(obj, "obfs"),
+                        obfsPassword = objString(obj, "obfs-password").ifEmpty { objString(obj, "obfs_password") },
+                        hoppingPorts = objString(obj, "ports"),
+                        extraPassword = if (type == "tuic") objString(obj, "password") else "",
+                        profileId = profileId,
+                        profileName = profileName,
+                        tlsEnabled = tlsEnabled,
+                        rawJson = obj.toString()
+                    )
+                )
             }
         } catch (e: Exception) {
-            // 单个字段解析异常不阻断整批
+            // 单个节点解析异常不阻断整批
         }
         return list
     }
 
+    private fun objString(obj: com.google.gson.JsonObject, key: String): String =
+        obj.get(key)?.asString?.orEmpty() ?: ""
+
+    private fun objInt(obj: com.google.gson.JsonObject, key: String, fallback: Int = 0): Int =
+        obj.get(key)?.asInt ?: fallback
+
+    private fun objBool(obj: com.google.gson.JsonObject, key: String): Boolean =
+        obj.get(key)?.asBoolean ?: false
+
+    private fun objJsonObject(obj: com.google.gson.JsonObject, key: String): com.google.gson.JsonObject? =
+        obj.get(key)?.asJsonObject
+
+    private fun JsonElement?.bool(key: String): Boolean = this?.asJsonObject?.get(key)?.asBoolean ?: false
+
     private fun portOf(obj: com.google.gson.JsonObject): Int =
-        obj.get("server_port")?.asInt ?: obj.get("serverPort")?.asInt ?: 443
+        objInt(obj, "server_port").takeIf { it > 0 } ?: objInt(obj, "serverPort").takeIf { it > 0 } ?: 443
 
     // ---------- URI 订阅（base64 解码后逐行） ----------
 
@@ -182,19 +193,18 @@ object SubscriptionParser {
                 "vmess" -> parseVmessUri(line, profileId, profileName, index)
                 else -> null
             }
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
     private fun parseVlessUri(uri: Uri, profileId: String, profileName: String, index: Int): ProxyNode? {
         val host = uri.host ?: return null
         val port = if (uri.port > 0) uri.port else 443
         val tag = Uri.decode(uri.fragment ?: "VLESS-$host")
-        val security = uri.getQueryParameter("security")?.orEmpty() ?: "reality"
+        val security = uri.getQueryParameter("security") ?: "reality"
         val network = uri.getQueryParameter("type")?.lowercase() ?: "tcp"
-        val isReality = security == "reality" || !uri.getQueryParameter("pbk").isNullOrEmpty()
-
+        val pbk = uri.getQueryParameter("pbk") ?: uri.getQueryParameter("publicKey") ?: ""
+        val isReality = security == "reality" || pbk.isNotEmpty()
+        val tlsOn = isReality || security == "tls"
         return ProxyNode(
             id = nodeId(profileId, host, port, index),
             tag = tag,
@@ -202,14 +212,14 @@ object SubscriptionParser {
             server = host,
             serverPort = port,
             uuidOrPassword = uri.userInfo ?: "",
-            flow = uri.getQueryParameter("flow")?.orEmpty() ?: "",
-            realityPublicKey = uri.getQueryParameter("pbk")?.orEmpty() ?: uri.getQueryParameter("publicKey")?.orEmpty() ?: "",
-            realityShortId = uri.getQueryParameter("sid")?.orEmpty() ?: uri.getQueryParameter("shortId")?.orEmpty() ?: "",
-            sni = uri.getQueryParameter("sni")?.orEmpty() ?: uri.getQueryParameter("serverName")?.orEmpty() ?: host,
+            flow = uri.getQueryParameter("flow") ?: "",
+            realityPublicKey = pbk,
+            realityShortId = (uri.getQueryParameter("sid") ?: uri.getQueryParameter("shortId") ?: ""),
+            sni = (uri.getQueryParameter("sni") ?: uri.getQueryParameter("serverName") ?: host),
             network = network,
-            path = uri.getQueryParameter("path")?.orEmpty() ?: "",
-            host = uri.getQueryParameter("host")?.orEmpty() ?: "",
-            tlsEnabled = isReality || security == "tls",
+            path = uri.getQueryParameter("path") ?: "",
+            host = uri.getQueryParameter("host") ?: "",
+            tlsEnabled = tlsOn,
             profileId = profileId,
             profileName = profileName
         )
@@ -226,11 +236,10 @@ object SubscriptionParser {
             server = host,
             serverPort = port,
             uuidOrPassword = uri.userInfo ?: "",
-            sni = uri.getQueryParameter("sni")?.orEmpty() ?: host,
-            obfs = uri.getQueryParameter("obfs")?.orEmpty() ?: "",
-            obfsPassword = uri.getQueryParameter("obfs-password")
-                ?.orEmpty() ?:: uri.getQueryParameter("obfsPassword")?.orEmpty() ?:: "",
-            hoppingPorts = uri.getQueryParameter("ports")?.orEmpty() ?: "",
+            sni = uri.getQueryParameter("sni") ?: host,
+            obfs = uri.getQueryParameter("obfs") ?: "",
+            obfsPassword = uri.getQueryParameter("obfs-password") ?: uri.getQueryParameter("obfsPassword") ?: "",
+            hoppingPorts = uri.getQueryParameter("ports") ?: "",
             profileId = profileId,
             profileName = profileName
         )
@@ -241,9 +250,9 @@ object SubscriptionParser {
         val port = if (uri.port > 0) uri.port else 443
         val tag = Uri.decode(uri.fragment ?: "TUIC-$host")
         val userInfo = uri.userInfo ?: ""
-        val uuid = userInfo.substringBefore(":")
-        val password = userInfo.substringAfter(":", "")
-
+        val colonIdx = userInfo.indexOf(':')
+        val uuid = if (colonIdx > 0) userInfo.substring(0, colonIdx) else userInfo
+        val password = if (colonIdx > 0) userInfo.substring(colonIdx + 1) else ""
         return ProxyNode(
             id = nodeId(profileId, host, port, index),
             tag = tag,
@@ -252,8 +261,8 @@ object SubscriptionParser {
             serverPort = port,
             uuidOrPassword = uuid,
             extraPassword = password,
-            sni = uri.getQueryParameter("sni")?.orEmpty() ?: host,
-            alpn = uri.getQueryParameter("alpn")?.orEmpty() ?: "",
+            sni = uri.getQueryParameter("sni") ?: host,
+            alpn = uri.getQueryParameter("alpn") ?: "",
             profileId = profileId,
             profileName = profileName
         )
@@ -270,11 +279,11 @@ object SubscriptionParser {
             server = host,
             serverPort = port,
             uuidOrPassword = uri.userInfo ?: "",
-            sni = uri.getQueryParameter("sni")?.orEmpty() ?: host,
+            sni = uri.getQueryParameter("sni") ?: host,
             network = uri.getQueryParameter("type")?.lowercase() ?: "tcp",
-            path = uri.getQueryParameter("path")?.orEmpty() ?: "",
-            host = uri.getQueryParameter("host")?.orEmpty() ?: "",
-            alpn = uri.getQueryParameter("alpn")?.orEmpty() ?: "",
+            path = uri.getQueryParameter("path") ?: "",
+            host = uri.getQueryParameter("host") ?: "",
+            alpn = uri.getQueryParameter("alpn") ?: "",
             profileId = profileId,
             profileName = profileName
         )
@@ -283,7 +292,6 @@ object SubscriptionParser {
     private fun parseSsUri(line: String, profileId: String, profileName: String, index: Int): ProxyNode? {
         var body = line.removePrefix("ss://").substringBefore("#")
         val tag = Uri.decode(line.substringAfter("#", "").ifEmpty { "SS-${index + 1}" })
-
         var method = ""
         var password = ""
         var host = ""
@@ -291,9 +299,8 @@ object SubscriptionParser {
 
         if (body.contains("@")) {
             // SIP002: userinfo@host:port
-            var userInfo = body.substringBefore("@")
+            val userInfo = body.substringBefore("@")
             val hostPort = body.substringAfter("@").substringBefore("/")
-            // userinfo 可能是 base64(method:password)
             val decodedUser = decodeSip002UserInfo(userInfo)
             method = decodedUser.first
             password = decodedUser.second
@@ -304,15 +311,12 @@ object SubscriptionParser {
             val decoded = base64DecodeLenient(body) ?: return null
             val atSplit = decoded.split("@")
             if (atSplit.size < 2) return null
-            val cred = atSplit[0]
-            val hostPort = atSplit[1]
-            method = cred.substringBefore(":")
-            password = cred.substringAfter(":", "")
-            host = hostPort.substringBefore(":")
-            port = hostPort.substringAfter(":", "443").toIntOrNull() ?: 443
+            method = atSplit[0].substringBefore(":")
+            password = atSplit[0].substringAfter(":", "")
+            host = atSplit[1].substringBefore(":")
+            port = atSplit[1].substringAfter(":", "443").toIntOrNull() ?: 443
         }
         if (method.isEmpty() || host.isEmpty()) return null
-
         return ProxyNode(
             id = nodeId(profileId, host, port, index),
             tag = tag,
@@ -340,24 +344,25 @@ object SubscriptionParser {
         val b64 = line.removePrefix("vmess://").substringBefore("#").substringBefore("/")
         val decoded = base64DecodeLenient(b64) ?: return null
         val obj = runCatching { JsonParser.parseString(decoded).asJsonObject }.getOrNull() ?: return null
-        val host = obj.get("add")?.asString ?: return null
+        val host = obj.get("add")?.asString?.orEmpty() ?: return null
         val port = obj.get("port")?.asInt ?: 443
-        val tag = Uri.decode(obj.get("ps")?.asString?.orEmpty() ?:: obj.get("name")?.asString?.orEmpty() ?:: "VMess-$host")
+        val rawTag = obj.get("ps")?.asString?.orEmpty().ifEmpty { obj.get("name")?.asString?.orEmpty() ?: "" }
+        val tag = Uri.decode(rawTag.ifEmpty { "VMess-$host" })
         val network = obj.get("net")?.asString?.orEmpty()?.lowercase() ?: "tcp"
         val isWss = network == "ws" || network == "grpc"
-
+        val tlsOn = obj.get("tls")?.asString == "tls"
         return ProxyNode(
             id = nodeId(profileId, host, port, index),
             tag = tag,
             type = if (isWss) ProtocolType.VMESS_WS_ARGO else ProtocolType.VMESS_TLS,
             server = host,
             serverPort = port,
-            uuidOrPassword = obj.get("id")?.asString?.orEmpty() ?:: "",
-            sni = obj.get("sni")?.asString ?: obj.get("host")?.asString?.orEmpty() ?:: "",
+            uuidOrPassword = obj.get("id")?.asString?.orEmpty() ?: "",
+            sni = obj.get("sni")?.asString?.orEmpty().ifEmpty { obj.get("host")?.asString?.orEmpty() ?: "" },
             network = network,
-            path = obj.get("path")?.asString?.orEmpty() ?:: "",
-            host = obj.get("host")?.asString?.orEmpty() ?:: "",
-            tlsEnabled = obj.get("tls")?.asString == "tls",
+            path = obj.get("path")?.asString?.orEmpty() ?: "",
+            host = obj.get("host")?.asString?.orEmpty() ?: "",
+            tlsEnabled = tlsOn,
             profileId = profileId,
             profileName = profileName
         )
@@ -378,9 +383,7 @@ object SubscriptionParser {
         } catch (e: Exception) {
             try {
                 String(Base64.decode(normalized, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
-            } catch (e2: Exception) {
-                null
-            }
+            } catch (e2: Exception) { null }
         }
     }
 
