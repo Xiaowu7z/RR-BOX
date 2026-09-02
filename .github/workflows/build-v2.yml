@@ -37,24 +37,26 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Build Sing-box libbox Core (v1.14.0 arm64-v8a)
+      - name: Build Sing-box libbox.aar (v1.14.0 arm64-v8a)
         run: |
           mkdir -p app/libs
+          
+          # 克隆 sing-box v1.14.0 官方源码
           git clone https://github.com/SagerNet/sing-box.git --branch v1.14.0 --depth 1 sing-box-src
           cd sing-box-src
-          go run ./cmd/internal/build_libbox -target android -platform android/arm64 || true
-          find . -name "*.aar" -exec cp {} ../app/libs/libbox.aar \; || true
+          
+          # 核心修复：剔除导致底层冲突的 with_gvisor 标签，确保顺利编译
+          sed -i 's/with_gvisor,//g' cmd/internal/build_libbox/main.go || true
+          sed -i 's/with_gvisor//g' cmd/internal/build_libbox/main.go || true
+          
+          # 执行官方构建命令
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64
+          
+          # 复制生成的 AAR 核心库到 app/libs/ 供项目引用
+          cp -v libbox.aar ../app/libs/ || find . -name "*.aar" -exec cp -v {} ../app/libs/ \;
           cd ..
-
-          if [ ! -f app/libs/libbox.aar ]; then
-            DOWNLOAD_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.0 | grep -o 'https://[^"]*SFA-1.14.0-arm64-v8a.apk' | head -n 1 || echo "")
-            if [ -n "$DOWNLOAD_URL" ]; then
-              curl -sSL -o sfa.apk "$DOWNLOAD_URL"
-              unzip -q sfa.apk -d sfa_out
-              mkdir -p app/src/main/jniLibs/arm64-v8a
-              cp sfa_out/lib/arm64-v8a/libbox.so app/src/main/jniLibs/arm64-v8a/
-            fi
-          fi
+          
+          ls -lh app/libs/
 
       - name: Setup Signing Keystore
         run: |
