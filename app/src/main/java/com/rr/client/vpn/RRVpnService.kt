@@ -26,7 +26,7 @@ class RRVpnService : VpnService() {
 
     private var activeNodeTag = "Default"
     private var activeNodeId = ""
-    
+
     // 基于单调时钟计算真实速率与会话时长
     private var startElapsedRealtime = 0L
     private var lastCalculationTime = 0L
@@ -57,7 +57,7 @@ class RRVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         notificationMgr = RRNotificationManager(this)
-        
+
         // 实例化 BoxServiceWrapper，并将来自底层 CommandClient 的真实流量数据接入
         boxCore = BoxServiceWrapper(
             workingDir = filesDir,
@@ -96,12 +96,14 @@ class RRVpnService : VpnService() {
             lastProxyDownTotal = 0L
             lastProxyUpTotal = 0L
 
+            // Build and show notification BEFORE starting the VPN core
+            // This is required for Android 14+ (API 34+) foreground services
+            val initialNotif = notificationMgr.buildNotification(activeNodeTag, TrafficSpeed(), 0L)
+            startForeground(RRNotificationManager.NOTIFICATION_ID, initialNotif)
+
             val started = boxCore?.startService(configJson, this) ?: false
             if (started) {
                 _isRunning.value = true
-
-                val initialNotif = notificationMgr.buildNotification(activeNodeTag, TrafficSpeed(), 0L)
-                startForeground(RRNotificationManager.NOTIFICATION_ID, initialNotif)
             } else {
                 stopVpn()
             }
@@ -119,7 +121,7 @@ class RRVpnService : VpnService() {
     private fun handleRealTrafficStatus(uplinkTotal: Long, downlinkTotal: Long) {
         val now = SystemClock.elapsedRealtime()
         val deltaTimeMs = now - lastCalculationTime
-        
+
         if (deltaTimeMs >= 500) { // 至少半秒计算一次速率
             val downDiff = (downlinkTotal - lastProxyDownTotal).coerceAtLeast(0L)
             val upDiff = (uplinkTotal - lastProxyUpTotal).coerceAtLeast(0L)

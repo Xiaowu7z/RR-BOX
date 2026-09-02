@@ -50,8 +50,16 @@ class BoxServiceWrapper(
     private var vpnService: VpnService? = null
     private var lastConfigJson: String? = null
     private var isRunning = false
+    private var isStopping = false
 
     fun startService(configJson: String, vpn: VpnService): Boolean {
+        // If service is already running, just return true
+        if (isRunning && commandServer != null && commandClient != null) {
+            onLogReceived("sing-box service already running, skipping restart")
+            return true
+        }
+
+        // Stop any existing service first
         stopService()
 
         return try {
@@ -73,6 +81,7 @@ class BoxServiceWrapper(
             client.connect()
 
             isRunning = true
+            isStopping = false
             onLogReceived("sing-box v1.14.0 服务与状态监听器已启动")
             true
         } catch (e: Throwable) {
@@ -84,6 +93,12 @@ class BoxServiceWrapper(
     }
 
     fun stopService() {
+        // Prevent double-stop race condition
+        if (isStopping) {
+            return
+        }
+        isStopping = true
+
         isRunning = false
 
         runCatching { commandClient?.disconnect() }
@@ -102,6 +117,8 @@ class BoxServiceWrapper(
 
         vpnService = null
         lastConfigJson = null
+
+        isStopping = false
     }
 
     override fun openTun(options: TunOptions): Int {

@@ -3,6 +3,8 @@ package com.rr.client
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
+import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -47,7 +49,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         setContent {
             RRClientTheme {
                 MainApp()
@@ -61,7 +62,6 @@ class MainActivity : ComponentActivity() {
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
         val currentSpeed by RRVpnService.currentSpeed.collectAsState()
         val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
-
         var nodes by remember {
             mutableStateOf(
                 listOf(
@@ -73,7 +73,6 @@ class MainActivity : ComponentActivity() {
         }
         var selectedNodeId by remember { mutableStateOf("1") }
         val selectedNode = nodes.find { it.id == selectedNodeId } ?: nodes.firstOrNull()
-
         var userInfo by remember {
             mutableStateOf(
                 SubscriptionUserInfo(
@@ -84,7 +83,6 @@ class MainActivity : ComponentActivity() {
                 )
             )
         }
-
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
         var smartRouting by remember { mutableStateOf(true) }
         var perAppMode by remember { mutableStateOf("ALL") }
@@ -126,7 +124,7 @@ class MainActivity : ComponentActivity() {
                         selected = selectedTab == 4,
                         onClick = { selectedTab = 4 },
                         icon = { Icon(Icons.Default.Settings, contentDescription = "设置") },
-                        label = { Text("设置") }
+        label = { Text("设置") }
                     )
                 }
             }
@@ -209,6 +207,7 @@ class MainActivity : ComponentActivity() {
         if (intent != null) {
             vpnLauncher.launch(intent)
         } else {
+            // Permission already granted, start VPN directly
             startVpnServiceInternal()
         }
     }
