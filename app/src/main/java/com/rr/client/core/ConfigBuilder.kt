@@ -3,6 +3,7 @@ package com.rr.client.core
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.ProtocolType
@@ -20,36 +21,34 @@ object ConfigBuilder {
         val root = JsonObject()
 
         // 1. Log
-        val log = JsonObject().apply {
+        root.add("log", JsonObject().apply {
             addProperty("level", "warn")
             addProperty("timestamp", true)
-        }
-        root.add("log", log)
+        })
 
-        // 2. DNS
-        val dns = JsonObject().apply {
+        // 2. DNS: Ensure direct DNS can resolve proxy server domain to prevent deadlock
+        root.add("dns", JsonObject().apply {
             val servers = JsonArray().apply {
-                add(JsonObject().apply {
-                    addProperty("tag", "dns-remote")
-                    addProperty("address", "https://1.1.1.1/dns-query")
-                    addProperty("detour", "proxy")
-                })
                 add(JsonObject().apply {
                     addProperty("tag", "dns-direct")
                     addProperty("address", "223.5.5.5")
                     addProperty("detour", "direct")
                 })
                 add(JsonObject().apply {
-                    addProperty("tag", "dns-block")
-                    addProperty("address", "rcode://success")
+                    addProperty("tag", "dns-remote")
+                    addProperty("address", "https://1.1.1.1/dns-query")
+                    addProperty("detour", "proxy")
                 })
             }
             add("servers", servers)
 
             val rules = JsonArray().apply {
+                // Outbound server domains MUST be resolved by direct DNS
                 add(JsonObject().apply {
-                    val outbound = JsonArray().apply { add("any") }
-                    add("outbound", outbound)
+                    val domains = JsonArray().apply {
+                        allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
+                    }
+                    add("domain", domains)
                     addProperty("server", "dns-direct")
                 })
                 if (smartRouting) {
@@ -61,35 +60,32 @@ object ConfigBuilder {
                 }
             }
             add("rules", rules)
+            addProperty("final", "dns-remote")
             addProperty("strategy", "prefer_ipv4")
-        }
-        root.add("dns", dns)
+        })
 
-        // 3. Inbounds (TUN)
-        val inbounds = JsonArray().apply {
-            val tun = JsonObject().apply {
+        // 3. Inbounds: TUN system stack
+        root.add("inbounds", JsonArray().apply {
+            add(JsonObject().apply {
                 addProperty("type", "tun")
                 addProperty("tag", "tun-in")
                 addProperty("interface_name", "tun0")
-                addProperty("mtu", 9000)
+                addProperty("mtu", 1500)
                 addProperty("auto_route", true)
                 addProperty("strict_route", false)
-                addProperty("stack", "mixed")
+                addProperty("stack", "system")
                 addProperty("sniff", true)
-                addProperty("sniff_override_destination", false)
                 val inet4 = JsonArray().apply { add("172.19.0.1/30") }
                 add("inet4_address", inet4)
-            }
-            add(tun)
-        }
-        root.add("inbounds", inbounds)
+            })
+        })
 
-        // 4. Outbounds
-        val outbounds = JsonArray().apply {
-            // Main selected proxy
+        // 4. Outbounds: Pass exact node parameters from subscription
+        root.add("outbounds", JsonArray().apply {
+            // Selected node as the default proxy
             add(buildOutboundJson(selectedNode).apply { addProperty("tag", "proxy") })
 
-            // Additional distinct node outbounds for per-app routing
+            // Other nodes
             allNodes.forEach { node ->
                 if (node.id != selectedNode.id) {
                     add(buildOutboundJson(node))
@@ -113,19 +109,27 @@ object ConfigBuilder {
                 addProperty("type", "dns")
                 addProperty("tag", "dns-out")
             })
-        }
-        root.add("outbounds", outbounds)
+        })
 
         // 5. Route
-        val route = JsonObject().apply {
+        root.add("route", JsonObject().apply {
             val rules = JsonArray().apply {
-                // DNS hijack
+                // DNS Hijacking
                 add(JsonObject().apply {
                     addProperty("protocol", "dns")
                     addProperty("outbound", "dns-out")
                 })
 
-                // Per-App routing rules
+                // Server domain/IP direct bypass to prevent routing loop
+                add(JsonObject().apply {
+                    val serverList = JsonArray().apply {
+                        allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
+                    }
+                    add("domain", serverList)
+                    addProperty("outbound", "direct")
+                })
+
+                // Per-App routing
                 appRoutes.forEach { appRoute ->
                     when (appRoute.routeMode) {
                         "DIRECT" -> {
@@ -147,20 +151,19 @@ object ConfigBuilder {
                     }
                 }
 
-                if (smartRouting) {
-                    // Private IPs & LAN
-                    add(JsonObject().apply {
-                        val ip = JsonArray().apply {
-                            add("10.0.0.0/8")
-                            add("172.16.0.0/12")
-                            add("192.168.0.0/16")
-                            add("127.0.0.0/8")
-                        }
-                        add("ip_cidr", ip)
-                        addProperty("outbound", "direct")
-                    })
+                // Private IPs & LAN
+                add(JsonObject().apply {
+                    val ip = JsonArray().apply {
+                        add("10.0.0.0/8")
+                        add("172.16.0.0/12")
+                        add("192.168.0.0/16")
+                        add("127.0.0.0/8")
+                    }
+                    add("ip_cidr", ip)
+                    addProperty("outbound", "direct")
+                })
 
-                    // China Rule Sets
+                if (smartRouting) {
                     add(JsonObject().apply {
                         val ruleset = JsonArray().apply { add("geoip-cn"); add("geosite-cn") }
                         add("rule_set", ruleset)
@@ -168,20 +171,30 @@ object ConfigBuilder {
                     })
                 }
 
-                // Default fallback to proxy
+                // Default
                 add(JsonObject().apply {
                     addProperty("outbound", "proxy")
                 })
             }
             add("rules", rules)
             addProperty("auto_detect_interface", true)
-        }
-        root.add("route", route)
+        })
 
         return gson.toJson(root)
     }
 
     private fun buildOutboundJson(node: ProxyNode): JsonObject {
+        // If rawJson from RRVPS subscription is available, directly reuse it verbatim!
+        if (node.rawJson.isNotBlank()) {
+            try {
+                val parsed = JsonParser.parseString(node.rawJson).asJsonObject
+                parsed.addProperty("tag", node.tag)
+                return parsed
+            } catch (e: Exception) {
+                // fallback
+            }
+        }
+
         val obj = JsonObject()
         obj.addProperty("tag", node.tag)
 
@@ -195,7 +208,10 @@ object ConfigBuilder {
                 obj.add("tls", JsonObject().apply {
                     addProperty("enabled", true)
                     addProperty("server_name", if (node.sni.isNotEmpty()) node.sni else "apple.com")
-                    addProperty("utls", JsonObject().apply { addProperty("enabled", true); addProperty("fingerprint", "chrome") }.toString())
+                    add("utls", JsonObject().apply {
+                        addProperty("enabled", true)
+                        addProperty("fingerprint", "chrome")
+                    })
                     add("reality", JsonObject().apply {
                         addProperty("enabled", true)
                         addProperty("public_key", node.realityPublicKey)
@@ -213,48 +229,12 @@ object ConfigBuilder {
                 }
                 obj.add("tls", JsonObject().apply {
                     addProperty("enabled", true)
+                    addProperty("insecure", true)
                     if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
                 })
-            }
-            ProtocolType.TUIC_V5 -> {
-                obj.addProperty("type", "tuic")
-                obj.addProperty("server", node.server)
-                obj.addProperty("server_port", node.serverPort)
-                obj.addProperty("uuid", node.uuidOrPassword)
-                obj.addProperty("congestion_controller", "bbr")
-                obj.add("tls", JsonObject().apply {
-                    addProperty("enabled", true)
-                    if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
-                })
-            }
-            ProtocolType.VMESS_WS_ARGO -> {
-                obj.addProperty("type", "vmess")
-                obj.addProperty("server", node.server)
-                obj.addProperty("server_port", node.serverPort)
-                obj.addProperty("uuid", node.uuidOrPassword)
-                obj.addProperty("security", "auto")
-                obj.add("transport", JsonObject().apply {
-                    addProperty("type", "ws")
-                    addProperty("path", if (node.path.isNotEmpty()) node.path else "/")
-                    add("headers", JsonObject().apply {
-                        if (node.host.isNotEmpty()) addProperty("Host", node.host)
-                    })
-                })
-            }
-            ProtocolType.NAIVE_H2, ProtocolType.NAIVE_H3 -> {
-                obj.addProperty("type", "naive")
-                obj.addProperty("server", node.server)
-                obj.addProperty("server_port", node.serverPort)
-                obj.addProperty("username", node.uuidOrPassword.substringBefore(":"))
-                obj.addProperty("password", node.uuidOrPassword.substringAfter(":"))
-                if (node.type == ProtocolType.NAIVE_H3) {
-                    obj.addProperty("quic", true)
-                }
             }
             else -> {
-                obj.addProperty("type", "socks")
-                obj.addProperty("server", node.server)
-                obj.addProperty("server_port", node.serverPort)
+                obj.addProperty("type", "direct")
             }
         }
         return obj

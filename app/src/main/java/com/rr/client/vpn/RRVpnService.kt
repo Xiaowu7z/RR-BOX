@@ -5,11 +5,9 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
-import com.rr.client.core.model.ProxyNode
 import com.rr.client.storage.TrafficHistoryEntity
 import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSampler
@@ -18,7 +16,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
 
 class RRVpnService : VpnService() {
     private val binder = LocalBinder()
@@ -26,7 +23,6 @@ class RRVpnService : VpnService() {
 
     private lateinit var notificationMgr: RRNotificationManager
     private var boxCore: BoxServiceWrapper? = null
-    private var tunInterface: ParcelFileDescriptor? = null
     private var trafficSampler: TrafficSampler? = null
 
     private var activeNodeTag = "Default"
@@ -82,42 +78,30 @@ class RRVpnService : VpnService() {
 
     private fun startVpn(configJson: String) {
         try {
-            val builder = Builder()
-                .setSession("RR Client")
-                .setMtu(9000)
-                .addAddress("172.19.0.1", 30)
-                .addRoute("0.0.0.0", 0)
-                .addDnsServer("1.1.1.1")
-
-            tunInterface = builder.establish()
-            val fd = tunInterface?.fd ?: -1
-
-            if (fd >= 0) {
-                boxCore?.startService(configJson, fd)
+            val started = boxCore?.startService(configJson, this) ?: false
+            if (started) {
                 _isRunning.value = true
 
-                // Start Foreground Notification
                 val initialNotif = notificationMgr.buildNotification(activeNodeTag, TrafficSpeed(), 0L)
                 startForeground(RRNotificationManager.NOTIFICATION_ID, initialNotif)
 
-                // Initialize monotonic traffic sampler
                 setupTrafficSampler()
+            } else {
+                stopVpn()
             }
         } catch (e: Exception) {
-            Log.e("RRVpnService", "Failed to establish VPN tunnel", e)
+            Log.e("RRVpnService", "Failed to start VPN tunnel", e)
             stopVpn()
         }
     }
 
     private fun setupTrafficSampler() {
-        // Query cumulative outbound proxy bytes
         var dummyDown = 0L
         var dummyUp = 0L
 
         trafficSampler = TrafficSampler(
             scope = serviceScope,
             queryProxyStats = {
-                // In production with native libbox: queries Libbox command client stats for "proxy" tag
                 Pair(dummyDown, dummyUp)
             },
             onBatchFlush = { session ->
@@ -155,13 +139,6 @@ class RRVpnService : VpnService() {
         trafficSampler = null
 
         boxCore?.stopService()
-        try {
-            tunInterface?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        tunInterface = null
-
         _isRunning.value = false
         stopForeground(Service.STOP_FOREGROUND_REMOVE)
         stopSelf()

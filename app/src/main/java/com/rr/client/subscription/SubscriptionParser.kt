@@ -36,12 +36,10 @@ object SubscriptionParser {
 
     fun parseContent(rawContent: String): List<ProxyNode> {
         val trimmed = rawContent.trim()
-        // Try Sing-box JSON format first
         if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             return parseSingBoxJson(trimmed)
         }
 
-        // Try Base64 or Line-by-line URI list
         val decoded = try {
             String(Base64.decode(trimmed, Base64.DEFAULT), Charsets.UTF_8)
         } catch (e: Exception) {
@@ -86,7 +84,7 @@ object SubscriptionParser {
                                 server = server,
                                 serverPort = port,
                                 uuidOrPassword = obj.get("uuid")?.asString ?: obj.get("password")?.asString ?: "",
-                                rawJson = obj.toString()
+                                rawJson = obj.toString() // Save exact JSON object from RRVPS!
                             )
                         )
                     }
@@ -108,9 +106,9 @@ object SubscriptionParser {
                     val userInfo = uri.userInfo ?: ""
                     val host = uri.host ?: ""
                     val port = if (uri.port > 0) uri.port else 443
-                    val pbk = uri.getQueryParameter("pbk") ?: ""
-                    val sid = uri.getQueryParameter("sid") ?: ""
-                    val sni = uri.getQueryParameter("sni") ?: ""
+                    val pbk = uri.getQueryParameter("pbk") ?: uri.getQueryParameter("publicKey") ?: ""
+                    val sid = uri.getQueryParameter("sid") ?: uri.getQueryParameter("shortId") ?: ""
+                    val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("serverName") ?: ""
                     val flow = uri.getQueryParameter("flow") ?: ""
                     ProxyNode(
                         id = "vless_${host}_$port",
@@ -131,6 +129,7 @@ object SubscriptionParser {
                     val port = if (uri.port > 0) uri.port else 443
                     val password = uri.userInfo ?: ""
                     val sni = uri.getQueryParameter("sni") ?: ""
+                    val ports = uri.getQueryParameter("ports") ?: ""
                     ProxyNode(
                         id = "hy2_${host}_$port",
                         tag = tag,
@@ -138,7 +137,8 @@ object SubscriptionParser {
                         server = host,
                         serverPort = port,
                         uuidOrPassword = password,
-                        sni = sni
+                        sni = sni,
+                        hoppingPorts = ports
                     )
                 }
                 else -> null
