@@ -3,8 +3,6 @@ package com.rr.client
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
-import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -124,7 +122,7 @@ class MainActivity : ComponentActivity() {
                         selected = selectedTab == 4,
                         onClick = { selectedTab = 4 },
                         icon = { Icon(Icons.Default.Settings, contentDescription = "设置") },
-        label = { Text("设置") }
+                        label = { Text("设置") }
                     )
                 }
             }
