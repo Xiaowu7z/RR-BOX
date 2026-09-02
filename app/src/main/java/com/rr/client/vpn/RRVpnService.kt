@@ -128,8 +128,8 @@ class RRVpnService : VpnService() {
             val upSpeed = (upDiff * 1000L) / deltaTimeMs
 
             val speed = TrafficSpeed(
-                proxyDownloadSpeed = downSpeed,
-                proxyUploadSpeed = upSpeed
+                uploadBytesPerSec = upSpeed,
+                downloadBytesPerSec = downSpeed
             )
             _currentSpeed.value = speed
 
