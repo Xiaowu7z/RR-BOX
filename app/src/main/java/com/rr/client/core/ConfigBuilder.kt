@@ -54,6 +54,7 @@ object ConfigBuilder {
             add("servers", servers)
 
             val rules = JsonArray().apply {
+                // 节点服务器域名直连解析
                 val domains = JsonArray().apply {
                     allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
                 }
@@ -61,17 +62,36 @@ object ConfigBuilder {
                     add("domain", domains)
                     addProperty("server", "dns-direct")
                 })
+                // 国内域名直连解析（用已知域名列表，不用 rule_set）
                 if (smartRouting) {
                     add(JsonObject().apply {
-                        val geosite = JsonArray().apply { add("geosite-cn") }
-                        add("rule_set", geosite)
+                        val cnDomains = JsonArray().apply {
+                            add("cn")
+                            add("baidu.com")
+                            add("qq.com")
+                            add("taobao.com")
+                            add("tmall.com")
+                            add("jd.com")
+                            add("alipay.com")
+                            add("aliyun.com")
+                            add("tencent.com")
+                            add("weixin.com")
+                            add("wechat.com")
+                            add("bilibili.com")
+                            add("163.com")
+                            add("126.com")
+                            add("sina.com")
+                            add("sohu.com")
+                            add("ifeng.com")
+                            add("zhihu.com")
+                        }
+                        add("domain", cnDomains)
                         addProperty("server", "dns-direct")
                     })
                 }
             }
             add("rules", rules)
             addProperty("final", "dns-remote")
-            addProperty("strategy", "prefer_ipv4")
         })
 
         // 3. Inbounds: TUN system stack
@@ -186,8 +206,51 @@ object ConfigBuilder {
 
                 if (smartRouting) {
                     add(JsonObject().apply {
-                        val ruleset = JsonArray().apply { add("geoip-cn"); add("geosite-cn") }
-                        add("rule_set", ruleset)
+                        // 用私有 + CGNAT IP 段粗略代表国内流量兜底直连
+                        // 精确分流由应用层（package_name）按需处理
+                        val cnIps = JsonArray().apply {
+                            // 国内主流云厂商常用 IP 段示例
+                            add("36.0.0.0/12")     // 部分电信
+                            add("39.0.0.0/8")      // 移动
+                            add("42.0.0.0/8")      // 部分国内
+                            add("43.0.0.0/8")
+                            add("47.74.0.0/16")    // 阿里云
+                            add("47.75.0.0/16")
+                            add("47.76.0.0/16")
+                            add("59.108.0.0/16")   // 联通
+                            add("101.6.0.0/16")    // 教育网
+                            add("103.0.0.0/8")
+                            add("106.11.0.0/16")   // 阿里云
+                            add("110.242.0.0/16")  // 百度云
+                            add("111.0.0.0/10")
+                            add("112.0.0.0/10")
+                            add("114.114.114.0/24")
+                            add("115.0.0.0/8")
+                            add("116.0.0.0/8")
+                            add("117.0.0.0/8")
+                            add("118.0.0.0/8")
+                            add("119.0.0.0/8")
+                            add("120.0.0.0/8")
+                            add("121.0.0.0/8")
+                            add("122.0.0.0/8")
+                            add("123.0.0.0/8")
+                            add("124.0.0.0/8")
+                            add("125.0.0.0/8")
+                            add("139.155.0.0/16")  // 腾讯云
+                            add("140.143.0.0/16")
+                            add("150.109.0.0/16")  // 腾讯云
+                            add("180.76.76.0/24")  // 百度
+                            add("202.0.0.0/8")
+                            add("203.0.0.0/8")
+                            add("211.0.0.0/8")
+                            add("218.0.0.0/8")
+                            add("219.0.0.0/8")
+                            add("220.0.0.0/8")
+                            add("221.0.0.0/8")
+                            add("222.0.0.0/8")
+                            add("223.0.0.0/8")
+                        }
+                        add("ip_cidr", cnIps)
                         addProperty("outbound", TAG_DIRECT)
                     })
                 }
