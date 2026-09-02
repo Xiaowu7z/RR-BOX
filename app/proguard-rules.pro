@@ -1,0 +1,6 @@
+-keep class io.nekohasekai.libbox.** { *; }
+-keep interface io.nekohasekai.libbox.** { *; }
+-keep class androidx.room.** { *; }
+-dontwarn androidx.room.**
+-keepclassmembers class com.rr.client.core.model.** { *; }
+-keepclassmembers class com.rr.client.subscription.model.** { *; }

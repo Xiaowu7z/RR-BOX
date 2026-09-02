@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">RR Client</string>
+    <string name="notification_channel_name">RR Client 运行状态</string>
+    <string name="notification_channel_desc">显示当前代理节点、实时速率及连接状态</string>
+    <string name="vpn_connected">已连接</string>
+    <string name="vpn_disconnected">未连接</string>
+    <string name="action_stop">断开连接</string>
+    <string name="action_switch">切换节点</string>
+</resources>
