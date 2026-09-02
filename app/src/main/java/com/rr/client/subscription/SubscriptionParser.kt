@@ -173,8 +173,6 @@ object SubscriptionParser {
     private fun objJsonObject(obj: com.google.gson.JsonObject, key: String): com.google.gson.JsonObject? =
         obj.get(key)?.asJsonObject
 
-    private fun JsonElement?.bool(key: String): Boolean = this?.asJsonObject?.get(key)?.asBoolean ?: false
-
     private fun portOf(obj: com.google.gson.JsonObject): Int =
         objInt(obj, "server_port").takeIf { it > 0 } ?: objInt(obj, "serverPort").takeIf { it > 0 } ?: 443
 
@@ -346,7 +344,7 @@ object SubscriptionParser {
         val obj = runCatching { JsonParser.parseString(decoded).asJsonObject }.getOrNull() ?: return null
         val host = obj.get("add")?.asString?.orEmpty() ?: return null
         val port = obj.get("port")?.asInt ?: 443
-        val rawTag = obj.get("ps")?.asString?.orEmpty().ifEmpty { obj.get("name")?.asString?.orEmpty() ?: "" }
+        val rawTag = obj.get("ps")?.asString?.orEmpty().ifEmpty { obj.get("name")?.asString?.orEmpty() }.orEmpty()
         val tag = Uri.decode(rawTag.ifEmpty { "VMess-$host" })
         val network = obj.get("net")?.asString?.orEmpty()?.lowercase() ?: "tcp"
         val isWss = network == "ws" || network == "grpc"
@@ -358,7 +356,7 @@ object SubscriptionParser {
             server = host,
             serverPort = port,
             uuidOrPassword = obj.get("id")?.asString?.orEmpty() ?: "",
-            sni = obj.get("sni")?.asString?.orEmpty().ifEmpty { obj.get("host")?.asString?.orEmpty() ?: "" },
+            sni = obj.get("sni")?.asString?.orEmpty().ifEmpty { obj.get("host")?.asString?.orEmpty() }.orEmpty(),
             network = network,
             path = obj.get("path")?.asString?.orEmpty() ?: "",
             host = obj.get("host")?.asString?.orEmpty() ?: "",
