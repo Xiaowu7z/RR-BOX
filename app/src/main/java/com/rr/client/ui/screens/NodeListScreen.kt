@@ -9,20 +9,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.core.model.friendlyLabel
 import com.rr.client.ui.theme.*
 
 @Composable
 fun NodeListScreen(
     nodes: List<ProxyNode>,
     selectedNodeId: String?,
-    onSelectNode: (ProxyNode) -> Unit
+    onSelectNode: (ProxyNode) -> Unit,
+    onGoToSubscription: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -40,11 +44,23 @@ fun NodeListScreen(
 
         if (nodes.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(text = "暂无节点，请先在订阅页面导入", color = TextSecondary)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(text = "暂无节点", color = TextSecondary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = onGoToSubscription,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                    ) {
+                        Icon(Icons.Default.CloudDownload, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("去添加订阅", color = DarkBackground, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(nodes) { node ->
+                items(nodes, key = { it.id }) { node ->
                     val isSelected = node.id == selectedNodeId
                     Card(
                         modifier = Modifier
@@ -58,7 +74,7 @@ fun NodeListScreen(
                     ) {
                         Row(
                             modifier = Modifier
-                                .padding(16.dp)
+                                .padding(14.dp)
                                 .fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -68,13 +84,23 @@ fun NodeListScreen(
                                     text = node.tag,
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimary
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = "${node.server}:${node.serverPort}",
+                                    text = buildString {
+                                        if (!node.profileName.isNullOrBlank()) {
+                                            append(node.profileName)
+                                            append(" · ")
+                                        }
+                                        append("${node.server}:${node.serverPort}")
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary
+                                    color = TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -83,7 +109,7 @@ fun NodeListScreen(
                                     color = DarkBackground
                                 ) {
                                     Text(
-                                        text = node.type.name,
+                                        text = node.type.friendlyLabel(),
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = CyanSecondary

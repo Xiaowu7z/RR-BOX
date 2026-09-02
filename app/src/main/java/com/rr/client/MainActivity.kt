@@ -16,19 +16,20 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
 import com.rr.client.core.model.AppRouteConfig
-import com.rr.client.core.model.ProxyNode
-import com.rr.client.core.model.ProtocolType
 import com.rr.client.routing.AppManager
 import com.rr.client.subscription.SubscriptionFetcher
-import com.rr.client.subscription.model.SubscriptionUserInfo
+import com.rr.client.subscription.model.SubProfile
 import com.rr.client.ui.screens.*
 import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.RRClientTheme
 import com.rr.client.vpn.RRVpnService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : ComponentActivity() {
     private val vpnLauncher = registerForActivityResult(
@@ -60,34 +61,137 @@ class MainActivity : ComponentActivity() {
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
         val currentSpeed by RRVpnService.currentSpeed.collectAsState()
         val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
-        var nodes by remember {
-            mutableStateOf(
-                listOf(
-                    ProxyNode("1", "日本 HY2 (直连高速)", ProtocolType.HYSTERIA2, "jp.rrvps.net", 443, "rr-pass-sample", sni = "jp.rrvps.net"),
-                    ProxyNode("2", "洛杉矶 VLESS Reality", ProtocolType.VLESS_REALITY, "la.rrvps.net", 443, "3b6007dd-b8e2-4ed2-8b9f-300a6da02114", realityPublicKey = "Lv58KCuRO4Fz4rXi9fjykxiKetY50g84kCwiOUbrwVw", realityShortId = "63a64eb3", sni = "apple.com"),
-                    ProxyNode("3", "香港 TUIC v5", ProtocolType.TUIC_V5, "hk.rrvps.net", 8443, "3b6007dd-b8e2-4ed2-8b9f-300a6da02114", sni = "hk.rrvps.net")
-                )
-            )
-        }
-        var selectedNodeId by remember { mutableStateOf("1") }
-        val selectedNode = nodes.find { it.id == selectedNodeId } ?: nodes.firstOrNull()
-        var userInfo by remember {
-            mutableStateOf(
-                SubscriptionUserInfo(
-                    upload = 5_000_000_000L,
-                    download = 45_000_000_000L,
-                    total = 500_000_000_000L,
-                    expireTimestamp = System.currentTimeMillis() / 1000L + 86400 * 30
-                )
-            )
-        }
-        var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
+
+        val db = RRApplication.instance.database
+        val prefs = RRApplication.instance.preferencesManager
+
+        // ------- 订阅组 / 节点（无任何内置预设，全部来自用户添加的订阅） -------
+        var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
+        var selectedNodeId by remember { mutableStateOf<String?>(null) }
         var smartRouting by remember { mutableStateOf(true) }
         var perAppMode by remember { mutableStateOf("ALL") }
+        var refreshingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+        var addingProfile by remember { mutableStateOf(false) }
+        var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
 
+        val allNodes = remember(subProfiles) {
+            subProfiles.flatMap { it.nodes }
+        }
+        val selectedNode = allNodes.find { it.id == selectedNodeId }
+        val selectedProfile = subProfiles.firstOrNull { p -> p.nodes.any { it.id == selectedNodeId } }
+
+        // 首次进入：加载本地订阅数据与偏好
         LaunchedEffect(Unit) {
+            val loadedProfiles = withContext(Dispatchers.IO) {
+                db.profileDao().getAllProfiles().map { SubProfile.fromEntity(it) }
+            }
+            subProfiles = loadedProfiles
+
+            val storedId = runCatching { prefs.selectedNodeId.first() }.getOrNull()
+            smartRouting = runCatching { prefs.smartRouting.first() }.getOrDefault(true)
+            perAppMode = runCatching { prefs.perAppMode.first() }.getOrDefault("ALL")
+
+            val nodesNow = loadedProfiles.flatMap { it.nodes }
+            val resolved = if (nodesNow.any { it.id == storedId }) {
+                storedId
+            } else {
+                nodesNow.firstOrNull()?.id
+            }
+            selectedNodeId = resolved
+            if (resolved != null) {
+                prefs.setSelectedNodeId(resolved)
+            }
+
             val appMgr = AppManager(this@MainActivity)
-            apps = appMgr.getInstalledApps(includeSystem = false)
+            apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
+        }
+
+        fun refreshFromProfiles(updated: List<SubProfile>) {
+            subProfiles = updated
+            val nodesNow = updated.flatMap { it.nodes }
+            val current = selectedNodeId
+            val resolved = if (nodesNow.any { it.id == current }) current
+            else nodesNow.firstOrNull()?.id
+            if (resolved != current) {
+                selectedNodeId = resolved
+                if (resolved != null) {
+                    lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
+                }
+            }
+        }
+
+        fun toast(text: String) =
+            Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
+
+        fun addProfile(name: String, url: String) {
+            val trimmedUrl = url.trim()
+            if (trimmedUrl.isEmpty()) {
+                toast("请填写订阅链接")
+                return
+            }
+            addingProfile = true
+            val profileId = UUID.randomUUID().toString().substring(0, 8)
+            val profileName = name.trim().ifEmpty { "订阅 ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())}" }
+            lifecycleScope.launch {
+                val fetcher = SubscriptionFetcher()
+                val result = fetcher.fetchSubscription(trimmedUrl, profileId, profileName)
+                addingProfile = false
+                result.onSuccess { (newNodes, userInfo) ->
+                    val profile = SubProfile(
+                        id = profileId,
+                        name = profileName,
+                        url = trimmedUrl,
+                        lastUpdated = System.currentTimeMillis(),
+                        nodes = newNodes,
+                        userInfo = userInfo
+                    )
+                    withContext(Dispatchers.IO) { db.profileDao().insertProfile(profile.toEntity()) }
+                    refreshFromProfiles(subProfiles + profile)
+                    toast("「$profileName」同步成功：${newNodes.size} 个节点")
+                }.onFailure { e ->
+                    toast("添加订阅失败：${e.message ?: "网络错误"}")
+                }
+            }
+        }
+
+        fun refreshProfile(profileId: String) {
+            val existing = subProfiles.find { it.id == profileId } ?: return
+            refreshingIds = refreshingIds + profileId
+            lifecycleScope.launch {
+                val fetcher = SubscriptionFetcher()
+                val result = fetcher.fetchSubscription(existing.url, existing.id, existing.name)
+                refreshingIds = refreshingIds - profileId
+                result.onSuccess { (newNodes, userInfo) ->
+                    val updated = existing.copy(
+                        lastUpdated = System.currentTimeMillis(),
+                        nodes = newNodes,
+                        userInfo = userInfo
+                    )
+                    withContext(Dispatchers.IO) { db.profileDao().insertProfile(updated.toEntity()) }
+                    refreshFromProfiles(subProfiles.map { if (it.id == profileId) updated else it })
+                    toast("「${existing.name}」更新成功：${newNodes.size} 个节点")
+                }.onFailure { e ->
+                    toast("「${existing.name}」更新失败：${e.message ?: "网络错误"}")
+                }
+            }
+        }
+
+        fun deleteProfile(profileId: String) {
+            val existing = subProfiles.find { it.id == profileId } ?: return
+            if (isVpnRunning) {
+                toast("请先断开连接再删除订阅")
+                return
+            }
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { db.profileDao().deleteProfile(existing.toEntity()) }
+                refreshFromProfiles(subProfiles.filterNot { it.id == profileId })
+                toast("已删除订阅「${existing.name}」")
+            }
+        }
+
+        fun selectNode(nodeId: String) {
+            selectedNodeId = nodeId
+            lifecycleScope.launch { prefs.setSelectedNodeId(nodeId) }
         }
 
         Scaffold(
@@ -133,7 +237,8 @@ class MainActivity : ComponentActivity() {
                         isConnected = isVpnRunning,
                         currentSpeed = currentSpeed,
                         sessionTraffic = sessionTraffic,
-                        userInfo = userInfo,
+                        userInfo = selectedProfile?.userInfo,
+                        profileName = selectedProfile?.name,
                         selectedNode = selectedNode,
                         onToggleVpn = {
                             if (isVpnRunning) {
@@ -142,54 +247,64 @@ class MainActivity : ComponentActivity() {
                                 }
                                 startService(stopIntent)
                             } else {
-                                selectedNode?.let { node ->
+                                val targetNode = selectedNode ?: allNodes.firstOrNull()
+                                if (targetNode == null) {
+                                    toast("还没有任何节点：请先到「订阅」页添加订阅链接并同步")
+                                    selectedTab = 3
+                                    return@onToggleVpn
+                                }
+                                if (selectedNode == null && targetNode != null) {
+                                    selectNode(targetNode.id)
+                                }
+                                try {
                                     val configJson = ConfigBuilder.buildSingBoxConfig(
-                                        selectedNode = node,
-                                        allNodes = nodes,
+                                        selectedNode = targetNode,
+                                        allNodes = allNodes,
                                         appRoutes = apps,
                                         smartRouting = smartRouting
                                     )
-                                    startVpnWithPermissionCheck(configJson, node.tag, node.id)
+                                    startVpnWithPermissionCheck(configJson, targetNode.tag, targetNode.id)
+                                } catch (e: Exception) {
+                                    toast("无法连接：${e.message ?: "配置生成失败"}")
                                 }
                             }
                         },
                         onNavigateToNodes = { selectedTab = 1 }
                     )
                     1 -> NodeListScreen(
-                        nodes = nodes,
+                        nodes = allNodes,
                         selectedNodeId = selectedNodeId,
                         onSelectNode = { node ->
-                            selectedNodeId = node.id
-                            Toast.makeText(this@MainActivity, "已切换节点: ${node.tag}", Toast.LENGTH_SHORT).show()
-                        }
+                            selectNode(node.id)
+                            toast("已切换节点：${node.tag}")
+                        },
+                        onGoToSubscription = { selectedTab = 3 }
                     )
                     2 -> AppRoutingScreen(
                         apps = apps,
                         perAppMode = perAppMode,
-                        onModeChanged = { perAppMode = it },
+                        onModeChanged = {
+                            perAppMode = it
+                            lifecycleScope.launch { prefs.setPerAppMode(it) }
+                        },
                         onAppRouteChanged = { updatedApp ->
                             apps = apps.map { if (it.packageName == updatedApp.packageName) updatedApp else it }
                         }
                     )
                     3 -> SubscriptionScreen(
-                        initialUrl = "https://sub.rrvps.net/api/v1/client/subscribe?token=demo",
-                        onFetchSubscription = { url ->
-                            lifecycleScope.launch {
-                                val fetcher = SubscriptionFetcher()
-                                val result = fetcher.fetchSubscription(url)
-                                result.onSuccess { (newNodes, newUserInfo) ->
-                                    nodes = newNodes
-                                    userInfo = newUserInfo
-                                    Toast.makeText(this@MainActivity, "成功同步 ${newNodes.size} 个节点", Toast.LENGTH_SHORT).show()
-                                }.onFailure { e ->
-                                    Toast.makeText(this@MainActivity, "订阅更新失败: ${e.message}", Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        }
+                        profiles = subProfiles,
+                        busyIds = refreshingIds,
+                        adding = addingProfile,
+                        onAddProfile = { name, url -> addProfile(name, url) },
+                        onRefreshProfile = { id -> refreshProfile(id) },
+                        onDeleteProfile = { id -> deleteProfile(id) }
                     )
                     4 -> SettingsScreen(
                         smartRouting = smartRouting,
-                        onSmartRoutingChanged = { smartRouting = it }
+                        onSmartRoutingChanged = {
+                            smartRouting = it
+                            lifecycleScope.launch { prefs.setSmartRouting(it) }
+                        }
                     )
                 }
             }

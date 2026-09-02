@@ -7,6 +7,7 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
+import android.widget.Toast
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.storage.TrafficHistoryEntity
@@ -105,10 +106,14 @@ class RRVpnService : VpnService() {
             if (started) {
                 _isRunning.value = true
             } else {
+                val reason = boxCore?.lastError
+                    ?: "sing-box 内核未能启动"
+                Toast.makeText(this, "连接失败：$reason", Toast.LENGTH_LONG).show()
                 stopVpn()
             }
         } catch (e: Exception) {
             Log.e("RRVpnService", "Failed to start VPN tunnel", e)
+            Toast.makeText(this, "连接失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             stopVpn()
         }
     }

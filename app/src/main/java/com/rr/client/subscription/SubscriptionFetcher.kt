@@ -14,7 +14,11 @@ class SubscriptionFetcher(
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 ) {
-    suspend fun fetchSubscription(url: String): Result<Pair<List<ProxyNode>, SubscriptionUserInfo>> = withContext(Dispatchers.IO) {
+    suspend fun fetchSubscription(
+        url: String,
+        profileId: String,
+        profileName: String
+    ): Result<Pair<List<ProxyNode>, SubscriptionUserInfo>> = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
                 .url(url)
@@ -29,10 +33,12 @@ class SubscriptionFetcher(
             val body = response.body?.string() ?: ""
             val userInfoHeader = response.header("Subscription-Userinfo")
             val userInfo = SubscriptionParser.parseUserInfoHeader(userInfoHeader)
-            val nodes = SubscriptionParser.parseContent(body)
+            val nodes = SubscriptionParser.parseContent(body, profileId, profileName)
 
             if (nodes.isEmpty()) {
-                return@withContext Result.failure(Exception("Subscription returned 0 valid proxy nodes."))
+                return@withContext Result.failure(
+                    Exception("订阅返回 0 个可用节点（链接是否有效/格式是否受支持？）")
+                )
             }
 
             Result.success(Pair(nodes, userInfo))

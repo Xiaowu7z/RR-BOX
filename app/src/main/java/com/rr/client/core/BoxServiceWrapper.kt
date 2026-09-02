@@ -52,6 +52,32 @@ class BoxServiceWrapper(
     private var isRunning = false
     private var isStopping = false
 
+    /** 最近的内核/运行日志（错误诊断用） */
+    private val recentLogs = ArrayDeque<String>()
+
+    /** 最近一次启动失败的详细原因（供 UI 展示） */
+    @Volatile
+    var lastError: String? = null
+        private set
+
+    private fun recordLog(line: String) {
+        synchronized(recentLogs) {
+            recentLogs.addLast(line)
+            while (recentLogs.size > 12) recentLogs.removeFirst()
+        }
+        onLogReceived(line)
+    }
+
+    private fun failWith(message: String?): Boolean {
+        val tail = synchronized(recentLogs) {
+            recentLogs.takeLast(6).filter { it.isNotBlank() }.joinToString("\n")
+        }
+        lastError = listOfNotNull(message?.takeIf { it.isNotBlank() }, tail.takeIf { it.isNotBlank() })
+            .joinToString("\n").ifBlank { "未知错误" }
+        Log.e(TAG, "sing-box start failed: $lastError")
+        return false
+    }
+
     fun startService(configJson: String, vpn: VpnService): Boolean {
         // If service is already running, just return true
         if (isRunning && commandServer != null && commandClient != null) {
@@ -61,6 +87,8 @@ class BoxServiceWrapper(
 
         // Stop any existing service first
         stopService()
+        lastError = null
+        recentLogs.clear()
 
         return try {
             vpnService = vpn
@@ -86,8 +114,10 @@ class BoxServiceWrapper(
             true
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to start sing-box service", e)
-            onLogReceived("启动失败: ${e.message ?: e.javaClass.simpleName}")
+            val detail = e.message?.let { "启动失败: $it" }
+            recordLog(detail ?: "启动失败: ${e.javaClass.simpleName}")
             stopService()
+            failWith(detail)
             false
         }
     }
@@ -364,7 +394,7 @@ class BoxServiceWrapper(
 
     override fun writeLogs(messageList: LogIterator) {
         while (messageList.hasNext()) {
-            onLogReceived(messageList.next().message)
+            recordLog(messageList.next().message)
         }
     }
 

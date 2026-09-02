@@ -21,6 +21,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.core.model.friendlyLabel
 import com.rr.client.subscription.model.SubscriptionUserInfo
 import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSampler
@@ -35,6 +36,7 @@ fun DashboardScreen(
     currentSpeed: TrafficSpeed,
     sessionTraffic: SessionTraffic,
     userInfo: SubscriptionUserInfo?,
+    profileName: String?,
     selectedNode: ProxyNode?,
     onToggleVpn: () -> Unit,
     onNavigateToNodes: () -> Unit
@@ -81,7 +83,7 @@ fun DashboardScreen(
                     color = DarkSurfaceVariant
                 ) {
                     Text(
-                        text = selectedNode?.type?.name ?: "NONE",
+                        text = selectedNode?.type?.friendlyLabel() ?: "未导入",
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = CyanPrimary
@@ -228,7 +230,7 @@ fun DashboardScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = "RRVPS 订阅额度",
+                        text = if (!profileName.isNullOrBlank()) "订阅额度 · $profileName" else "订阅额度",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )

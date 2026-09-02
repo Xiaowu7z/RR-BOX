@@ -5,12 +5,23 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.rr.client.core.model.AppRouteConfig
-import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.ProtocolType
+import com.rr.client.core.model.ProxyNode
 
 object ConfigBuilder {
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
+    private const val TAG_PROXY = "proxy"
+    private const val TAG_DIRECT = "direct"
+    private const val TAG_BLOCK = "block"
+    private const val TAG_DNS_OUT = "dns-out"
+    private val RESERVED_TAGS = setOf(TAG_PROXY, TAG_DIRECT, TAG_BLOCK, TAG_DNS_OUT)
+
+    /**
+     * 生成 sing-box 配置。
+     * 不支持/缺失关键字段的节点会被安全跳过（不作为出站生成），
+     * 仅当选中节点本身无法生成时抛出异常，由 UI 层给出提示。
+     */
     fun buildSingBoxConfig(
         selectedNode: ProxyNode,
         allNodes: List<ProxyNode>,
@@ -26,28 +37,27 @@ object ConfigBuilder {
             addProperty("timestamp", true)
         })
 
-        // 2. DNS: Ensure direct DNS can resolve proxy server domain to prevent deadlock
+        // 2. DNS: 代理服务器域名走直连解析防死锁
         root.add("dns", JsonObject().apply {
             val servers = JsonArray().apply {
                 add(JsonObject().apply {
                     addProperty("tag", "dns-direct")
                     addProperty("address", "223.5.5.5")
-                    addProperty("detour", "direct")
+                    addProperty("detour", TAG_DIRECT)
                 })
                 add(JsonObject().apply {
                     addProperty("tag", "dns-remote")
                     addProperty("address", "https://1.1.1.1/dns-query")
-                    addProperty("detour", "proxy")
+                    addProperty("detour", TAG_PROXY)
                 })
             }
             add("servers", servers)
 
             val rules = JsonArray().apply {
-                // Outbound server domains MUST be resolved by direct DNS
+                val domains = JsonArray().apply {
+                    allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
+                }
                 add(JsonObject().apply {
-                    val domains = JsonArray().apply {
-                        allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
-                    }
                     add("domain", domains)
                     addProperty("server", "dns-direct")
                 })
@@ -80,35 +90,46 @@ object ConfigBuilder {
             })
         })
 
-        // 4. Outbounds: Pass exact node parameters from subscription
+        // 4. Outbounds: 选中节点作为默认代理，其余节点供分流选择
+        val usedTags = mutableSetOf<String>()
+
+        // 先构建选中节点（tag 固定为 proxy）
+        val selectedOutbound = buildOutboundJson(selectedNode)
+            ?: throw IllegalArgumentException(
+                "选中节点「${selectedNode.tag}」缺少可用的协议配置，无法连接。请换一个节点。"
+            )
+        selectedOutbound.addProperty("tag", TAG_PROXY)
+        usedTags.add(TAG_PROXY)
+
         root.add("outbounds", JsonArray().apply {
-            // Selected node as the default proxy
-            add(buildOutboundJson(selectedNode).apply { addProperty("tag", "proxy") })
-
-            // Other nodes
-            allNodes.forEach { node ->
-                if (node.id != selectedNode.id) {
-                    add(buildOutboundJson(node))
-                }
-            }
-
-            // Direct
+            add(selectedOutbound)
             add(JsonObject().apply {
                 addProperty("type", "direct")
-                addProperty("tag", "direct")
+                addProperty("tag", TAG_DIRECT)
             })
-
-            // Block
             add(JsonObject().apply {
                 addProperty("type", "block")
-                addProperty("tag", "block")
+                addProperty("tag", TAG_BLOCK)
             })
-
-            // DNS Outbound
             add(JsonObject().apply {
                 addProperty("type", "dns")
-                addProperty("tag", "dns-out")
+                addProperty("tag", TAG_DNS_OUT)
             })
+
+            allNodes.forEach { node ->
+                if (node.id == selectedNode.id) return@forEach
+                val built = buildOutboundJson(node) ?: return@forEach
+                // 节点 tag 可能重复（不同订阅同名）或撞保留字，做唯一化
+                var tag = node.tag.ifBlank { "Node-${node.server}" }
+                if (tag in usedTags || tag in RESERVED_TAGS) {
+                    var suffix = 2
+                    while ("${tag}_$suffix" in usedTags) suffix++
+                    tag = "${tag}_$suffix"
+                }
+                built.addProperty("tag", tag)
+                usedTags.add(tag)
+                add(built)
+            }
         })
 
         // 5. Route
@@ -117,26 +138,26 @@ object ConfigBuilder {
                 // DNS Hijacking
                 add(JsonObject().apply {
                     addProperty("protocol", "dns")
-                    addProperty("outbound", "dns-out")
+                    addProperty("outbound", TAG_DNS_OUT)
                 })
 
-                // Server domain/IP direct bypass to prevent routing loop
+                // 服务器域名/IP 直连防环路
                 add(JsonObject().apply {
                     val serverList = JsonArray().apply {
                         allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
                     }
                     add("domain", serverList)
-                    addProperty("outbound", "direct")
+                    addProperty("outbound", TAG_DIRECT)
                 })
 
-                // Per-App routing
+                // 分应用路由
                 appRoutes.forEach { appRoute ->
                     when (appRoute.routeMode) {
-                        "DIRECT" -> {
+                        "DIRECT", "BYPASS" -> {
                             add(JsonObject().apply {
                                 val pkg = JsonArray().apply { add(appRoute.packageName) }
                                 add("package_name", pkg)
-                                addProperty("outbound", "direct")
+                                addProperty("outbound", TAG_DIRECT)
                             })
                         }
                         "PROXY_NODE" -> {
@@ -151,7 +172,7 @@ object ConfigBuilder {
                     }
                 }
 
-                // Private IPs & LAN
+                // 私有 IP 与局域网直连
                 add(JsonObject().apply {
                     val ip = JsonArray().apply {
                         add("10.0.0.0/8")
@@ -160,20 +181,20 @@ object ConfigBuilder {
                         add("127.0.0.0/8")
                     }
                     add("ip_cidr", ip)
-                    addProperty("outbound", "direct")
+                    addProperty("outbound", TAG_DIRECT)
                 })
 
                 if (smartRouting) {
                     add(JsonObject().apply {
                         val ruleset = JsonArray().apply { add("geoip-cn"); add("geosite-cn") }
                         add("rule_set", ruleset)
-                        addProperty("outbound", "direct")
+                        addProperty("outbound", TAG_DIRECT)
                     })
                 }
 
-                // Default
+                // 兜底走代理
                 add(JsonObject().apply {
-                    addProperty("outbound", "proxy")
+                    addProperty("outbound", TAG_PROXY)
                 })
             }
             add("rules", rules)
@@ -183,60 +204,189 @@ object ConfigBuilder {
         return gson.toJson(root)
     }
 
-    private fun buildOutboundJson(node: ProxyNode): JsonObject {
-        // If rawJson from RRVPS subscription is available, directly reuse it verbatim!
+    /** 返回 null 表示该节点无法生成可用出站（自动跳过，不影响其他节点） */
+    private fun buildOutboundJson(node: ProxyNode): JsonObject? {
+        // RRVPS sing-box JSON 订阅原文优先透传
         if (node.rawJson.isNotBlank()) {
             try {
                 val parsed = JsonParser.parseString(node.rawJson).asJsonObject
-                parsed.addProperty("tag", node.tag)
+                if (parsed.get("type")?.asString.isNullOrBlank()) return null
+                parsed.remove("tag")
                 return parsed
             } catch (e: Exception) {
-                // fallback
+                // fallthrough，尝试手写
             }
         }
 
         val obj = JsonObject()
         obj.addProperty("tag", node.tag)
 
-        when (node.type) {
-            ProtocolType.VLESS_REALITY -> {
-                obj.addProperty("type", "vless")
-                obj.addProperty("server", node.server)
-                obj.addProperty("server_port", node.serverPort)
-                obj.addProperty("uuid", node.uuidOrPassword)
-                if (node.flow.isNotEmpty()) obj.addProperty("flow", node.flow)
-                obj.add("tls", JsonObject().apply {
+        return try {
+            when (node.type) {
+                ProtocolType.VLESS_REALITY, ProtocolType.VLESS_TLS -> buildVless(obj, node)
+                ProtocolType.HYSTERIA2 -> buildHysteria2(obj, node)
+                ProtocolType.TUIC_V5 -> buildTuic(obj, node)
+                ProtocolType.VMESS_TLS, ProtocolType.VMESS_WS_ARGO -> buildVmess(obj, node)
+                ProtocolType.TROJAN -> buildTrojan(obj, node)
+                ProtocolType.SHADOWSOCKS -> buildShadowsocks(obj, node)
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun buildVless(obj: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
+        obj.addProperty("type", "vless")
+        obj.addProperty("server", node.server)
+        obj.addProperty("server_port", node.serverPort)
+        obj.addProperty("uuid", node.uuidOrPassword)
+        if (node.flow.isNotEmpty()) obj.addProperty("flow", node.flow)
+        addTransport(obj, node)
+        if (node.tlsEnabled) {
+            val tls = JsonObject().apply { addProperty("enabled", true) }
+            if (node.sni.isNotEmpty()) tls.addProperty("server_name", node.sni)
+            if (node.type == ProtocolType.VLESS_REALITY) {
+                if (node.realityPublicKey.isBlank()) return null // reality 缺公钥不可用
+                tls.add("utls", JsonObject().apply {
                     addProperty("enabled", true)
-                    addProperty("server_name", if (node.sni.isNotEmpty()) node.sni else "apple.com")
-                    add("utls", JsonObject().apply {
-                        addProperty("enabled", true)
-                        addProperty("fingerprint", "chrome")
-                    })
-                    add("reality", JsonObject().apply {
-                        addProperty("enabled", true)
-                        addProperty("public_key", node.realityPublicKey)
-                        addProperty("short_id", node.realityShortId)
-                    })
+                    addProperty("fingerprint", "chrome")
+                })
+                tls.add("reality", JsonObject().apply {
+                    addProperty("enabled", true)
+                    addProperty("public_key", node.realityPublicKey)
+                    addProperty("short_id", node.realityShortId.ifBlank { "" })
+                })
+            } else {
+                // 普通 TLS（可选 utls 指纹，缺省即标准指纹）
+                tls.add("utls", JsonObject().apply {
+                    addProperty("enabled", true)
+                    addProperty("fingerprint", "chrome")
                 })
             }
-            ProtocolType.HYSTERIA2 -> {
-                obj.addProperty("type", "hysteria2")
-                obj.addProperty("server", node.server)
-                obj.addProperty("server_port", node.serverPort)
-                obj.addProperty("password", node.uuidOrPassword)
-                if (node.hoppingPorts.isNotEmpty()) {
-                    obj.addProperty("ports", node.hoppingPorts)
-                }
-                obj.add("tls", JsonObject().apply {
-                    addProperty("enabled", true)
-                    addProperty("insecure", true)
-                    if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
-                })
-            }
-            else -> {
-                obj.addProperty("type", "direct")
-            }
+            obj.add("tls", tls)
         }
         return obj
+    }
+
+    private fun buildHysteria2(obj: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
+        obj.addProperty("type", "hysteria2")
+        obj.addProperty("server", node.server)
+        obj.addProperty("server_port", node.serverPort)
+        obj.addProperty("password", node.uuidOrPassword)
+        if (node.hoppingPorts.isNotEmpty()) {
+            obj.addProperty("ports", node.hoppingPorts)
+        }
+        if (node.obfs.isNotEmpty()) {
+            val obfs = JsonObject().apply {
+                addProperty("type", node.obfs)
+                if (node.obfsPassword.isNotEmpty()) addProperty("password", node.obfsPassword)
+            }
+            obj.add("obfs", obfs)
+        }
+        obj.add("tls", JsonObject().apply {
+            addProperty("enabled", true)
+            if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
+            // hy2 惯例多数自签证书，insecure 兜底，避免握手失败
+            addProperty("insecure", true)
+        })
+        return obj
+    }
+
+    private fun buildTuic(obj: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
+        obj.addProperty("type", "tuic")
+        obj.addProperty("server", node.server)
+        obj.addProperty("server_port", node.serverPort)
+        obj.addProperty("uuid", node.uuidOrPassword)
+        if (node.extraPassword.isNotEmpty()) obj.addProperty("password", node.extraPassword)
+        if (node.alpn.isNotEmpty()) {
+            val alpn = JsonArray()
+            node.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { alpn.add(it) }
+            if (alpn.size() > 0) obj.add("alpn", alpn)
+        }
+        obj.add("tls", JsonObject().apply {
+            addProperty("enabled", true)
+            if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
+            addProperty("insecure", true)
+        })
+        return obj
+    }
+
+    private fun buildVmess(obj: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
+        obj.addProperty("type", "vmess")
+        obj.addProperty("server", node.server)
+        obj.addProperty("server_port", node.serverPort)
+        obj.addProperty("uuid", node.uuidOrPassword)
+        addTransport(obj, node)
+        if (node.tlsEnabled) {
+            obj.add("tls", JsonObject().apply {
+                addProperty("enabled", true)
+                if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
+                add("utls", JsonObject().apply {
+                    addProperty("enabled", true)
+                    addProperty("fingerprint", "chrome")
+                })
+            })
+        }
+        return obj
+    }
+
+    private fun buildTrojan(obj: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
+        obj.addProperty("type", "trojan")
+        obj.addProperty("server", node.server)
+        obj.addProperty("server_port", node.serverPort)
+        obj.addProperty("password", node.uuidOrPassword)
+        addTransport(obj, node)
+        obj.add("tls", JsonObject().apply {
+            addProperty("enabled", true)
+            if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
+            if (node.alpn.isNotEmpty()) {
+                val alpn = JsonArray()
+                node.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { alpn.add(it) }
+                if (alpn.size() > 0) add("alpn", alpn)
+            }
+        })
+        return obj
+    }
+
+    private fun buildShadowsocks(obj: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.uuidOrPassword.isBlank() || node.ssMethod.isBlank() || node.server.isBlank()) return null
+        obj.addProperty("type", "shadowsocks")
+        obj.addProperty("server", node.server)
+        obj.addProperty("server_port", node.serverPort)
+        obj.addProperty("method", node.ssMethod)
+        obj.addProperty("password", node.uuidOrPassword)
+        return obj
+    }
+
+    /** ws/grpc/tcp 传输层（vmess/trojan/vless 共用） */
+    private fun addTransport(obj: JsonObject, node: ProxyNode) {
+        when (node.network.lowercase()) {
+            "ws" -> {
+                val transport = JsonObject().apply {
+                    addProperty("type", "ws")
+                    if (node.path.isNotEmpty()) addProperty("path", node.path)
+                    if (node.host.isNotEmpty()) {
+                        add("headers", JsonObject().apply { addProperty("Host", node.host) })
+                    }
+                }
+                obj.add("transport", transport)
+            }
+            "grpc" -> {
+                val transport = JsonObject().apply {
+                    addProperty("type", "grpc")
+                    if (node.path.isNotEmpty()) addProperty("service_name", node.path)
+                }
+                obj.add("transport", transport)
+            }
+            else -> {
+                // tcp: 无 transport 块
+            }
+        }
     }
 }
