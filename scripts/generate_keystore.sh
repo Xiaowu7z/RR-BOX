@@ -1,44 +1,79 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "=== RR Client 安全签名生成工具 ==="
-KEYSTORE_FILE="release.keystore"
+umask 077
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+SECRET_DIR="$PROJECT_ROOT/local-secrets"
+KEYSTORE_FILE="$SECRET_DIR/rr-client-release.jks"
+BASE64_FILE="$SECRET_DIR/RR_KEYSTORE_BASE64.txt"
 ALIAS="rrclient"
 
-if [ -f "$KEYSTORE_FILE" ]; then
-    echo "错误: $KEYSTORE_FILE 已存在于当前目录，避免覆盖。"
-    exit 1
+mkdir -p "$SECRET_DIR"
+
+if [[ -e "$KEYSTORE_FILE" || -e "$BASE64_FILE" ]]; then
+  echo "错误：签名文件已经存在，拒绝覆盖："
+  echo "  $KEYSTORE_FILE"
+  echo "  $BASE64_FILE"
+  exit 1
 fi
 
-read -s -p "请输入新的 Keystore 密码: " PASS
+read -r -s -p "请输入新的 Keystore 密码（至少 12 个字符）: " password
 echo
-read -s -p "请再次输入密码确认: " PASS_CONFIRM
+read -r -s -p "请再次输入密码确认: " password_confirm
 echo
 
-if [ "$PASS" != "$PASS_CONFIRM" ]; then
-    echo "两次密码输入不一致！"
-    exit 1
+if [[ "$password" != "$password_confirm" ]]; then
+  echo "错误：两次密码输入不一致。"
+  exit 1
 fi
 
-keytool -genkeypair -v \
+if (( ${#password} < 12 )); then
+  echo "错误：密码长度必须至少为 12 个字符。"
+  exit 1
+fi
+
+keytool -genkeypair \
   -keystore "$KEYSTORE_FILE" \
+  -storetype PKCS12 \
   -alias "$ALIAS" \
   -keyalg RSA \
   -keysize 4096 \
   -validity 10000 \
-  -storepass "$PASS" \
-  -keypass "$PASS" \
+  -storepass "$password" \
+  -keypass "$password" \
   -dname "CN=RR Client, OU=Engineering, O=RR, L=Tokyo, C=JP"
 
+if base64 --help 2>&1 | grep -q -- '-w'; then
+  base64 -w 0 "$KEYSTORE_FILE" > "$BASE64_FILE"
+else
+  base64 "$KEYSTORE_FILE" | tr -d '\r\n' > "$BASE64_FILE"
+fi
+printf '\n' >> "$BASE64_FILE"
+
+certificate_sha256="$(
+  keytool -list -v \
+    -keystore "$KEYSTORE_FILE" \
+    -storepass "$password" \
+    -alias "$ALIAS" \
+    | sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' \
+    | head -n 1
+)"
+
+unset password password_confirm
+
 echo
-echo "✓ 证书生成成功: $KEYSTORE_FILE"
-echo "=================================================="
-echo "请在 GitHub 仓库 -> Settings -> Secrets and variables -> Actions 中添加以下 Secrets:"
-echo "1. RR_KEYSTORE_BASE64: (将下面这串 Base64 内容填入)"
-base64 -w 0 "$KEYSTORE_FILE" 2>/dev/null || base64 "$KEYSTORE_FILE"
+echo "签名已生成并保存在仅本地目录："
+echo "  Keystore: $KEYSTORE_FILE"
+echo "  Base64:   $BASE64_FILE"
+echo "  Alias:    $ALIAS"
+echo "  Certificate SHA-256: $certificate_sha256"
 echo
-echo "2. RR_KEYSTORE_PASSWORD: 你的密码"
-echo "3. RR_KEY_ALIAS: $ALIAS"
-echo "4. RR_KEY_PASSWORD: 你的密码"
-echo "=================================================="
-echo "注意: 请妥善保存 $KEYSTORE_FILE，绝不要提交到 Git 仓库！"
+echo "请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中创建："
+echo "  RR_KEYSTORE_BASE64    = $BASE64_FILE 的单行内容"
+echo "  RR_KEYSTORE_PASSWORD  = 刚才输入的密码"
+echo "  RR_KEY_ALIAS           = $ALIAS"
+echo "  RR_KEY_PASSWORD        = 刚才输入的密码"
+echo
+echo "不要提交 local-secrets/，不要丢失原始 Keystore；以后覆盖安装必须继续使用同一把签名。"
