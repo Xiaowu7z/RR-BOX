@@ -14,10 +14,11 @@ class AppManager(private val context: Context) {
         val list = mutableListOf<AppRouteConfig>()
 
         for (pkg in packages) {
-            val isSystem = (pkg.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            val appInfo = pkg.applicationInfo ?: continue
+            val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             if (!includeSystem && isSystem) continue
 
-            val appName = pm.getApplicationLabel(pkg.applicationInfo).toString()
+            val appName = pm.getApplicationLabel(appInfo).toString()
             val packageName = pkg.packageName
 
             if (packageName != context.packageName) {
