@@ -7,6 +7,9 @@ import com.rr.client.storage.PreferencesManager
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
 import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.util.Locale
 
 class RRApplication : Application() {
     lateinit var database: AppDatabase
@@ -14,43 +17,74 @@ class RRApplication : Application() {
     lateinit var preferencesManager: PreferencesManager
         private set
 
+    @Volatile
+    var libboxReady: Boolean = false
+        private set
+
+    @Volatile
+    var libboxInitializationError: String? = null
+        private set
+
     override fun onCreate() {
         super.onCreate()
         instance = this
-
-        initializeLibbox()
-
+        installCrashRecorder()
+        initializeLibboxSafely()
         database = AppDatabase.getDatabase(this)
         preferencesManager = PreferencesManager(this)
     }
 
-    private fun initializeLibbox() {
+    private fun initializeLibboxSafely() {
         val baseDir = filesDir.apply { mkdirs() }
-        val workingDir = (getExternalFilesDir(null) ?: File(baseDir, "working")).apply { mkdirs() }
+        val workingDir = (getExternalFilesDir(null) ?: filesDir).apply { mkdirs() }
         val tempDir = cacheDir.apply { mkdirs() }
 
-        try {
-            Libbox.setup(
-                SetupOptions().apply {
-                    basePath = baseDir.absolutePath
-                    workingPath = workingDir.absolutePath
-                    tempPath = tempDir.absolutePath
-                    fixAndroidStack = true
-                    commandServerListenPort = 0
-                    logMaxLines = 1_000L
-                    debug = BuildConfig.DEBUG
-                    crashReportSource = "RR Client"
-                    appVersion = BuildConfig.VERSION_CODE.toString()
-                    appMarketingVersion = BuildConfig.VERSION_NAME
-                    oomKillerEnabled = false
-                    oomKillerDisabled = true
-                    oomMemoryLimit = 0L
-                    powerReportEnabled = false
+        runCatching {
+            runCatching { Libbox.setLocale(Locale.getDefault().toLanguageTag()) }
+            Libbox.setup(SetupOptions().apply {
+                basePath = baseDir.absolutePath
+                workingPath = workingDir.absolutePath
+                tempPath = tempDir.absolutePath
+                fixAndroidStack = true
+                logMaxLines = 3000
+                debug = BuildConfig.DEBUG
+                crashReportSource = "RR Client"
+                appVersion = BuildConfig.VERSION_CODE.toString()
+                appMarketingVersion = BuildConfig.VERSION_NAME
+            })
+        }.onSuccess {
+            libboxReady = true
+            libboxInitializationError = null
+        }.onFailure { error ->
+            libboxReady = false
+            libboxInitializationError = error.message ?: error.javaClass.simpleName
+            Log.e("RRApplication", "libbox setup failed", error)
+            writeDiagnostic("last-libbox-init-error.txt", error.stackTraceToString())
+        }
+    }
+
+    private fun installCrashRecorder() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                val writer = StringWriter()
+                PrintWriter(writer).use { printWriter ->
+                    printWriter.println("Thread: ${thread.name}")
+                    printWriter.println("App version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                    throwable.printStackTrace(printWriter)
                 }
-            )
-        } catch (e: Throwable) {
-            Log.e("RRApplication", "Failed to initialize libbox", e)
-            throw IllegalStateException("libbox initialization failed", e)
+                writeDiagnostic("last-crash.txt", writer.toString())
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
+
+    fun writeDiagnostic(fileName: String, content: String) {
+        runCatching {
+            val directory = File(filesDir, "diagnostics").apply { mkdirs() }
+            File(directory, fileName).writeText(content)
+        }.onFailure {
+            Log.w("RRApplication", "Unable to write diagnostic $fileName", it)
         }
     }
 
