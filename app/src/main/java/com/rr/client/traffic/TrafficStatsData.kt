@@ -3,8 +3,8 @@ package com.rr.client.traffic
 data class TrafficSpeed(
     val uploadBytesPerSec: Long = 0L,
     val downloadBytesPerSec: Long = 0L,
-    val formattedDownSpeed: String = "0 B/s",
-    val formattedUpSpeed: String = "0 B/s"
+    val formattedDownSpeed: String = TrafficSampler.formatSpeed(downloadBytesPerSec),
+    val formattedUpSpeed: String = TrafficSampler.formatSpeed(uploadBytesPerSec)
 )
 
 data class SessionTraffic(
