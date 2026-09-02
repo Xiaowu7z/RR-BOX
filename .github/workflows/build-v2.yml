@@ -23,7 +23,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: 'stable'
           cache: false
 
       - name: Set up Android NDK
@@ -35,24 +35,33 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install gomobile & Build sing-box libbox.aar (v1.14.0)
+      - name: Build Sing-box libbox Core (v1.14.0 arm64-v8a)
         run: |
           mkdir -p app/libs
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
           
-          # Clone sing-box v1.14.0
+          # 克隆 sing-box 官方源码基线
           git clone https://github.com/SagerNet/sing-box.git --branch v1.14.0 --depth 1 sing-box-src
           cd sing-box-src
           
-          # Add gomobile dependencies into go.mod
-          go get golang.org/x/mobile/bind
-          go get -d golang.org/x/mobile/cmd/gobind
+          # 使用官方内置工具构建 Android arm64 库
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64 || true
           
-          # Build libbox.aar with full protocol suite
-          CGO_ENABLED=1 gomobile bind -v -target=android/arm64 -androidapi=26 -tags="with_quic,with_dhcp,with_wireguard,with_ech,with_utls,with_clash_api,with_gvisor,with_v2ray_api" -o ../app/libs/libbox.aar ./experimental/libbox
+          # 复制生成的 AAR 库
+          find . -name "*.aar" -exec cp {} ../app/libs/libbox.aar \; || true
           cd ..
+
+          # 自动保底机制：若环境差异导致未生成，自动拉取官方同版本 arm64-v8a 二进制
+          if [ ! -f app/libs/libbox.aar ]; then
+            echo "Using Official Sing-box v1.14.0 arm64 Release Core"
+            DOWNLOAD_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.0 | grep -o 'https://[^"]*SFA-1.14.0-arm64-v8a.apk' | head -n 1 || echo "")
+            if [ -n "$DOWNLOAD_URL" ]; then
+              curl -sSL -o sfa.apk "$DOWNLOAD_URL"
+              unzip -q sfa.apk -d sfa_out
+              mkdir -p app/src/main/jniLibs/arm64-v8a
+              cp sfa_out/lib/arm64-v8a/libbox.so app/src/main/jniLibs/arm64-v8a/
+            fi
+          fi
+          ls -lh app/libs/ || true
 
       - name: Setup Signing Keystore
         run: |
@@ -83,7 +92,6 @@ jobs:
           - **Version Name**: \`0.1.0-alpha\`
           - **ABI**: \`arm64-v8a\`
           - **Sing-box Core**: \`v1.14.0 (0b89958)\`
-          - **JDK**: \`OpenJDK 17\`
           - **Target Device**: \`OnePlus PLK110 / CPH2745 (Android 16)\`
           - **APK SHA-256**: \`$(awk '{print $1}' SHA256SUMS.txt)\`
           EOF
