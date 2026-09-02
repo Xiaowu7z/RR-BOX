@@ -13,11 +13,12 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProxyNode
-import com.rr.client.core.model.ProtocolType
+import io.nekohasekai.libbox.Libbox
 import com.rr.client.routing.AppManager
 import com.rr.client.subscription.SubscriptionFetcher
 import com.rr.client.subscription.model.SubscriptionUserInfo
@@ -59,39 +60,37 @@ class MainActivity : ComponentActivity() {
     fun MainApp() {
         var selectedTab by remember { mutableIntStateOf(0) }
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
+        val isVpnStarting by RRVpnService.isStarting.collectAsState()
+        val lastVpnError by RRVpnService.lastError.collectAsState()
         val currentSpeed by RRVpnService.currentSpeed.collectAsState()
         val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
 
-        var nodes by remember {
-            mutableStateOf(
-                listOf(
-                    ProxyNode("1", "日本 HY2 (直连高速)", ProtocolType.HYSTERIA2, "jp.rrvps.net", 443, "rr-pass-sample", sni = "jp.rrvps.net"),
-                    ProxyNode("2", "洛杉矶 VLESS Reality", ProtocolType.VLESS_REALITY, "la.rrvps.net", 443, "3b6007dd-b8e2-4ed2-8b9f-300a6da02114", realityPublicKey = "Lv58KCuRO4Fz4rXi9fjykxiKetY50g84kCwiOUbrwVw", realityShortId = "63a64eb3", sni = "apple.com"),
-                    ProxyNode("3", "香港 TUIC v5", ProtocolType.TUIC_V5, "hk.rrvps.net", 8443, "3b6007dd-b8e2-4ed2-8b9f-300a6da02114", sni = "hk.rrvps.net")
-                )
-            )
+        LaunchedEffect(lastVpnError) {
+            lastVpnError?.takeIf { it.isNotBlank() }?.let { message ->
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+            }
         }
-        var selectedNodeId by remember { mutableStateOf("1") }
+
+        // Never ship fake credentials as connectable nodes. A real node must
+        // come from the user's RRVPS subscription before the VPN can start.
+        var nodes by remember { mutableStateOf<List<ProxyNode>>(emptyList()) }
+        var selectedNodeId by remember { mutableStateOf<String?>(null) }
         val selectedNode = nodes.find { it.id == selectedNodeId } ?: nodes.firstOrNull()
 
-        var userInfo by remember {
-            mutableStateOf(
-                SubscriptionUserInfo(
-                    upload = 5_000_000_000L,
-                    download = 45_000_000_000L,
-                    total = 500_000_000_000L,
-                    expireTimestamp = System.currentTimeMillis() / 1000L + 86400 * 30
-                )
-            )
-        }
+        var userInfo by remember { mutableStateOf<SubscriptionUserInfo?>(null) }
 
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
         var smartRouting by remember { mutableStateOf(true) }
         var perAppMode by remember { mutableStateOf("ALL") }
 
-        LaunchedEffect(Unit) {
-            val appMgr = AppManager(this@MainActivity)
-            apps = appMgr.getInstalledApps(includeSystem = false)
+        // Loading every installed package is relatively expensive on large
+        // phones. Defer it until the user actually opens the per-app page;
+        // the first connectivity test therefore starts with no package rules.
+        LaunchedEffect(selectedTab) {
+            if (selectedTab == 2 && apps.isEmpty()) {
+                val appMgr = AppManager(this@MainActivity)
+                apps = appMgr.getInstalledApps(includeSystem = false)
+            }
         }
 
         Scaffold(
@@ -139,21 +138,51 @@ class MainActivity : ComponentActivity() {
                         sessionTraffic = sessionTraffic,
                         userInfo = userInfo,
                         selectedNode = selectedNode,
+                        isStarting = isVpnStarting,
                         onToggleVpn = {
-                            if (isVpnRunning) {
-                                val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
-                                    action = com.rr.client.vpn.RRNotificationManager.ACTION_STOP_VPN
+                            when {
+                                isVpnRunning -> {
+                                    val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
+                                        action = com.rr.client.vpn.RRNotificationManager.ACTION_STOP_VPN
+                                    }
+                                    startService(stopIntent)
                                 }
-                                startService(stopIntent)
-                            } else {
-                                selectedNode?.let { node ->
-                                    val configJson = ConfigBuilder.buildSingBoxConfig(
-                                        selectedNode = node,
-                                        allNodes = nodes,
-                                        appRoutes = apps,
-                                        smartRouting = smartRouting
-                                    )
-                                    startVpnWithPermissionCheck(configJson, node.tag, node.id)
+
+                                isVpnStarting -> {
+                                    Toast.makeText(this@MainActivity, "正在建立 VPN，请稍候", Toast.LENGTH_SHORT).show()
+                                }
+
+                                selectedNode == null -> {
+                                    selectedTab = 3
+                                    Toast.makeText(this@MainActivity, "请先导入 RRVPS 订阅", Toast.LENGTH_LONG).show()
+                                }
+
+                                else -> {
+                                    selectedNode?.let { node ->
+                                        lifecycleScope.launch {
+                                            val result = withContext(Dispatchers.Default) {
+                                                runCatching {
+                                                    val config = ConfigBuilder.buildSingBoxConfig(
+                                                        selectedNode = node,
+                                                        allNodes = nodes,
+                                                        appRoutes = apps,
+                                                        smartRouting = smartRouting
+                                                    )
+                                                    Libbox.checkConfig(config)
+                                                    config
+                                                }
+                                            }
+                                            result.onSuccess { configJson ->
+                                                startVpnWithPermissionCheck(configJson, node.tag, node.id)
+                                            }.onFailure { error ->
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "配置校验失败: ${error.message ?: error.javaClass.simpleName}",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         },
@@ -176,13 +205,14 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                     3 -> SubscriptionScreen(
-                        initialUrl = "https://sub.rrvps.net/api/v1/client/subscribe?token=demo",
+                        initialUrl = "",
                         onFetchSubscription = { url ->
                             lifecycleScope.launch {
                                 val fetcher = SubscriptionFetcher()
                                 val result = fetcher.fetchSubscription(url)
                                 result.onSuccess { (newNodes, newUserInfo) ->
                                     nodes = newNodes
+                                    selectedNodeId = newNodes.firstOrNull()?.id
                                     userInfo = newUserInfo
                                     Toast.makeText(this@MainActivity, "成功同步 ${newNodes.size} 个节点", Toast.LENGTH_SHORT).show()
                                 }.onFailure { e ->
@@ -223,6 +253,17 @@ class MainActivity : ComponentActivity() {
             putExtra(RRVpnService.EXTRA_NODE_TAG, tag)
             putExtra(RRVpnService.EXTRA_NODE_ID, id)
         }
-        startForegroundService(serviceIntent)
+        try {
+            ContextCompat.startForegroundService(this, serviceIntent)
+            pendingConfigJson = null
+            pendingNodeTag = null
+            pendingNodeId = null
+        } catch (error: Throwable) {
+            Toast.makeText(
+                this,
+                "无法启动 VPN 服务: ${error.message ?: error.javaClass.simpleName}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 }
