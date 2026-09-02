@@ -47,7 +47,7 @@ object ConfigBuilder {
                 })
                 add(JsonObject().apply {
                     addProperty("tag", "dns-remote")
-                    addProperty("address", "https://1.1.1.1/dns-query")
+                    addProperty("address", "1.1.1.1")
                     addProperty("detour", TAG_PROXY)
                 })
             }
