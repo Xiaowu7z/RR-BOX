@@ -99,7 +99,7 @@ object SubscriptionParser {
                     "vless" -> {
                         val tlsObj = objJsonObject(obj, "tls")
                         val realityObj = tlsObj?.let { objJsonObject(it, "reality") }
-                        val realityEnabled = realityObj?.bool("enabled") == true
+                        val realityEnabled = realityObj?.get("enabled")?.asBoolean == true
                         if (realityEnabled) ProtocolType.VLESS_REALITY else ProtocolType.VLESS_TLS
                     }
                     "hysteria2", "hy2" -> ProtocolType.HYSTERIA2
@@ -120,7 +120,7 @@ object SubscriptionParser {
                 val tls = objJsonObject(obj, "tls")
                 val reality = tls?.let { objJsonObject(it, "reality") }
                 val headers = transport?.let { objJsonObject(it, "headers") }
-                val tlsEnabled = tls != null && tls.bool("enabled") != false
+                val tlsEnabled = tls != null && tls.get("enabled")?.asBoolean == true
 
                 val alpn = tls?.let {
                     val arr = it.getAsJsonArray("alpn")
@@ -344,7 +344,7 @@ object SubscriptionParser {
         val obj = runCatching { JsonParser.parseString(decoded).asJsonObject }.getOrNull() ?: return null
         val host = obj.get("add")?.asString?.orEmpty() ?: return null
         val port = obj.get("port")?.asInt ?: 443
-        val rawTag = obj.get("ps")?.asString?.orEmpty().ifEmpty { obj.get("name")?.asString?.orEmpty() }.orEmpty()
+        val rawTag = obj.get("ps")?.asString?.orEmpty().ifEmpty { obj.get("name")?.asString?.orEmpty() ?: "" }
         val tag = Uri.decode(rawTag.ifEmpty { "VMess-$host" })
         val network = obj.get("net")?.asString?.orEmpty()?.lowercase() ?: "tcp"
         val isWss = network == "ws" || network == "grpc"
@@ -356,7 +356,7 @@ object SubscriptionParser {
             server = host,
             serverPort = port,
             uuidOrPassword = obj.get("id")?.asString?.orEmpty() ?: "",
-            sni = obj.get("sni")?.asString?.orEmpty().ifEmpty { obj.get("host")?.asString?.orEmpty() }.orEmpty(),
+            sni = obj.get("sni")?.asString?.orEmpty().ifEmpty { obj.get("host")?.asString?.orEmpty() ?: "" },
             network = network,
             path = obj.get("path")?.asString?.orEmpty() ?: "",
             host = obj.get("host")?.asString?.orEmpty() ?: "",
