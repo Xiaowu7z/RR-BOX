@@ -2,107 +2,282 @@ name: RR Client Automated Build (arm64-v8a)
 
 on:
   push:
-    branches: [ "main", "master", "dev" ]
+    branches: ["main", "master", "dev"]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rr-client-arm64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SING_BOX_TAG: v1.14.0
+  SING_BOX_COMMIT: 0b8995879f29a9b98ee027bc17b75e101445b238
+  GO_VERSION: 1.26.7
+  NDK_VERSION: r28
+  GRADLE_VERSION: 8.10.2
+  ANDROID_PLATFORM: android-35
+  ANDROID_BUILD_TOOLS: 35.0.0
+  OUTPUT_APK_NAME: RR-Client-0.1.0-alpha-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build RR Client APK
-    runs-on: ubuntu-latest
+    name: Build signed RR Client APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout RR-Android
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Set up Go
+      - name: Set up Go 1.26.7
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - name: Set up Android NDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+      - name: Set up Android NDK r28
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
-          add-to-path: true
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
 
       - name: Set up Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.10.2'
+          gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Build Sing-box libbox.aar (v1.14.0 arm64-v8a)
+      - name: Record toolchain versions
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          # 1. 注入 Go bin 环境变量
-          export PATH=$PATH:$(go env GOPATH)/bin
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          mkdir -p app/libs
-          
-          # 2. 安装 SagerNet 原生 GoMobile 分支
-          go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
-          go install github.com/sagernet/gomobile/cmd/gobind@v0.1.12
-          gomobile init
-          
-          # 3. 克隆源码并剔除已知冲突标签 (with_gvisor 和 with_tailscale)
-          git clone https://github.com/SagerNet/sing-box.git --branch v1.14.0 --depth 1 sing-box-src
+          set -euo pipefail
+          mkdir -p build-reports
+          {
+            echo "Git commit: $(git rev-parse HEAD)"
+            java -version 2>&1
+            go version
+            gradle --version
+            echo "ANDROID_HOME=${ANDROID_HOME}"
+            echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
+            grep -F "Pkg.Revision" "${ANDROID_NDK_HOME}/source.properties"
+          } | tee build-reports/TOOLCHAIN.txt
+
+      - name: Build official sing-box libbox.aar
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+          rm -rf sing-box-src
+          rm -f app/libs/libbox.aar
+          mkdir -p app/libs build-reports
+
+          git clone \
+            --branch "$SING_BOX_TAG" \
+            --depth 1 \
+            https://github.com/SagerNet/sing-box.git \
+            sing-box-src
+
           cd sing-box-src
-          
-          sed -i 's/with_gvisor,//g' cmd/internal/build_libbox/main.go || true
-          sed -i 's/with_tailscale,//g' cmd/internal/build_libbox/main.go || true
-          sed -i 's/with_gvisor//g' cmd/internal/build_libbox/main.go || true
-          sed -i 's/with_tailscale//g' cmd/internal/build_libbox/main.go || true
-          
-          # 执行构建生成 libbox.aar
-          go run ./cmd/internal/build_libbox -target android -platform android/arm64
-          
-          # 复制到工程 libs 目录
-          cp -v libbox.aar ../app/libs/ || find . -name "*.aar" -exec cp -v {} ../app/libs/ \;
+
+          actual_commit="$(git rev-parse HEAD)"
+          echo "sing-box commit: ${actual_commit}" | tee ../build-reports/SING-BOX.txt
+          test "$actual_commit" = "$SING_BOX_COMMIT"
+
+          # Use the tool versions pinned by the sing-box v1.14.0 source tree.
+          # Do not patch or delete any upstream build tags.
+          make lib_install
+
+          grep -q 'with_gvisor' cmd/internal/build_libbox/main.go
+          grep -q 'with_tailscale' cmd/internal/build_libbox/main.go
+          grep -q 'with_naive_outbound' cmd/internal/build_libbox/main.go
+
+          go run ./cmd/internal/build_libbox \
+            -target android \
+            -platform android/arm64
+
+          test -s libbox.aar
+          cp -v libbox.aar ../app/libs/libbox.aar
           cd ..
-          
-          ls -lh app/libs/
 
-      - name: Setup Signing Keystore
-        run: |
-          echo "Generating Safe Isolated CI Keystore"
-          keytool -genkeypair -v -keystore release.jks -alias rrclient -keyalg RSA -keysize 2048 -validity 10000 -storepass "rrclient_safe_ci" -keypass "rrclient_safe_ci" -dname "CN=RR Client, OU=RR, O=RR, L=Tokyo, C=JP"
-          echo "RR_KEYSTORE_PATH=$GITHUB_WORKSPACE/release.jks" >> $GITHUB_ENV
-          echo "RR_KEYSTORE_PASS=rrclient_safe_ci" >> $GITHUB_ENV
-          echo "RR_KEY_ALIAS=rrclient" >> $GITHUB_ENV
-          echo "RR_KEY_PASS=rrclient_safe_ci" >> $GITHUB_ENV
+          test -s app/libs/libbox.aar
+          unzip -Z1 app/libs/libbox.aar | tee build-reports/LIBBOX-AAR-FILES.txt
+          grep -q '^jni/arm64-v8a/libbox\.so$' build-reports/LIBBOX-AAR-FILES.txt
 
-      - name: Build Release APK
-        run: |
-          gradle clean :app:assembleRelease --stacktrace
+          if grep -Eq '^jni/(armeabi-v7a|x86|x86_64)/' build-reports/LIBBOX-AAR-FILES.txt; then
+            echo "ERROR: libbox.aar contains an unexpected ABI" >&2
+            exit 1
+          fi
 
-      - name: Package Dist Artifacts & Generate Reports
+          sha256sum app/libs/libbox.aar | tee build-reports/LIBBOX-SHA256.txt
+          ls -lh app/libs/libbox.aar
+
+      - name: Validate signing secrets and restore keystore
+        shell: bash
+        env:
+          RR_KEYSTORE_BASE64: ${{ secrets.RR_KEYSTORE_BASE64 }}
+          RR_KEYSTORE_PASSWORD: ${{ secrets.RR_KEYSTORE_PASSWORD }}
+          RR_KEY_ALIAS_VALUE: ${{ secrets.RR_KEY_ALIAS }}
+          RR_KEY_PASSWORD_VALUE: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
-          mkdir -p dist
-          APK_PATH=$(find app/build/outputs/apk/ -name "*.apk" | head -n 1)
-          cp "$APK_PATH" dist/RR-Client-0.1.0-alpha-arm64-v8a.apk
-          
-          cd dist
-          sha256sum RR-Client-0.1.0-alpha-arm64-v8a.apk > SHA256SUMS.txt
-          
-          cat << EOF > BUILD-REPORT.md
+          set -euo pipefail
+          umask 077
+
+          : "${RR_KEYSTORE_BASE64:?Missing GitHub Secret: RR_KEYSTORE_BASE64}"
+          : "${RR_KEYSTORE_PASSWORD:?Missing GitHub Secret: RR_KEYSTORE_PASSWORD}"
+          : "${RR_KEY_ALIAS_VALUE:?Missing GitHub Secret: RR_KEY_ALIAS}"
+          : "${RR_KEY_PASSWORD_VALUE:?Missing GitHub Secret: RR_KEY_PASSWORD}"
+
+          keystore_path="$RUNNER_TEMP/rr-client-release.jks"
+          printf '%s' "$RR_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          test -s "$keystore_path"
+
+          keytool -list \
+            -keystore "$keystore_path" \
+            -storepass "$RR_KEYSTORE_PASSWORD" \
+            -alias "$RR_KEY_ALIAS_VALUE" \
+            >/dev/null
+
+          echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build signed Release APK
+        shell: bash
+        env:
+          RR_KEYSTORE_PASS: ${{ secrets.RR_KEYSTORE_PASSWORD }}
+          RR_KEY_ALIAS: ${{ secrets.RR_KEY_ALIAS }}
+          RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          gradle \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            clean \
+            :app:assembleRelease
+
+      - name: Verify APK and generate reports
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+
+          source_apk="app/build/outputs/apk/release/app-release.apk"
+          test -s "$source_apk"
+
+          mkdir -p dist build-reports
+          output_apk="dist/${OUTPUT_APK_NAME}"
+          cp "$source_apk" "$output_apk"
+
+          apksigner="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
+          aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
+          test -x "$apksigner"
+          test -x "$aapt2"
+
+          "$apksigner" verify \
+            --verbose \
+            --print-certs \
+            "$output_apk" \
+            | tee build-reports/SIGNATURE-REPORT.txt
+
+          "$aapt2" dump badging "$output_apk" \
+            | tee build-reports/PACKAGE-REPORT.txt
+
+          grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.0-alpha'" build-reports/PACKAGE-REPORT.txt
+
+          unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
+          grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
+
+          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' build-reports/APK-FILE-LIST.txt; then
+            echo "ERROR: APK contains an unexpected ABI" >&2
+            exit 1
+          fi
+
+          if grep -Eqi '(^|/)META-INF/xposed(/|$)|XposedProvider|SystemUI.*Hook' build-reports/APK-FILE-LIST.txt; then
+            echo "ERROR: APK contains an unexpected Xposed/SystemUI module entry" >&2
+            exit 1
+          fi
+
+          sha256sum "$output_apk" | tee dist/SHA256SUMS.txt
+
+          package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" build-reports/PACKAGE-REPORT.txt | head -n 1)"
+          version_code="$(sed -n "s/^package: .* versionCode='\([^']*\)'.*/\1/p" build-reports/PACKAGE-REPORT.txt | head -n 1)"
+          version_name="$(sed -n "s/^package: .* versionName='\([^']*\)'.*/\1/p" build-reports/PACKAGE-REPORT.txt | head -n 1)"
+          apk_sha256="$(awk '{print $1}' dist/SHA256SUMS.txt)"
+          apk_size="$(stat -c '%s' "$output_apk")"
+          certificate_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' build-reports/SIGNATURE-REPORT.txt | head -n 1)"
+          ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
+
+          cat > dist/BUILD-REPORT.md <<EOF
           # RR Client 0.1.0-alpha Build Report
-          
-          - **Package Name**: \`com.rr.client\`
-          - **Version Name**: \`0.1.0-alpha\`
-          - **ABI**: \`arm64-v8a\`
-          - **Sing-box Core**: \`v1.14.0 (0b89958)\`
-          - **Target Device**: \`OnePlus PLK110 / CPH2745 (Android 16)\`
-          - **APK SHA-256**: \`$(awk '{print $1}' SHA256SUMS.txt)\`
-          EOF
-          cd ..
 
-      - name: Upload APK & Build Artifacts
+          - Source commit: $(git rev-parse HEAD)
+          - Package name: ${package_name}
+          - Version code: ${version_code}
+          - Version name: ${version_name}
+          - ABI: arm64-v8a only
+          - sing-box tag: ${SING_BOX_TAG}
+          - sing-box commit: ${SING_BOX_COMMIT}
+          - Go: $(go version)
+          - JDK: $(java -version 2>&1 | head -n 1)
+          - Android SDK platform: ${ANDROID_PLATFORM}
+          - Android build tools: ${ANDROID_BUILD_TOOLS}
+          - Android NDK: ${ndk_revision}
+          - Gradle: $(gradle --version | awk '/^Gradle / {print $2; exit}')
+          - APK file: ${OUTPUT_APK_NAME}
+          - APK size: ${apk_size} bytes
+          - APK SHA-256: ${apk_sha256}
+          - Signing certificate SHA-256: ${certificate_sha256}
+          - Target device: OnePlus PLK110 / CPH2745, Android 16
+          - R8/minification: disabled for alpha
+          - SystemUI/Xposed module: not included
+          - CI verification: signature, package, version and ABI passed
+
+          This CI report does not replace ADB installation, startup, VPN connectivity or real traffic validation on the target phone.
+          EOF
+
+          cp build-reports/SIGNATURE-REPORT.txt dist/
+          cp build-reports/PACKAGE-REPORT.txt dist/
+          cp build-reports/LIBBOX-SHA256.txt dist/
+          cp build-reports/TOOLCHAIN.txt dist/
+
+      - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
           name: RR-Client-0.1.0-alpha-arm64-v8a
           path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
