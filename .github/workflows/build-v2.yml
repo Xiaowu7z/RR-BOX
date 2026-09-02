@@ -39,28 +39,28 @@ jobs:
 
       - name: Build Sing-box libbox.aar (v1.14.0 arm64-v8a)
         run: |
-          # 1. 核心关键：将 Go 工具目录加入全局环境变量
+          # 1. 注入 Go bin 环境变量
           export PATH=$PATH:$(go env GOPATH)/bin
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           mkdir -p app/libs
           
-          # 2. 安装 sing-box 官方专用的 gomobile 工具链
-          go install io.nekohasekai.sagernet/gomobile/cmd/gomobile@latest || go install golang.org/x/mobile/cmd/gomobile@latest
-          go install io.nekohasekai.sagernet/gomobile/cmd/gobind@latest || go install golang.org/x/mobile/cmd/gobind@latest
+          # 2. 安装 SagerNet 原生维护且支持 -libname 参数的 GoMobile 分支
+          go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+          go install github.com/sagernet/gomobile/cmd/gobind@v0.1.12
           gomobile init
           
           # 3. 克隆源码并编译
           git clone https://github.com/SagerNet/sing-box.git --branch v1.14.0 --depth 1 sing-box-src
           cd sing-box-src
           
-          # 剔除冲突标签
+          # 剔除底层冲突标签
           sed -i 's/with_gvisor,//g' cmd/internal/build_libbox/main.go || true
           sed -i 's/with_gvisor//g' cmd/internal/build_libbox/main.go || true
           
-          # 执行构建
+          # 执行构建生成 libbox.aar
           go run ./cmd/internal/build_libbox -target android -platform android/arm64
           
-          # 移入工程 libs 目录
+          # 复制到工程 libs 目录
           cp -v libbox.aar ../app/libs/ || find . -name "*.aar" -exec cp -v {} ../app/libs/ \;
           cd ..
           
@@ -104,4 +104,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RR-Client-0.1.0-alpha-arm64-v8a
+          path: dist/          name: RR-Client-0.1.0-alpha-arm64-v8a
           path: dist/
