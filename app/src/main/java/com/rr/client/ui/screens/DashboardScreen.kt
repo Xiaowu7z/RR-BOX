@@ -10,16 +10,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.subscription.model.SubscriptionUserInfo
 import com.rr.client.traffic.SessionTraffic
@@ -27,11 +24,13 @@ import com.rr.client.traffic.TrafficSampler
 import com.rr.client.traffic.TrafficSpeed
 import com.rr.client.ui.theme.*
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun DashboardScreen(
     isConnected: Boolean,
+    isStarting: Boolean,
     currentSpeed: TrafficSpeed,
     sessionTraffic: SessionTraffic,
     userInfo: SubscriptionUserInfo?,
@@ -46,7 +45,6 @@ fun DashboardScreen(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Header & Current Node Card
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -92,13 +90,12 @@ fun DashboardScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // 2. Big Cyberpunk Connect Switch
         Box(
             modifier = Modifier
                 .size(160.dp)
                 .clip(CircleShape)
                 .background(if (isConnected) CyanPrimary.copy(alpha = 0.15f) else DarkSurfaceVariant)
-                .clickable { onToggleVpn() },
+                .clickable(enabled = !isStarting) { onToggleVpn() },
             contentAlignment = Alignment.Center
         ) {
             Box(
@@ -112,22 +109,43 @@ fun DashboardScreen(
                     imageVector = Icons.Default.PowerSettingsNew,
                     contentDescription = "VPN Switch",
                     modifier = Modifier.size(56.dp),
-                    tint = if (isConnected) DarkBackground else TextSecondary
+                    tint = when {
+                        isConnected -> DarkBackground
+                        isStarting -> CyanPrimary
+                        else -> TextSecondary
+                    }
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = if (isConnected) "已连接 · 保护中" else "未连接 · 点击开启",
+            text = when {
+                isConnected -> "已连接 · 保护中"
+                isStarting -> "正在连接 · 请稍候"
+                selectedNode == null -> "请先导入订阅"
+                else -> "未连接 · 点击开启"
+            },
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
-            color = if (isConnected) AccentGreen else TextSecondary
+            color = when {
+                isConnected -> AccentGreen
+                isStarting -> CyanPrimary
+                else -> TextSecondary
+            }
         )
+
+        if (isStarting) {
+            Spacer(modifier = Modifier.height(10.dp))
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                color = CyanPrimary,
+                trackColor = DarkSurfaceVariant
+            )
+        }
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // 3. Real-time Outbound Speed Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -141,7 +159,6 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.SpaceAround,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Download Speed
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.ArrowDownward,
@@ -161,14 +178,13 @@ fun DashboardScreen(
                     }
                 }
 
-                Divider(
+                HorizontalDivider(
                     modifier = Modifier
                         .height(36.dp)
                         .width(1.dp),
                     color = CardBorder
                 )
 
-                // Upload Speed
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.ArrowUpward,
@@ -192,7 +208,6 @@ fun DashboardScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 4. Session & RRVPS Quota Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -224,7 +239,7 @@ fun DashboardScreen(
 
                 if (userInfo != null && userInfo.total > 0L) {
                     Spacer(modifier = Modifier.height(12.dp))
-                    Divider(color = CardBorder)
+                    HorizontalDivider(color = CardBorder)
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
@@ -253,8 +268,12 @@ fun DashboardScreen(
                             color = TextSecondary
                         )
                         val expireStr = if (userInfo.expireTimestamp > 0L) {
-                            SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(userInfo.expireTimestamp * 1000L))
-                        } else "长期有效"
+                            SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(
+                                Date(userInfo.expireTimestamp * 1000L)
+                            )
+                        } else {
+                            "长期有效"
+                        }
                         Text(
                             text = "到期: $expireStr",
                             style = MaterialTheme.typography.bodySmall,
