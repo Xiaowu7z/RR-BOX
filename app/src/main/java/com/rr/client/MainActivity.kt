@@ -240,7 +240,7 @@ class MainActivity : ComponentActivity() {
                         userInfo = selectedProfile?.userInfo,
                         profileName = selectedProfile?.name,
                         selectedNode = selectedNode,
-                        onToggleVpn = {
+                        onToggleVpn = onToggle@{
                             if (isVpnRunning) {
                                 val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
                                     action = com.rr.client.vpn.RRNotificationManager.ACTION_STOP_VPN
@@ -251,7 +251,7 @@ class MainActivity : ComponentActivity() {
                                 if (targetNode == null) {
                                     toast("还没有任何节点：请先到「订阅」页添加订阅链接并同步")
                                     selectedTab = 3
-                                    return@onToggleVpn
+                                    return@onToggle
                                 }
                                 if (selectedNode == null && targetNode != null) {
                                     selectNode(targetNode.id)
