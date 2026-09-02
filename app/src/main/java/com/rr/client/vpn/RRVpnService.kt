@@ -5,12 +5,12 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.storage.TrafficHistoryEntity
 import com.rr.client.traffic.SessionTraffic
-import com.rr.client.traffic.TrafficSampler
 import com.rr.client.traffic.TrafficSpeed
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,10 +23,15 @@ class RRVpnService : VpnService() {
 
     private lateinit var notificationMgr: RRNotificationManager
     private var boxCore: BoxServiceWrapper? = null
-    private var trafficSampler: TrafficSampler? = null
 
     private var activeNodeTag = "Default"
     private var activeNodeId = ""
+    
+    // 基于单调时钟计算真实速率与会话时长
+    private var startElapsedRealtime = 0L
+    private var lastCalculationTime = 0L
+    private var lastProxyDownTotal = 0L
+    private var lastProxyUpTotal = 0L
 
     companion object {
         private val _isRunning = MutableStateFlow(false)
@@ -52,9 +57,17 @@ class RRVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         notificationMgr = RRNotificationManager(this)
-        boxCore = BoxServiceWrapper(filesDir) { log ->
-            Log.d("RRVpnService", log)
-        }
+        
+        // 实例化 BoxServiceWrapper，并将来自底层 CommandClient 的真实流量数据接入
+        boxCore = BoxServiceWrapper(
+            workingDir = filesDir,
+            onLogReceived = { log ->
+                Log.d("RRVpnService", log)
+            },
+            onStatusUpdate = { statusMessage ->
+                handleRealTrafficStatus(statusMessage.uplinkTotal, statusMessage.downlinkTotal)
+            }
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,14 +91,17 @@ class RRVpnService : VpnService() {
 
     private fun startVpn(configJson: String) {
         try {
+            startElapsedRealtime = SystemClock.elapsedRealtime()
+            lastCalculationTime = startElapsedRealtime
+            lastProxyDownTotal = 0L
+            lastProxyUpTotal = 0L
+
             val started = boxCore?.startService(configJson, this) ?: false
             if (started) {
                 _isRunning.value = true
 
                 val initialNotif = notificationMgr.buildNotification(activeNodeTag, TrafficSpeed(), 0L)
                 startForeground(RRNotificationManager.NOTIFICATION_ID, initialNotif)
-
-                setupTrafficSampler()
             } else {
                 stopVpn()
             }
@@ -95,48 +111,61 @@ class RRVpnService : VpnService() {
         }
     }
 
-    private fun setupTrafficSampler() {
-        var dummyDown = 0L
-        var dummyUp = 0L
+    /**
+     * 来自 sing-box v1.14.0 CommandClient 的真实 Proxy 出站累计流量
+     * 排除 direct 和 VPN 外部绕行流量
+     * 基于单调时钟计算准确瞬时速率
+     */
+    private fun handleRealTrafficStatus(uplinkTotal: Long, downlinkTotal: Long) {
+        val now = SystemClock.elapsedRealtime()
+        val deltaTimeMs = now - lastCalculationTime
+        
+        if (deltaTimeMs >= 500) { // 至少半秒计算一次速率
+            val downDiff = (downlinkTotal - lastProxyDownTotal).coerceAtLeast(0L)
+            val upDiff = (uplinkTotal - lastProxyUpTotal).coerceAtLeast(0L)
 
-        trafficSampler = TrafficSampler(
-            scope = serviceScope,
-            queryProxyStats = {
-                Pair(dummyDown, dummyUp)
-            },
-            onBatchFlush = { session ->
-                serviceScope.launch(Dispatchers.IO) {
-                    RRApplication.instance.database.trafficDao().insertTraffic(
-                        TrafficHistoryEntity(
-                            nodeTag = activeNodeTag,
-                            proxyDownload = session.proxyDownloadTotal,
-                            proxyUpload = session.proxyUploadTotal,
-                            directDownload = session.directDownloadTotal,
-                            directUpload = session.directUploadTotal,
-                            durationSeconds = session.durationSeconds,
-                            timestamp = System.currentTimeMillis()
-                        )
-                    )
-                }
-            }
-        )
+            val downSpeed = (downDiff * 1000L) / deltaTimeMs
+            val upSpeed = (upDiff * 1000L) / deltaTimeMs
 
-        trafficSampler?.start()
+            val speed = TrafficSpeed(
+                proxyDownloadSpeed = downSpeed,
+                proxyUploadSpeed = upSpeed
+            )
+            _currentSpeed.value = speed
 
-        serviceScope.launch {
-            trafficSampler?.currentSpeed?.collect { speed ->
-                _currentSpeed.value = speed
-                trafficSampler?.sessionTraffic?.value?.let { session ->
-                    _sessionTraffic.value = session
-                    notificationMgr.updateNotification(activeNodeTag, speed, session.durationSeconds)
-                }
-            }
+            val durationSec = (now - startElapsedRealtime) / 1000L
+            val session = SessionTraffic(
+                proxyDownloadTotal = downlinkTotal,
+                proxyUploadTotal = uplinkTotal,
+                durationSeconds = durationSec
+            )
+            _sessionTraffic.value = session
+
+            notificationMgr.updateNotification(activeNodeTag, speed, durationSec)
+
+            lastCalculationTime = now
+            lastProxyDownTotal = downlinkTotal
+            lastProxyUpTotal = uplinkTotal
         }
     }
 
     private fun stopVpn() {
-        trafficSampler?.stop()
-        trafficSampler = null
+        val finalSession = _sessionTraffic.value
+        if (finalSession.durationSeconds > 0) {
+            serviceScope.launch(Dispatchers.IO) {
+                RRApplication.instance.database.trafficDao().insertTraffic(
+                    TrafficHistoryEntity(
+                        nodeTag = activeNodeTag,
+                        proxyDownload = finalSession.proxyDownloadTotal,
+                        proxyUpload = finalSession.proxyUploadTotal,
+                        directDownload = 0L,
+                        directUpload = 0L,
+                        durationSeconds = finalSession.durationSeconds,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
 
         boxCore?.stopService()
         _isRunning.value = false
