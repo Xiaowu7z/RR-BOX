@@ -44,18 +44,19 @@ jobs:
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           mkdir -p app/libs
           
-          # 2. 安装 SagerNet 原生维护且支持 -libname 参数的 GoMobile 分支
+          # 2. 安装 SagerNet 原生 GoMobile 分支
           go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
           go install github.com/sagernet/gomobile/cmd/gobind@v0.1.12
           gomobile init
           
-          # 3. 克隆源码并编译
+          # 3. 克隆源码并剔除已知冲突标签 (with_gvisor 和 with_tailscale)
           git clone https://github.com/SagerNet/sing-box.git --branch v1.14.0 --depth 1 sing-box-src
           cd sing-box-src
           
-          # 剔除底层冲突标签
           sed -i 's/with_gvisor,//g' cmd/internal/build_libbox/main.go || true
+          sed -i 's/with_tailscale,//g' cmd/internal/build_libbox/main.go || true
           sed -i 's/with_gvisor//g' cmd/internal/build_libbox/main.go || true
+          sed -i 's/with_tailscale//g' cmd/internal/build_libbox/main.go || true
           
           # 执行构建生成 libbox.aar
           go run ./cmd/internal/build_libbox -target android -platform android/arm64
