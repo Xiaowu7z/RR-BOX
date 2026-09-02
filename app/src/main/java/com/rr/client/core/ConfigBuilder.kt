@@ -9,194 +9,196 @@ import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.ProtocolType
 
 /**
- * Builds a deliberately small sing-box v1.14 configuration.
+ * Builds the smallest current-schema sing-box profile needed to prove that the
+ * Android VPN and one selected proxy node can carry traffic.
  *
- * The first runnable milestone is connectivity. Do not reference external
- * rule-sets or legacy special outbounds here: a missing rule-set or a field
- * removed by sing-box 1.14 must never make the VPN process disappear.
+ * Advanced rule-sets and per-app routing are deliberately not injected in this
+ * connectivity alpha. They will be layered back after the tunnel is stable.
  */
 object ConfigBuilder {
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
-    @Suppress("UNUSED_PARAMETER")
     fun buildSingBoxConfig(
         selectedNode: ProxyNode,
         allNodes: List<ProxyNode>,
         appRoutes: List<AppRouteConfig>,
-        smartRouting: Boolean = true,
+        smartRouting: Boolean = false,
         enableDnsRules: Boolean = true
     ): String {
-        require(selectedNode.server.isNotBlank()) { "节点服务器地址为空" }
-        require(selectedNode.serverPort in 1..65535) { "节点端口无效: ${selectedNode.serverPort}" }
+        // Keep the public API stable while intentionally ignoring advanced
+        // routing inputs during the connectivity milestone.
+        @Suppress("UNUSED_VARIABLE")
+        val deferredFeatures = Triple(allNodes, appRoutes, smartRouting && enableDnsRules)
 
-        val proxyOutbound = buildOutboundJson(selectedNode).apply {
-            addProperty("tag", PROXY_TAG)
-        }
-        val proxyType = proxyOutbound.get("type")?.asString.orEmpty()
-        require(proxyType.isNotBlank() && proxyType !in NON_PROXY_TYPES) {
-            "所选节点不是可连接的代理出站: ${selectedNode.tag}"
-        }
-
-        return gson.toJson(
-            JsonObject().apply {
-                add("log", JsonObject().apply {
-                    addProperty("level", "info")
-                    addProperty("timestamp", true)
-                })
-
-                // sing-box 1.14 removed the old DNS server address format.
-                add("dns", JsonObject().apply {
-                    add("servers", JsonArray().apply {
-                        add(JsonObject().apply {
-                            addProperty("type", "udp")
-                            addProperty("tag", DNS_TAG)
-                            addProperty("server", "223.5.5.5")
-                            addProperty("server_port", 53)
-                        })
-                    })
-                    addProperty("final", DNS_TAG)
-                    addProperty("strategy", "ipv4_only")
-                })
-
-                add("inbounds", JsonArray().apply {
-                    add(JsonObject().apply {
-                        addProperty("type", "tun")
-                        addProperty("tag", "tun-in")
-                        add("address", JsonArray().apply { add("172.19.0.1/30") })
-                        addProperty("mtu", 1500)
-                        addProperty("auto_route", true)
-                        addProperty("strict_route", true)
-                        addProperty("stack", "system")
-                    })
-                })
-
-                // Include only the selected real proxy outbound. Pulling every
-                // selector/dependency from a subscription makes one valid node
-                // depend on unrelated nodes and blocks the first network test.
-                add("outbounds", JsonArray().apply {
-                    add(proxyOutbound)
-                    add(JsonObject().apply {
-                        addProperty("type", "direct")
-                        addProperty("tag", DIRECT_TAG)
-                    })
-                })
-
-                add("route", JsonObject().apply {
-                    add("rules", JsonArray().apply {
-                        add(JsonObject().apply {
-                            addProperty("action", "sniff")
-                        })
-                        if (enableDnsRules) {
-                            add(JsonObject().apply {
-                                addProperty("protocol", "dns")
-                                addProperty("action", "hijack-dns")
-                            })
-                        }
-
-                        add(JsonObject().apply {
-                            addProperty("ip_is_private", true)
-                            addProperty("outbound", DIRECT_TAG)
-                        })
-
-                        appRoutes.asSequence()
-                            .filter { it.packageName.isNotBlank() }
-                            .filter {
-                                it.routeMode == "DIRECT" ||
-                                    it.routeMode == "BYPASS" ||
-                                    it.routeMode == "PROXY_NODE"
-                            }
-                            .forEach { appRoute ->
-                                add(JsonObject().apply {
-                                    add("package_name", JsonArray().apply { add(appRoute.packageName) })
-                                    addProperty(
-                                        "outbound",
-                                        if (appRoute.routeMode == "DIRECT" || appRoute.routeMode == "BYPASS") {
-                                            DIRECT_TAG
-                                        } else {
-                                            PROXY_TAG
-                                        }
-                                    )
-                                })
-                            }
-                    })
-                    addProperty("final", PROXY_TAG)
-                    addProperty("default_domain_resolver", DNS_TAG)
-                    addProperty("auto_detect_interface", true)
-                })
+        val proxyOutbound = buildProxyOutbound(selectedNode).apply {
+            addProperty("tag", "proxy")
+            if (!isIpLiteral(selectedNode.server) && !has("domain_resolver")) {
+                addProperty("domain_resolver", "local-dns")
             }
-        )
+        }
+
+        val root = JsonObject().apply {
+            add("log", JsonObject().apply {
+                addProperty("level", "info")
+                addProperty("timestamp", true)
+            })
+
+            add("dns", JsonObject().apply {
+                add("servers", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("type", "udp")
+                        addProperty("tag", "local-dns")
+                        addProperty("server", "223.5.5.5")
+                        addProperty("server_port", 53)
+                    })
+                    add(JsonObject().apply {
+                        addProperty("type", "tls")
+                        addProperty("tag", "remote-dns")
+                        addProperty("server", "1.1.1.1")
+                        addProperty("server_port", 853)
+                        addProperty("detour", "proxy")
+                        add("tls", JsonObject().apply {
+                            addProperty("enabled", true)
+                            addProperty("server_name", "cloudflare-dns.com")
+                        })
+                    })
+                })
+                addProperty("final", "remote-dns")
+                addProperty("strategy", "prefer_ipv4")
+            })
+
+            add("inbounds", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("type", "tun")
+                    addProperty("tag", "tun-in")
+                    add("address", JsonArray().apply {
+                        add("172.19.0.1/30")
+                        add("fdfe:dcba:9876::1/126")
+                    })
+                    addProperty("auto_route", true)
+                    addProperty("strict_route", true)
+                    addProperty("stack", "system")
+                })
+            })
+
+            add("outbounds", JsonArray().apply {
+                add(proxyOutbound)
+                add(JsonObject().apply {
+                    addProperty("type", "direct")
+                    addProperty("tag", "direct")
+                })
+            })
+
+            add("route", JsonObject().apply {
+                add("rules", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("action", "sniff")
+                    })
+                    add(JsonObject().apply {
+                        addProperty("protocol", "dns")
+                        addProperty("action", "hijack-dns")
+                    })
+                    add(JsonObject().apply {
+                        addProperty("ip_is_private", true)
+                        addProperty("outbound", "direct")
+                    })
+                })
+                addProperty("final", "proxy")
+                addProperty("default_domain_resolver", "local-dns")
+            })
+        }
+
+        return gson.toJson(root)
     }
 
-    private fun buildOutboundJson(node: ProxyNode): JsonObject {
+    /**
+     * Preserve a complete RRVPS sing-box client profile verbatim apart from
+     * formatting. Validation is performed by Libbox before the VPN is started.
+     */
+    fun prepareImportedProfile(rawProfile: String): String {
+        val root = JsonParser.parseString(rawProfile).asJsonObject
+        require(root.getAsJsonArray("outbounds")?.size()?.let { it > 0 } == true) {
+            "完整配置缺少 outbounds"
+        }
+        require(root.getAsJsonArray("inbounds")?.any { element ->
+            element.isJsonObject && element.asJsonObject.get("type")?.asString == "tun"
+        } == true) {
+            "完整配置缺少 TUN inbound"
+        }
+        return gson.toJson(root)
+    }
+
+    private fun buildProxyOutbound(node: ProxyNode): JsonObject {
         if (node.rawJson.isNotBlank()) {
-            val parsed = runCatching {
+            return runCatching {
                 JsonParser.parseString(node.rawJson).asJsonObject.deepCopy()
-            }.getOrElse {
-                throw IllegalArgumentException("节点原始配置不是有效 JSON: ${node.tag}", it)
-            }
-            parsed.addProperty("tag", PROXY_TAG)
-            return parsed
+            }.getOrElse { error("订阅节点 JSON 无法解析：${it.message}") }
         }
 
-        return JsonObject().apply {
-            addProperty("tag", PROXY_TAG)
-            when (node.type) {
-                ProtocolType.VLESS_REALITY -> {
-                    require(node.uuidOrPassword.isNotBlank()) { "VLESS UUID 为空" }
-                    require(node.realityPublicKey.isNotBlank()) { "Reality 公钥为空" }
-                    addProperty("type", "vless")
-                    addProperty("server", node.server)
-                    addProperty("server_port", node.serverPort)
-                    addProperty("uuid", node.uuidOrPassword)
-                    if (node.flow.isNotBlank()) addProperty("flow", node.flow)
-                    add("tls", JsonObject().apply {
-                        addProperty("enabled", true)
-                        addProperty("server_name", node.sni.ifBlank { "www.apple.com" })
-                        add("utls", JsonObject().apply {
-                            addProperty("enabled", true)
-                            addProperty("fingerprint", "chrome")
-                        })
-                        add("reality", JsonObject().apply {
-                            addProperty("enabled", true)
-                            addProperty("public_key", node.realityPublicKey)
-                            if (node.realityShortId.isNotBlank()) {
-                                addProperty("short_id", node.realityShortId)
-                            }
-                        })
-                    })
-                }
+        return when (node.type) {
+            ProtocolType.VLESS_REALITY -> JsonObject().apply {
+                require(node.server.isNotBlank()) { "VLESS 节点缺少服务器地址" }
+                require(node.uuidOrPassword.isNotBlank()) { "VLESS 节点缺少 UUID" }
+                require(node.realityPublicKey.isNotBlank()) { "Reality 节点缺少公钥" }
 
-                ProtocolType.HYSTERIA2 -> {
-                    require(node.uuidOrPassword.isNotBlank()) { "Hysteria2 密码为空" }
-                    addProperty("type", "hysteria2")
-                    addProperty("server", node.server)
-                    if (node.hoppingPorts.isBlank()) {
-                        addProperty("server_port", node.serverPort)
-                    } else {
-                        add("server_ports", JsonArray().apply {
-                            node.hoppingPorts
-                                .split(',')
-                                .map(String::trim)
-                                .filter(String::isNotEmpty)
-                                .forEach(::add)
-                        })
-                    }
-                    addProperty("password", node.uuidOrPassword)
-                    add("tls", JsonObject().apply {
+                addProperty("type", "vless")
+                addProperty("server", node.server)
+                addProperty("server_port", node.serverPort)
+                addProperty("uuid", node.uuidOrPassword)
+                if (node.flow.isNotBlank()) addProperty("flow", node.flow)
+                add("tls", JsonObject().apply {
+                    addProperty("enabled", true)
+                    addProperty("server_name", node.sni.ifBlank { "www.apple.com" })
+                    add("utls", JsonObject().apply {
                         addProperty("enabled", true)
-                        addProperty("server_name", node.sni.ifBlank { node.server })
+                        addProperty("fingerprint", "chrome")
                     })
-                }
-
-                else -> throw IllegalArgumentException(
-                    "${node.type} 必须通过 RRVPS Sing-box JSON 订阅导入，当前节点缺少原始出站配置"
-                )
+                    add("reality", JsonObject().apply {
+                        addProperty("enabled", true)
+                        addProperty("public_key", node.realityPublicKey)
+                        if (node.realityShortId.isNotBlank()) {
+                            addProperty("short_id", node.realityShortId)
+                        }
+                    })
+                })
             }
+
+            ProtocolType.HYSTERIA2 -> JsonObject().apply {
+                require(node.server.isNotBlank()) { "Hysteria2 节点缺少服务器地址" }
+                require(node.uuidOrPassword.isNotBlank()) { "Hysteria2 节点缺少密码" }
+
+                addProperty("type", "hysteria2")
+                addProperty("server", node.server)
+                val hoppingPorts = node.hoppingPorts
+                    .split(',')
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                if (hoppingPorts.isEmpty()) {
+                    addProperty("server_port", node.serverPort)
+                } else {
+                    add("server_ports", JsonArray().apply {
+                        hoppingPorts.forEach(::add)
+                    })
+                }
+                addProperty("password", node.uuidOrPassword)
+                add("tls", JsonObject().apply {
+                    addProperty("enabled", true)
+                    if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
+                })
+            }
+
+            else -> error(
+                "${node.type} 必须从 RRVPS Sing-box JSON 订阅导入完整 outbound，当前手工字段不足"
+            )
         }
     }
 
-    private const val PROXY_TAG = "proxy"
-    private const val DIRECT_TAG = "direct"
-    private const val DNS_TAG = "local-dns"
-    private val NON_PROXY_TYPES = setOf("direct", "block", "dns", "selector", "urltest")
+    private fun isIpLiteral(value: String): Boolean {
+        val host = value.trim().removePrefix("[").removeSuffix("]")
+        if (host.contains(':')) return true
+        val parts = host.split('.')
+        return parts.size == 4 && parts.all { part ->
+            part.toIntOrNull()?.let { it in 0..255 } == true
+        }
+    }
 }
