@@ -26,7 +26,11 @@ class QrScanActivity : CaptureActivity() {
         findViewById<TextView>(R.id.qr_scan_back).setOnClickListener { finish() }
         findViewById<TextView>(R.id.qr_scan_flash).setOnClickListener { view ->
             torchEnabled = !torchEnabled
-            scannerView.setTorch(torchEnabled)
+            if (torchEnabled) {
+                scannerView.setTorchOn()
+            } else {
+                scannerView.setTorchOff()
+            }
             (view as TextView).text = if (torchEnabled) "关闭手电筒" else "手电筒"
         }
         findViewById<TextView>(R.id.qr_scan_pick_image).setOnClickListener { openImagePicker() }
