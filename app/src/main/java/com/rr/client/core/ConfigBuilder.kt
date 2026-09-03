@@ -41,13 +41,15 @@ object ConfigBuilder {
         root.add("dns", JsonObject().apply {
             val servers = JsonArray().apply {
                 add(JsonObject().apply {
+                    addProperty("type", "udp")
                     addProperty("tag", "dns-direct")
-                    addProperty("address", "223.5.5.5")
+                    addProperty("server", "223.5.5.5")
                     addProperty("detour", TAG_DIRECT)
                 })
                 add(JsonObject().apply {
+                    addProperty("type", "udp")
                     addProperty("tag", "dns-remote")
-                    addProperty("address", "1.1.1.1")
+                    addProperty("server", "1.1.1.1")
                     addProperty("detour", TAG_PROXY)
                 })
             }
