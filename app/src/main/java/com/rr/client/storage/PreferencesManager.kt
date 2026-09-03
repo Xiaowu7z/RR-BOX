@@ -64,10 +64,30 @@ class PreferencesManager(private val context: Context) {
     }
 
     suspend fun setSelectedAppPackages(packages: Set<String>) {
+        val cleaned = packages.filter(String::isNotBlank).toSet()
         context.dataStore.edit { preferences ->
-            if (packages.isEmpty()) preferences.remove(PER_APP_SELECTED_PACKAGES)
-            else preferences[PER_APP_SELECTED_PACKAGES] = packages.filter(String::isNotBlank).toSet()
+            if (cleaned.isEmpty()) preferences.remove(PER_APP_SELECTED_PACKAGES)
+            else preferences[PER_APP_SELECTED_PACKAGES] = cleaned
         }
+    }
+
+    /**
+     * Atomically toggles one package against the latest DataStore value. This
+     * prevents rapid UI taps from overwriting a selection made milliseconds
+     * earlier with a stale Compose snapshot.
+     */
+    suspend fun updateSelectedAppPackage(packageName: String, selected: Boolean): Set<String> {
+        val packageValue = packageName.trim()
+        require(packageValue.isNotEmpty()) { "应用包名不能为空" }
+        var updated: Set<String> = emptySet()
+        context.dataStore.edit { preferences ->
+            val current = preferences[PER_APP_SELECTED_PACKAGES]?.toMutableSet() ?: mutableSetOf()
+            if (selected) current.add(packageValue) else current.remove(packageValue)
+            updated = current.toSet()
+            if (current.isEmpty()) preferences.remove(PER_APP_SELECTED_PACKAGES)
+            else preferences[PER_APP_SELECTED_PACKAGES] = current
+        }
+        return updated
     }
 
     suspend fun setBackgroundGuideShown(shown: Boolean) {
