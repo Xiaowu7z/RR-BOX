@@ -1,36 +1,40 @@
-# RR Client (RR-Android)
+# RRBOX (RR-Android)
 
-专为 **RRVPS** 定制开发的 Android 代理客户端。
+RRBOX 是一个基于 Android `VpnService` 与 sing-box libbox 的原生代理客户端，当前重点适配 RRVPS 订阅格式。
 
-## 核心特性
-- **UI 框架**: Jetpack Compose + Material 3 暗黑科技感原生中文 UI
-- **内核核心**: Sing-box `v1.14.0` (arm64-v8a 原生编译)
-- **协议支持**: VLESS Reality Vision, Hysteria2 (含端口跳跃), TUIC v5, VMess WS+Argo, AnyTLS, NaiveProxy (H2/H3)
-- **真实流量统计**: 基于单调时钟 `SystemClock.elapsedRealtime()`，直接统计 Outbound Proxy 流量，严格剔除 Direct 直连与 VPN 外部 Bypass 流量
-- **常驻通知栏**: 原生 Android VpnService 前台常驻通知，实时刷新上/下行速率与连接时长
-- **分应用分流**: 支持系统应用与第三方应用按包名直连、指定节点或全局绕过
-- **智能分流**: 内置 `.srs` 规则集，大陆域名/IP与局域网自动直连
+## 当前能力
+- **原生 Android 客户端**：Jetpack Compose + Material 3
+- **sing-box 内核**：固定构建 `v1.14.0`，当前 CI 仅输出 `arm64-v8a`
+- **节点协议**：已实机跑通 VMess WS、VLESS、Hysteria2、TUIC；订阅解析同时保留 AnyTLS、NaiveProxy 等 RRVPS sing-box outbound 原始参数
+- **VPN 前台服务**：Android 标准 `VpnService`，无需 Root
+- **通知栏状态**：连接节点、实时上/下行速率、连接时长与断开操作
+- **节点工具**：节点 Ping、节点参数本地覆盖编辑
+- **分应用 VPN**：全部代理、仅选中应用进入 VPN、选中应用绕过 VPN
+- **基础智能分流**：局域网私有地址与 `.cn` 域名直连；当前版本尚未内置完整大陆 IP/域名 `.srs` 规则集
+- **后台运行保护**：可引导用户申请忽略 Android 电池优化，降低息屏或后台时 VPN 被系统停止的概率
 
-## GitHub Actions 一键出包指南 (方案 A)
+## 构建
 
-1. 将当前 `RR-Android` 目录上传至你的 GitHub 私有仓库：
-   ```bash
-   git init
-   git add .
-   git commit -m "feat: initial commit for RR Client 0.1.0-alpha"
-   git remote add origin https://github.com/<你的用户名>/RR-Android.git
-   git branch -M main
-   git push -u origin main
-   ```
+仓库的 GitHub Actions 会构建固定版本的 sing-box libbox，然后执行单元测试、Release APK 构建、签名校验、包名/版本/ABI 检查并上传 Artifact。
 
-2. 触发构建：
-   - 每次 `git push` 到 `main` 分支会自动触发 GitHub Actions 构建。
-   - 或者在 GitHub 仓库页面点击 **Actions** -> **RR Client Automated Build** -> **Run workflow**。
+正式 Release 构建需要在 Repository Secrets 中配置：
 
-3. 下载 APK：
-   - 构建完成后（约 2-3 分钟），在 Actions 运行记录下方的 **Artifacts** 中直接下载 `RR-Client-0.1.0-alpha-arm64-v8a.zip`。
-   - 解压后即可获取签名完毕的 `RR-Client-0.1.0-alpha-arm64-v8a.apk`，通过 ADB 安装至 OnePlus 手机即可直接运行。
+```text
+RR_KEYSTORE_BASE64
+RR_KEYSTORE_PASSWORD
+RR_KEY_ALIAS
+RR_KEY_PASSWORD
+```
 
-## 安全规范
-- 任何 `.jks` / `.keystore` / `local-test-config` 均已被 `.gitignore` 隔离。
-- 签名仅通过 GitHub Secrets 动态注入，绝不泄露到代码库中。
+签名文件和密码不要提交到仓库。
+
+## 当前平台范围
+
+- 最低 Android：8.0 / API 26
+- 当前 CI 架构：arm64-v8a
+- 不依赖 Xposed / LSPosed / SystemUI Hook
+- 不要求 Root
+
+## 项目状态
+
+项目仍处于早期开发阶段。连接核心已经进入实机验证阶段，但分流、规则集、协议边界参数、流量统计口径和更多设备兼容性仍会继续完善。
