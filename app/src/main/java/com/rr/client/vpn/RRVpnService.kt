@@ -7,7 +7,6 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
-import android.widget.Toast
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.storage.TrafficHistoryEntity
@@ -18,11 +17,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class RRVpnService : VpnService() {
     private val binder = LocalBinder()
@@ -49,6 +48,12 @@ class RRVpnService : VpnService() {
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+        private val _isStarting = MutableStateFlow(false)
+        val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+        private val _lastError = MutableStateFlow<String?>(null)
+        val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
         private val _currentSpeed = MutableStateFlow(TrafficSpeed())
         val currentSpeed: StateFlow<TrafficSpeed> = _currentSpeed.asStateFlow()
 
@@ -60,6 +65,10 @@ class RRVpnService : VpnService() {
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
 
         private const val TAG = "RRVpnService"
+
+        fun clearLastError() {
+            _lastError.value = null
+        }
     }
 
     inner class LocalBinder : Binder() {
@@ -67,9 +76,6 @@ class RRVpnService : VpnService() {
     }
 
     override fun onBind(intent: Intent): IBinder {
-        // Android itself binds using the VpnService action. Returning the base
-        // binder is required for a real VPN service; the local binder is only
-        // used by an ordinary in-app bind.
         return super.onBind(intent) ?: binder
     }
 
@@ -95,12 +101,13 @@ class RRVpnService : VpnService() {
 
         val configJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
         if (configJson.isNullOrBlank()) {
-            Log.e(TAG, "VPN start requested without a configuration")
+            _lastError.value = "没有收到可运行的 sing-box 配置"
+            Log.e(TAG, _lastError.value.orEmpty())
             stopSelf(startId)
             return START_NOT_STICKY
         }
 
-        if (startJob?.isActive == true || _isRunning.value) {
+        if (_isStarting.value || _isRunning.value || startJob?.isActive == true) {
             Log.w(TAG, "Ignoring duplicate VPN start request")
             return START_NOT_STICKY
         }
@@ -110,9 +117,11 @@ class RRVpnService : VpnService() {
         resetTrafficState()
         stopping = false
         sessionPersisted = false
+        _lastError.value = null
+        _isStarting.value = true
 
-        // Android 14+ requires this immediately after startForegroundService().
-        // Native config validation and core startup happen only afterwards.
+        // Must happen immediately after startForegroundService(). Native config
+        // validation and libbox startup only run after the foreground state exists.
         val initialNotification = notificationMgr.buildNotification(
             "$activeNodeTag · 正在启动",
             TrafficSpeed(),
@@ -126,16 +135,15 @@ class RRVpnService : VpnService() {
             }
 
             if (started) {
+                _isStarting.value = false
                 _isRunning.value = true
                 notificationMgr.updateNotification(activeNodeTag, TrafficSpeed(), 0L)
+                Log.i(TAG, "VPN tunnel started: $activeNodeTag")
             } else {
                 val reason = boxCore?.lastError ?: "sing-box 内核未能启动"
+                _lastError.value = reason
                 Log.e(TAG, reason)
-                Toast.makeText(
-                    this@RRVpnService,
-                    "连接失败：$reason",
-                    Toast.LENGTH_LONG
-                ).show()
+                _isStarting.value = false
                 stopVpn(persistTraffic = false)
             }
         }
@@ -144,7 +152,8 @@ class RRVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        Log.w(TAG, "Android revoked VPN permission")
+        _lastError.value = "Android 已撤销 VPN 权限"
+        Log.w(TAG, _lastError.value.orEmpty())
         stopVpn(persistTraffic = true)
         super.onRevoke()
     }
@@ -251,6 +260,7 @@ class RRVpnService : VpnService() {
                 if (persistTraffic) persistSessionOnce(finalSession)
                 boxCore?.stopService()
             }
+            _isStarting.value = false
             _isRunning.value = false
             _currentSpeed.value = TrafficSpeed()
             stopForeground(Service.STOP_FOREGROUND_REMOVE)
@@ -281,9 +291,8 @@ class RRVpnService : VpnService() {
     override fun onDestroy() {
         startJob?.cancel()
         startJob = null
-        // Do not call stopSelf() again from onDestroy; that recursive path was
-        // responsible for repeated shutdowns in the first alpha.
         runCatching { boxCore?.stopService() }
+        _isStarting.value = false
         _isRunning.value = false
         serviceScope.cancel()
         super.onDestroy()
