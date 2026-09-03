@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -65,10 +64,7 @@ import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.friendlyLabel
-import com.rr.client.security.NodeSecurityInspector
-import com.rr.client.security.NodeSecurityRating
-import com.rr.client.security.NodeSecurityReport
-import com.rr.client.security.NodeSecuritySeverity
+import com.rr.client.qr.QrScanActivity
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
 import com.rr.client.ui.theme.CyanSecondary
@@ -111,9 +107,6 @@ fun NodeListScreen(
         result.contents?.trim()?.takeIf(String::isNotEmpty)?.let(onImportText)
     }
 
-    // Keep the node page visually calm: every newly seen group starts collapsed.
-    // User expansion is preserved while the screen is alive; refreshing a subscription
-    // does not force the selected/local group open again.
     LaunchedEffect(groups.map { it.id }) {
         val liveIds = groups.mapTo(linkedSetOf()) { it.id }
         expanded.keys.toList().filterNot(liveIds::contains).forEach(expanded::remove)
@@ -215,8 +208,9 @@ fun NodeListScreen(
                 showImportMethods = false
                 qrLauncher.launch(
                     ScanOptions()
+                        .setCaptureActivity(QrScanActivity::class.java)
                         .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                        .setPrompt("扫描代理节点二维码")
+                        .setPrompt("")
                         .setBeepEnabled(false)
                         .setOrientationLocked(false)
                 )
@@ -317,7 +311,6 @@ private fun NodeCard(
     onDeleteLocalNode: () -> Unit
 ) {
     var menuExpanded by remember(node.id) { mutableStateOf(false) }
-    var securityReport by remember(node.id) { mutableStateOf<NodeSecurityReport?>(null) }
 
     Card(
         modifier = Modifier
@@ -376,14 +369,6 @@ private fun NodeCard(
                         onClick = { menuExpanded = false; onPingNode() }
                     )
                     DropdownMenuItem(
-                        text = { Text("安全检查") },
-                        leadingIcon = { Icon(Icons.Default.Security, null) },
-                        onClick = {
-                            menuExpanded = false
-                            securityReport = NodeSecurityInspector.inspect(node)
-                        }
-                    )
-                    DropdownMenuItem(
                         text = { Text("编辑节点") },
                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                         onClick = { menuExpanded = false; onEditNode() }
@@ -406,94 +391,6 @@ private fun NodeCard(
             }
         }
     }
-
-    securityReport?.let { report ->
-        NodeSecurityDialog(
-            node = node,
-            report = report,
-            onDismiss = { securityReport = null }
-        )
-    }
-}
-
-@Composable
-private fun NodeSecurityDialog(
-    node: ProxyNode,
-    report: NodeSecurityReport,
-    onDismiss: () -> Unit
-) {
-    val ratingColor = when (report.rating) {
-        NodeSecurityRating.GOOD -> CyanPrimary
-        NodeSecurityRating.ATTENTION -> MaterialTheme.colorScheme.tertiary
-        NodeSecurityRating.HIGH_RISK -> MaterialTheme.colorScheme.error
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Column {
-                Text("节点安全检查")
-                Text(
-                    node.tag,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = ratingColor.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, ratingColor.copy(alpha = 0.48f))
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(report.title, color = ratingColor, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(3.dp))
-                        Text(report.summary, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                    }
-                }
-
-                report.findings.forEach { finding ->
-                    val findingColor = when (finding.severity) {
-                        NodeSecuritySeverity.PASS -> CyanPrimary
-                        NodeSecuritySeverity.WARNING -> MaterialTheme.colorScheme.tertiary
-                        NodeSecuritySeverity.DANGER -> MaterialTheme.colorScheme.error
-                    }
-                    val marker = when (finding.severity) {
-                        NodeSecuritySeverity.PASS -> "✓"
-                        NodeSecuritySeverity.WARNING -> "!"
-                        NodeSecuritySeverity.DANGER -> "×"
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(marker, color = findingColor, fontWeight = FontWeight.Bold)
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                finding.title,
-                                color = TextPrimary,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                finding.detail,
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                }
-
-                Text(
-                    "说明：这里只检查节点配置、协议和 TLS 暴露面；不能证明节点运营者可信，也不判断出口 IP 信誉或服务端是否记录流量。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
-    )
 }
 
 @Composable
@@ -512,7 +409,7 @@ private fun NodeImportMethodDialog(
                 Button(onClick = onQr, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.QrCodeScanner, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("扫描二维码")
+                    Text("二维码：扫描 / 图片读取")
                 }
                 OutlinedButton(onClick = onClipboard, modifier = Modifier.fillMaxWidth()) { Text("从剪贴板导入") }
                 OutlinedButton(onClick = onText, modifier = Modifier.fillMaxWidth()) { Text("粘贴 / 输入链接或 JSON") }
