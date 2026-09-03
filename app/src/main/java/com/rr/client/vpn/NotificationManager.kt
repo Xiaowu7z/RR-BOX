@@ -10,7 +10,6 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.rr.client.MainActivity
 import com.rr.client.R
-import com.rr.client.traffic.TrafficSampler
 import com.rr.client.traffic.TrafficSpeed
 
 class RRNotificationManager(private val context: Context) {
@@ -69,7 +68,6 @@ class RRNotificationManager(private val context: Context) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Collapsed status text: e.g., "RR Client · 日本 HY2  ↓12.4 MB/s  ↑826 KB/s"
         val collapsedText = "↓ ${speed.formattedDownSpeed}   ↑ ${speed.formattedUpSpeed}"
 
         val hours = durationSeconds / 3600
@@ -81,7 +79,7 @@ class RRNotificationManager(private val context: Context) {
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("RR Client · $nodeTag")
+            .setContentTitle("RRBOX · $nodeTag")
             .setContentText(collapsedText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
             .setContentIntent(pendingOpenApp)
