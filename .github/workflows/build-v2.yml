@@ -20,7 +20,7 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RR-Client-0.1.4-netfix-arm64-v8a.apk
+  OUTPUT_APK_NAME: RR-Client-0.1.5-node-tools-arm64-v8a.apk
 
 jobs:
   build:
@@ -169,7 +169,7 @@ jobs:
 
           echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
 
-      - name: Run config regression tests and build signed Release APK
+      - name: Run regression tests and build signed Release APK
         shell: bash
         env:
           RR_KEYSTORE_PASS: ${{ secrets.RR_KEYSTORE_PASSWORD }}
@@ -180,6 +180,9 @@ jobs:
 
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
+          grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
+          grep -q 'NodeLatencyTester' app/src/main/java/com/rr/client/MainActivity.kt
+          grep -q 'NODE_OVERRIDES_JSON' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
 
           gradle \
             --no-daemon \
@@ -218,7 +221,7 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.4-netfix'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.5-node-tools'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
@@ -244,7 +247,7 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RR Client 0.1.4-netfix Build Report
+          # RR Client 0.1.5-node-tools Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
@@ -264,13 +267,17 @@ jobs:
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
           - Target device: OnePlus PLK110 / CPH2745, Android 16
+          - Known-good VPN core preserved from 0.1.4-netfix
           - DNS direct-detour regression test: passed
           - Android network-interface flag guard: passed
+          - Node Ping parser test: passed
+          - Node raw-outbound edit preservation test: passed
+          - Notification permission guard: passed
           - R8/minification: disabled for alpha
           - SystemUI/Xposed module: not included
           - CI verification: unit test, signature, package, version and ABI passed
 
-          This CI report does not replace real-device startup and network validation.
+          Real-device verification is still required for notification permission UI and node editor interaction.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
@@ -281,7 +288,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RR-Client-0.1.4-netfix-arm64-v8a
+          name: RR-Client-0.1.5-node-tools-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
