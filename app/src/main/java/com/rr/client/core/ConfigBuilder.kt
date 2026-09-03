@@ -93,7 +93,8 @@ object ConfigBuilder {
                 addProperty("tag", DNS_DIRECT)
                 addProperty("server", "223.5.5.5")
                 addProperty("server_port", 53)
-                addProperty("detour", TAG_DIRECT)
+                // A direct DNS transport already uses the platform/default dialer.
+                // Detouring it to the empty direct outbound is rejected by sing-box 1.14.
             })
             add(JsonObject().apply {
                 addProperty("type", "tls")
