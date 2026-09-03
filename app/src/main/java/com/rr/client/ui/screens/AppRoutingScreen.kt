@@ -45,13 +45,23 @@ fun AppRoutingScreen(
     apps: List<AppRouteConfig>,
     perAppMode: String,
     selectedPackages: Set<String>,
+    applyingRouting: Boolean,
     onModeChanged: (String) -> Unit,
     onAppSelectionChanged: (String, Boolean) -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    val filteredApps = apps.filter {
-        it.appName.contains(searchQuery, ignoreCase = true) ||
-            it.packageName.contains(searchQuery, ignoreCase = true)
+
+    val sortedApps = remember(apps, selectedPackages) {
+        apps.sortedWith(
+            compareByDescending<AppRouteConfig> { it.packageName in selectedPackages }
+                .thenBy { it.appName.lowercase() }
+        )
+    }
+    val filteredApps = remember(sortedApps, searchQuery) {
+        sortedApps.filter {
+            it.appName.contains(searchQuery, ignoreCase = true) ||
+                it.packageName.contains(searchQuery, ignoreCase = true)
+        }
     }
 
     Column(
@@ -80,6 +90,7 @@ fun AppRoutingScreen(
                 val selected = perAppMode == mode
                 OutlinedButton(
                     onClick = { onModeChanged(mode) },
+                    enabled = !applyingRouting,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.outlinedButtonColors(
@@ -96,28 +107,51 @@ fun AppRoutingScreen(
         Spacer(modifier = Modifier.height(10.dp))
         Text(
             text = when (perAppMode) {
-                "ALLOW_LIST" -> "仅开关选中的应用进入 VPN；未选中的应用完全绕过 VPN。至少选择 1 个应用才能连接。"
-                "DISALLOW_LIST" -> "开关选中的应用完全绕过 VPN；其余应用进入 VPN。"
-                else -> "所有应用都进入 VPN。下面的应用选择会保留，但在此模式下不生效。"
+                "ALLOW_LIST" -> "只有勾选的应用进入 RRBOX；其它应用直接使用系统网络。"
+                "DISALLOW_LIST" -> "勾选的应用完全绕过 RRBOX；其它应用进入 VPN。"
+                else -> "所有应用进入 RRBOX。全局模式不需要维护应用清单。"
             },
             style = MaterialTheme.typography.bodySmall,
             color = TextSecondary
         )
-        if (perAppMode != "ALL") {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "已选择 ${selectedPackages.size} 个应用",
-                style = MaterialTheme.typography.labelMedium,
-                color = CyanPrimary
-            )
+        if (applyingRouting) {
+            Spacer(Modifier.height(4.dp))
+            Text("正在自动重建 VPN…", style = MaterialTheme.typography.labelMedium, color = CyanPrimary)
         }
 
+        if (perAppMode == "ALL") {
+            Spacer(modifier = Modifier.height(16.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                border = BorderStroke(1.dp, CardBorder)
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("全局模式已启用", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "应用选择列表在此模式下隐藏；切换到“仅选中代理”或“选中绕过”后会恢复之前保存的选择。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+            return@Column
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "已选择 ${selectedPackages.size} 个应用 · 已选择应用自动置顶",
+            style = MaterialTheme.typography.labelMedium,
+            color = CyanPrimary
+        )
         Spacer(modifier = Modifier.height(12.dp))
 
         OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
-            placeholder = { Text("搜索应用或包名...") },
+            placeholder = { Text("搜索应用或包名…") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             shape = RoundedCornerShape(12.dp),
@@ -138,7 +172,7 @@ fun AppRoutingScreen(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                    border = BorderStroke(1.dp, if (checked && perAppMode != "ALL") CyanPrimary else CardBorder)
+                    border = BorderStroke(1.dp, if (checked) CyanPrimary else CardBorder)
                 ) {
                     Row(
                         modifier = Modifier
@@ -162,10 +196,8 @@ fun AppRoutingScreen(
                         }
                         Switch(
                             checked = checked,
-                            enabled = perAppMode != "ALL",
-                            onCheckedChange = { enabled ->
-                                onAppSelectionChanged(app.packageName, enabled)
-                            },
+                            enabled = !applyingRouting,
+                            onCheckedChange = { enabled -> onAppSelectionChanged(app.packageName, enabled) },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = DarkBackground,
                                 checkedTrackColor = CyanPrimary
