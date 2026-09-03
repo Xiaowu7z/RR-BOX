@@ -1,0 +1,32 @@
+name: Sync RRBOX 0.9.1 release tag
+
+on:
+  workflow_run:
+    workflows: ["RRBOX 0.9.1 Build & Release (arm64-v8a)"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  retag:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout final main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Point v0.9.1 at the verified build commit
+        shell: bash
+        env:
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VERIFIED_SHA"
+          git tag -f v0.9.1 "$VERIFIED_SHA"
+          git push origin --force refs/tags/v0.9.1
