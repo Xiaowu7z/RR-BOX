@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
@@ -45,9 +46,15 @@ import com.rr.client.core.NodeOverridePatcher
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.AppManager
+import com.rr.client.routing.ChinaRuleSetManager
+import com.rr.client.routing.PerAppPolicyResolver
+import com.rr.client.security.PinSecurity
 import com.rr.client.subscription.SubscriptionFetcher
 import com.rr.client.subscription.model.SubProfile
 import com.rr.client.ui.components.NodeEditDialog
+import com.rr.client.ui.components.PinLockUiKt
+import com.rr.client.ui.components.PinSetupDialog
+import com.rr.client.ui.components.PinUnlockScreen
 import com.rr.client.ui.screens.AppRoutingScreen
 import com.rr.client.ui.screens.DashboardScreen
 import com.rr.client.ui.screens.NodeListScreen
@@ -60,9 +67,12 @@ import com.rr.client.vpn.RRNotificationManager
 import com.rr.client.vpn.RRVpnService
 import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -73,6 +83,9 @@ import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     private val backgroundOptimizationExempt = MutableStateFlow(false)
+    private val appUnlocked = MutableStateFlow<Boolean?>(null)
+    private var pinEnabledCached = false
+    private var routingRestartJob: Job? = null
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -103,13 +116,15 @@ class MainActivity : ComponentActivity() {
     private var pendingConfigJson: String? = null
     private var pendingNodeTag: String? = null
     private var pendingNodeId: String? = null
+    private var pendingPerAppMode: String = PerAppPolicyResolver.MODE_ALL
+    private var pendingSelectedPackages: Set<String> = emptySet()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         updateBackgroundProtectionState()
         setContent {
             RRClientTheme {
-                MainApp()
+                SecurityGate()
             }
         }
         requestNotificationPermissionIfNeeded()
@@ -120,8 +135,69 @@ class MainActivity : ComponentActivity() {
         updateBackgroundProtectionState()
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (pinEnabledCached && !isChangingConfigurations) {
+            appUnlocked.value = false
+        }
+    }
+
     @Composable
-    fun MainApp() {
+    private fun SecurityGate() {
+        val prefs = RRApplication.instance.preferencesManager
+        val unlocked by appUnlocked.collectAsState()
+        var pinEnabled by remember { mutableStateOf<Boolean?>(null) }
+        var verifying by remember { mutableStateOf(false) }
+        var unlockError by remember { mutableStateOf<String?>(null) }
+
+        LaunchedEffect(Unit) {
+            prefs.pinEnabled.collect { enabled ->
+                val firstValue = pinEnabled == null
+                pinEnabled = enabled
+                pinEnabledCached = enabled
+                when {
+                    !enabled -> appUnlocked.value = true
+                    firstValue || appUnlocked.value == null -> appUnlocked.value = false
+                }
+            }
+        }
+
+        when {
+            pinEnabled == null || unlocked == null -> {
+                Surface(modifier = Modifier.fillMaxSize(), color = DarkBackground) {}
+            }
+
+            pinEnabled == true && unlocked != true -> {
+                PinUnlockScreen(
+                    verifying = verifying,
+                    errorMessage = unlockError,
+                    onUnlock = { pin ->
+                        if (verifying) return@PinUnlockScreen
+                        lifecycleScope.launch {
+                            verifying = true
+                            val salt = runCatching { prefs.pinSalt.first() }.getOrNull()
+                            val hash = runCatching { prefs.pinHash.first() }.getOrNull()
+                            val valid = withContext(Dispatchers.Default) {
+                                PinSecurity.verify(pin, salt, hash)
+                            }
+                            verifying = false
+                            if (valid) {
+                                unlockError = null
+                                appUnlocked.value = true
+                            } else {
+                                unlockError = "PIN 不正确"
+                            }
+                        }
+                    }
+                )
+            }
+
+            else -> MainApp()
+        }
+    }
+
+    @Composable
+    private fun MainApp() {
         var selectedTab by remember { mutableIntStateOf(0) }
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
         val isVpnStarting by RRVpnService.isStarting.collectAsState()
@@ -134,16 +210,22 @@ class MainActivity : ComponentActivity() {
         val prefs = RRApplication.instance.preferencesManager
         val nodeOverrides by prefs.nodeOverrides.collectAsState(initial = emptyMap())
         val selectedAppPackages by prefs.selectedAppPackages.collectAsState(initial = emptySet())
+        val pinEnabled by prefs.pinEnabled.collectAsState(initial = false)
+        val ruleSetLastUpdated by prefs.chinaRuleSetLastUpdated.collectAsState(initial = 0L)
 
         var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
         var selectedNodeId by remember { mutableStateOf<String?>(null) }
         var smartRouting by remember { mutableStateOf(true) }
-        var perAppMode by remember { mutableStateOf("ALL") }
+        var perAppMode by remember { mutableStateOf(PerAppPolicyResolver.MODE_ALL) }
         var refreshingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
         var addingProfile by remember { mutableStateOf(false) }
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
         var latencyStates by remember { mutableStateOf<Map<String, NodeLatencyState>>(emptyMap()) }
         var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
+        var applyingRouting by remember { mutableStateOf(false) }
+        var pendingReconnectAfterSelection by remember { mutableStateOf(false) }
+        var updatingRuleSets by remember { mutableStateOf(false) }
+        var showPinSetup by remember { mutableStateOf(false) }
 
         val baseNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
         val allNodes = remember(baseNodes, nodeOverrides) {
@@ -166,7 +248,8 @@ class MainActivity : ComponentActivity() {
 
             val storedId = runCatching { prefs.selectedNodeId.first() }.getOrNull()
             smartRouting = runCatching { prefs.smartRouting.first() }.getOrDefault(true)
-            perAppMode = runCatching { prefs.perAppMode.first() }.getOrDefault("ALL")
+            perAppMode = runCatching { prefs.perAppMode.first() }
+                .getOrDefault(PerAppPolicyResolver.MODE_ALL)
 
             val nodesNow = loadedProfiles.flatMap { it.nodes }
             val resolved = if (nodesNow.any { it.id == storedId }) storedId else nodesNow.firstOrNull()?.id
@@ -175,6 +258,12 @@ class MainActivity : ComponentActivity() {
 
             val appMgr = AppManager(this@MainActivity)
             apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
+
+            // Copy the signed build-time snapshot into private storage. Failure
+            // falls back to the lightweight .cn rule instead of blocking VPN.
+            withContext(Dispatchers.IO) {
+                ChinaRuleSetManager.ensureBundled(this@MainActivity)
+            }
         }
 
         fun refreshFromProfiles(updated: List<SubProfile>) {
@@ -190,6 +279,48 @@ class MainActivity : ComponentActivity() {
         }
 
         fun toast(text: String) = Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
+
+        fun currentTargetNode(): ProxyNode? = selectedNode ?: allNodes.firstOrNull()
+
+        fun scheduleRoutingApply(
+            mode: String,
+            packages: Set<String>,
+            smart: Boolean,
+            reconnectWhenStopped: Boolean = false
+        ) {
+            val node = currentTargetNode() ?: return
+            routingRestartJob?.cancel()
+            routingRestartJob = lifecycleScope.launch {
+                applyingRouting = true
+                delay(250L)
+
+                if (mode == PerAppPolicyResolver.MODE_ALLOW_LIST && packages.isEmpty()) {
+                    if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
+                        sendStopVpn()
+                    }
+                    pendingReconnectAfterSelection = true
+                    applyingRouting = false
+                    toast("仅选中代理模式需要至少选择 1 个应用；当前 VPN 已安全断开")
+                    return@launch
+                }
+
+                val result = buildRuntimeConfig(node, allNodes, apps, smart)
+                result.onSuccess { config ->
+                    when {
+                        RRVpnService.isRunning.value || RRVpnService.isStarting.value -> {
+                            sendRestartVpn(config, node.tag, node.id, mode, packages)
+                        }
+                        reconnectWhenStopped -> {
+                            startVpnWithPermissionCheck(config, node.tag, node.id, mode, packages)
+                        }
+                    }
+                }.onFailure { error ->
+                    toast("分流配置失败：${error.message ?: error.javaClass.simpleName}")
+                }
+                delay(450L)
+                applyingRouting = false
+            }
+        }
 
         fun addProfile(name: String, url: String) {
             val trimmedUrl = url.trim()
@@ -318,23 +449,16 @@ class MainActivity : ComponentActivity() {
                         selectedNode = selectedNode,
                         onToggleVpn = onToggle@{
                             when {
-                                isVpnRunning -> {
-                                    val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
-                                        action = RRNotificationManager.ACTION_STOP_VPN
-                                    }
-                                    startService(stopIntent)
-                                }
-
+                                isVpnRunning -> sendStopVpn()
                                 isVpnStarting -> toast("VPN 正在启动，请稍候")
-
                                 else -> {
-                                    val targetNode = selectedNode ?: allNodes.firstOrNull()
+                                    val targetNode = currentTargetNode()
                                     if (targetNode == null) {
                                         toast("还没有任何节点：请先到「订阅」页添加订阅链接并同步")
                                         selectedTab = 3
                                         return@onToggle
                                     }
-                                    if (perAppMode == "ALLOW_LIST" && selectedAppPackages.isEmpty()) {
+                                    if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST && selectedAppPackages.isEmpty()) {
                                         toast("当前是「仅选中代理」模式，请先到「分流」页至少选择 1 个应用")
                                         selectedTab = 2
                                         return@onToggle
@@ -342,23 +466,15 @@ class MainActivity : ComponentActivity() {
                                     if (selectedNode == null) selectNode(targetNode.id)
 
                                     lifecycleScope.launch {
-                                        val result = withContext(Dispatchers.Default) {
-                                            runCatching {
-                                                val configJson = ConfigBuilder.buildSingBoxConfig(
-                                                    selectedNode = targetNode,
-                                                    allNodes = allNodes,
-                                                    appRoutes = apps,
-                                                    smartRouting = smartRouting,
-                                                    perAppMode = perAppMode,
-                                                    selectedPackages = selectedAppPackages
-                                                )
-                                                Libbox.checkConfig(configJson)
-                                                configJson
-                                            }
-                                        }
-
+                                        val result = buildRuntimeConfig(targetNode, allNodes, apps, smartRouting)
                                         result.onSuccess { configJson ->
-                                            startVpnWithPermissionCheck(configJson, targetNode.tag, targetNode.id)
+                                            startVpnWithPermissionCheck(
+                                                configJson,
+                                                targetNode.tag,
+                                                targetNode.id,
+                                                perAppMode,
+                                                selectedAppPackages
+                                            )
                                         }.onFailure { error ->
                                             toast("配置校验失败：${error.message ?: error.javaClass.simpleName}")
                                         }
@@ -394,20 +510,31 @@ class MainActivity : ComponentActivity() {
                         apps = apps,
                         perAppMode = perAppMode,
                         selectedPackages = selectedAppPackages,
+                        applyingRouting = applyingRouting,
                         onModeChanged = { mode ->
                             perAppMode = mode
                             lifecycleScope.launch { prefs.setPerAppMode(mode) }
-                            if (isVpnRunning || isVpnStarting) {
-                                toast("分应用模式已保存，断开并重新连接后生效")
-                            }
+                            scheduleRoutingApply(mode, selectedAppPackages, smartRouting)
                         },
                         onAppSelectionChanged = { packageName, selected ->
                             val updated = selectedAppPackages.toMutableSet().apply {
                                 if (selected) add(packageName) else remove(packageName)
                             }.toSet()
                             lifecycleScope.launch { prefs.setSelectedAppPackages(updated) }
-                            if (isVpnRunning || isVpnStarting) {
-                                toast("应用选择已保存，断开并重新连接后生效")
+
+                            if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST && updated.isEmpty()) {
+                                if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) sendStopVpn()
+                                pendingReconnectAfterSelection = true
+                                toast("仅选中代理已没有应用，VPN 已断开；重新选择应用后会自动恢复")
+                            } else {
+                                val reconnect = pendingReconnectAfterSelection
+                                if (updated.isNotEmpty()) pendingReconnectAfterSelection = false
+                                scheduleRoutingApply(
+                                    perAppMode,
+                                    updated,
+                                    smartRouting,
+                                    reconnectWhenStopped = reconnect
+                                )
                             }
                         }
                     )
@@ -424,14 +551,40 @@ class MainActivity : ComponentActivity() {
                     4 -> SettingsScreen(
                         smartRouting = smartRouting,
                         backgroundProtected = backgroundProtected,
-                        onSmartRoutingChanged = {
-                            smartRouting = it
-                            lifecycleScope.launch { prefs.setSmartRouting(it) }
-                            if (isVpnRunning || isVpnStarting) {
-                                toast("智能分流设置已保存，断开并重新连接后生效")
+                        ruleSetLastUpdated = ruleSetLastUpdated,
+                        ruleSetUpdating = updatingRuleSets,
+                        pinEnabled = pinEnabled,
+                        onSmartRoutingChanged = { enabled ->
+                            smartRouting = enabled
+                            lifecycleScope.launch { prefs.setSmartRouting(enabled) }
+                            scheduleRoutingApply(perAppMode, selectedAppPackages, enabled)
+                        },
+                        onRequestBackgroundProtection = { requestBackgroundProtection() },
+                        onUpdateRuleSets = {
+                            if (updatingRuleSets) return@SettingsScreen
+                            updatingRuleSets = true
+                            lifecycleScope.launch {
+                                val result = ChinaRuleSetManager.update(this@MainActivity)
+                                updatingRuleSets = false
+                                result.onSuccess { update ->
+                                    prefs.setChinaRuleSetLastUpdated(update.updatedAtMillis)
+                                    toast("中国规则更新成功，共 ${update.totalBytes / 1024} KB")
+                                    scheduleRoutingApply(perAppMode, selectedAppPackages, smartRouting)
+                                }.onFailure { error ->
+                                    toast("规则更新失败，已保留旧规则：${error.message ?: "网络错误"}")
+                                }
                             }
                         },
-                        onRequestBackgroundProtection = { requestBackgroundProtection() }
+                        onEnablePin = { showPinSetup = true },
+                        onDisablePin = {
+                            lifecycleScope.launch {
+                                prefs.disablePinLock()
+                                pinEnabledCached = false
+                                appUnlocked.value = true
+                                toast("软件 PIN 锁已关闭")
+                            }
+                        },
+                        onChangePin = { showPinSetup = true }
                     )
                 }
             }
@@ -456,6 +609,48 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             )
+        }
+
+        if (showPinSetup) {
+            PinSetupDialog(
+                onDismiss = { showPinSetup = false },
+                onSave = { pin ->
+                    lifecycleScope.launch {
+                        val credential = withContext(Dispatchers.Default) {
+                            PinSecurity.createCredential(pin)
+                        }
+                        prefs.savePinCredential(credential.saltBase64, credential.hashBase64)
+                        pinEnabledCached = true
+                        appUnlocked.value = true
+                        showPinSetup = false
+                        toast("RRBOX PIN 已保存")
+                    }
+                }
+            )
+        }
+    }
+
+    private suspend fun buildRuntimeConfig(
+        targetNode: ProxyNode,
+        allNodes: List<ProxyNode>,
+        apps: List<AppRouteConfig>,
+        smartRouting: Boolean
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ruleSets = if (smartRouting) {
+                ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrNull()
+            } else {
+                null
+            }
+            val configJson = ConfigBuilder.buildSingBoxConfig(
+                selectedNode = targetNode,
+                allNodes = allNodes,
+                appRoutes = apps,
+                smartRouting = smartRouting,
+                ruleSets = ruleSets
+            )
+            Libbox.checkConfig(configJson)
+            configJson
         }
     }
 
@@ -523,10 +718,18 @@ class MainActivity : ComponentActivity() {
         backgroundOptimizationExempt.value = isIgnoringBatteryOptimizations()
     }
 
-    private fun startVpnWithPermissionCheck(configJson: String, nodeTag: String, nodeId: String) {
+    private fun startVpnWithPermissionCheck(
+        configJson: String,
+        nodeTag: String,
+        nodeId: String,
+        perAppMode: String,
+        selectedPackages: Set<String>
+    ) {
         pendingConfigJson = configJson
         pendingNodeTag = nodeTag
         pendingNodeId = nodeId
+        pendingPerAppMode = perAppMode
+        pendingSelectedPackages = selectedPackages
 
         val intent = VpnService.prepare(this)
         if (intent != null) vpnLauncher.launch(intent) else startVpnServiceInternal()
@@ -537,11 +740,14 @@ class MainActivity : ComponentActivity() {
         val tag = pendingNodeTag ?: "Node"
         val id = pendingNodeId ?: ""
 
-        val serviceIntent = Intent(this, RRVpnService::class.java).apply {
-            putExtra(RRVpnService.EXTRA_CONFIG_JSON, config)
-            putExtra(RRVpnService.EXTRA_NODE_TAG, tag)
-            putExtra(RRVpnService.EXTRA_NODE_ID, id)
-        }
+        val serviceIntent = vpnIntent(
+            action = null,
+            config = config,
+            nodeTag = tag,
+            nodeId = id,
+            perAppMode = pendingPerAppMode,
+            selectedPackages = pendingSelectedPackages
+        )
 
         runCatching {
             ContextCompat.startForegroundService(this, serviceIntent)
@@ -555,9 +761,54 @@ class MainActivity : ComponentActivity() {
         clearPendingVpn()
     }
 
+    private fun sendRestartVpn(
+        config: String,
+        nodeTag: String,
+        nodeId: String,
+        perAppMode: String,
+        selectedPackages: Set<String>
+    ) {
+        val intent = vpnIntent(
+            action = RRNotificationManager.ACTION_RESTART_VPN,
+            config = config,
+            nodeTag = nodeTag,
+            nodeId = nodeId,
+            perAppMode = perAppMode,
+            selectedPackages = selectedPackages
+        )
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun sendStopVpn() {
+        startService(Intent(this, RRVpnService::class.java).apply {
+            action = RRNotificationManager.ACTION_STOP_VPN
+        })
+    }
+
+    private fun vpnIntent(
+        action: String?,
+        config: String,
+        nodeTag: String,
+        nodeId: String,
+        perAppMode: String,
+        selectedPackages: Set<String>
+    ): Intent = Intent(this, RRVpnService::class.java).apply {
+        this.action = action
+        putExtra(RRVpnService.EXTRA_CONFIG_JSON, config)
+        putExtra(RRVpnService.EXTRA_NODE_TAG, nodeTag)
+        putExtra(RRVpnService.EXTRA_NODE_ID, nodeId)
+        putExtra(RRVpnService.EXTRA_PER_APP_MODE, perAppMode)
+        putStringArrayListExtra(
+            RRVpnService.EXTRA_SELECTED_PACKAGES,
+            ArrayList(selectedPackages.filter(String::isNotBlank).sorted())
+        )
+    }
+
     private fun clearPendingVpn() {
         pendingConfigJson = null
         pendingNodeTag = null
         pendingNodeId = null
+        pendingPerAppMode = PerAppPolicyResolver.MODE_ALL
+        pendingSelectedPackages = emptySet()
     }
 }
