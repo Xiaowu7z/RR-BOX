@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
 import com.rr.client.core.model.AppRouteConfig
@@ -24,6 +25,7 @@ import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.RRClientTheme
 import com.rr.client.vpn.RRVpnService
+import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -38,6 +40,7 @@ class MainActivity : ComponentActivity() {
         if (result.resultCode == RESULT_OK) {
             startVpnServiceInternal()
         } else {
+            clearPendingVpn()
             Toast.makeText(this, "VPN 授权未通过", Toast.LENGTH_SHORT).show()
         }
     }
@@ -59,13 +62,14 @@ class MainActivity : ComponentActivity() {
     fun MainApp() {
         var selectedTab by remember { mutableIntStateOf(0) }
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
+        val isVpnStarting by RRVpnService.isStarting.collectAsState()
+        val lastVpnError by RRVpnService.lastError.collectAsState()
         val currentSpeed by RRVpnService.currentSpeed.collectAsState()
         val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
 
         val db = RRApplication.instance.database
         val prefs = RRApplication.instance.preferencesManager
 
-        // ------- 订阅组 / 节点（无任何内置预设，全部来自用户添加的订阅） -------
         var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
         var selectedNodeId by remember { mutableStateOf<String?>(null) }
         var smartRouting by remember { mutableStateOf(true) }
@@ -74,13 +78,16 @@ class MainActivity : ComponentActivity() {
         var addingProfile by remember { mutableStateOf(false) }
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
 
-        val allNodes = remember(subProfiles) {
-            subProfiles.flatMap { it.nodes }
-        }
+        val allNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
         val selectedNode = allNodes.find { it.id == selectedNodeId }
         val selectedProfile = subProfiles.firstOrNull { p -> p.nodes.any { it.id == selectedNodeId } }
 
-        // 首次进入：加载本地订阅数据与偏好
+        LaunchedEffect(lastVpnError) {
+            val message = lastVpnError?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+            Toast.makeText(this@MainActivity, "连接失败：$message", Toast.LENGTH_LONG).show()
+            RRVpnService.clearLastError()
+        }
+
         LaunchedEffect(Unit) {
             val loadedProfiles = withContext(Dispatchers.IO) {
                 db.profileDao().getAllProfiles().map { SubProfile.fromEntity(it) }
@@ -92,15 +99,9 @@ class MainActivity : ComponentActivity() {
             perAppMode = runCatching { prefs.perAppMode.first() }.getOrDefault("ALL")
 
             val nodesNow = loadedProfiles.flatMap { it.nodes }
-            val resolved = if (nodesNow.any { it.id == storedId }) {
-                storedId
-            } else {
-                nodesNow.firstOrNull()?.id
-            }
+            val resolved = if (nodesNow.any { it.id == storedId }) storedId else nodesNow.firstOrNull()?.id
             selectedNodeId = resolved
-            if (resolved != null) {
-                prefs.setSelectedNodeId(resolved)
-            }
+            if (resolved != null) prefs.setSelectedNodeId(resolved)
 
             val appMgr = AppManager(this@MainActivity)
             apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
@@ -110,18 +111,14 @@ class MainActivity : ComponentActivity() {
             subProfiles = updated
             val nodesNow = updated.flatMap { it.nodes }
             val current = selectedNodeId
-            val resolved = if (nodesNow.any { it.id == current }) current
-            else nodesNow.firstOrNull()?.id
+            val resolved = if (nodesNow.any { it.id == current }) current else nodesNow.firstOrNull()?.id
             if (resolved != current) {
                 selectedNodeId = resolved
-                if (resolved != null) {
-                    lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
-                }
+                if (resolved != null) lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
             }
         }
 
-        fun toast(text: String) =
-            Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
+        fun toast(text: String) = Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
 
         fun addProfile(name: String, url: String) {
             val trimmedUrl = url.trim()
@@ -131,10 +128,11 @@ class MainActivity : ComponentActivity() {
             }
             addingProfile = true
             val profileId = UUID.randomUUID().toString().substring(0, 8)
-            val profileName = name.trim().ifEmpty { "订阅 ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())}" }
+            val profileName = name.trim().ifEmpty {
+                "订阅 ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())}"
+            }
             lifecycleScope.launch {
-                val fetcher = SubscriptionFetcher()
-                val result = fetcher.fetchSubscription(trimmedUrl, profileId, profileName)
+                val result = SubscriptionFetcher().fetchSubscription(trimmedUrl, profileId, profileName)
                 addingProfile = false
                 result.onSuccess { (newNodes, userInfo) ->
                     val profile = SubProfile(
@@ -158,8 +156,7 @@ class MainActivity : ComponentActivity() {
             val existing = subProfiles.find { it.id == profileId } ?: return
             refreshingIds = refreshingIds + profileId
             lifecycleScope.launch {
-                val fetcher = SubscriptionFetcher()
-                val result = fetcher.fetchSubscription(existing.url, existing.id, existing.name)
+                val result = SubscriptionFetcher().fetchSubscription(existing.url, existing.id, existing.name)
                 refreshingIds = refreshingIds - profileId
                 result.onSuccess { (newNodes, userInfo) ->
                     val updated = existing.copy(
@@ -178,7 +175,7 @@ class MainActivity : ComponentActivity() {
 
         fun deleteProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId } ?: return
-            if (isVpnRunning) {
+            if (isVpnRunning || isVpnStarting) {
                 toast("请先断开连接再删除订阅")
                 return
             }
@@ -198,36 +195,11 @@ class MainActivity : ComponentActivity() {
             containerColor = DarkBackground,
             bottomBar = {
                 NavigationBar(containerColor = DarkSurface) {
-                    NavigationBarItem(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        icon = { Icon(Icons.Default.Speed, contentDescription = "仪表盘") },
-                        label = { Text("仪表盘") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        icon = { Icon(Icons.Default.Dns, contentDescription = "节点") },
-                        label = { Text("节点") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 2,
-                        onClick = { selectedTab = 2 },
-                        icon = { Icon(Icons.Default.Apps, contentDescription = "分流") },
-                        label = { Text("分流") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 3,
-                        onClick = { selectedTab = 3 },
-                        icon = { Icon(Icons.Default.CloudDownload, contentDescription = "订阅") },
-                        label = { Text("订阅") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedTab == 4,
-                        onClick = { selectedTab = 4 },
-                        icon = { Icon(Icons.Default.Settings, contentDescription = "设置") },
-                        label = { Text("设置") }
-                    )
+                    NavigationBarItem(selected = selectedTab == 0, onClick = { selectedTab = 0 }, icon = { Icon(Icons.Default.Speed, "仪表盘") }, label = { Text("仪表盘") })
+                    NavigationBarItem(selected = selectedTab == 1, onClick = { selectedTab = 1 }, icon = { Icon(Icons.Default.Dns, "节点") }, label = { Text("节点") })
+                    NavigationBarItem(selected = selectedTab == 2, onClick = { selectedTab = 2 }, icon = { Icon(Icons.Default.Apps, "分流") }, label = { Text("分流") })
+                    NavigationBarItem(selected = selectedTab == 3, onClick = { selectedTab = 3 }, icon = { Icon(Icons.Default.CloudDownload, "订阅") }, label = { Text("订阅") })
+                    NavigationBarItem(selected = selectedTab == 4, onClick = { selectedTab = 4 }, icon = { Icon(Icons.Default.Settings, "设置") }, label = { Text("设置") })
                 }
             }
         ) { paddingValues ->
@@ -241,36 +213,54 @@ class MainActivity : ComponentActivity() {
                         profileName = selectedProfile?.name,
                         selectedNode = selectedNode,
                         onToggleVpn = onToggle@{
-                            if (isVpnRunning) {
-                                val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
-                                    action = com.rr.client.vpn.RRNotificationManager.ACTION_STOP_VPN
+                            when {
+                                isVpnRunning -> {
+                                    val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
+                                        action = com.rr.client.vpn.RRNotificationManager.ACTION_STOP_VPN
+                                    }
+                                    startService(stopIntent)
                                 }
-                                startService(stopIntent)
-                            } else {
-                                val targetNode = selectedNode ?: allNodes.firstOrNull()
-                                if (targetNode == null) {
-                                    toast("还没有任何节点：请先到「订阅」页添加订阅链接并同步")
-                                    selectedTab = 3
-                                    return@onToggle
-                                }
-                                if (selectedNode == null && targetNode != null) {
-                                    selectNode(targetNode.id)
-                                }
-                                try {
-                                    val configJson = ConfigBuilder.buildSingBoxConfig(
-                                        selectedNode = targetNode,
-                                        allNodes = allNodes,
-                                        appRoutes = apps,
-                                        smartRouting = smartRouting
-                                    )
-                                    startVpnWithPermissionCheck(configJson, targetNode.tag, targetNode.id)
-                                } catch (e: Exception) {
-                                    toast("无法连接：${e.message ?: "配置生成失败"}")
+
+                                isVpnStarting -> toast("VPN 正在启动，请稍候")
+
+                                else -> {
+                                    val targetNode = selectedNode ?: allNodes.firstOrNull()
+                                    if (targetNode == null) {
+                                        toast("还没有任何节点：请先到「订阅」页添加订阅链接并同步")
+                                        selectedTab = 3
+                                        return@onToggle
+                                    }
+                                    if (selectedNode == null) selectNode(targetNode.id)
+
+                                    lifecycleScope.launch {
+                                        val result = withContext(Dispatchers.Default) {
+                                            runCatching {
+                                                val configJson = ConfigBuilder.buildSingBoxConfig(
+                                                    selectedNode = targetNode,
+                                                    allNodes = allNodes,
+                                                    appRoutes = apps,
+                                                    smartRouting = smartRouting
+                                                )
+                                                // Use the exact bundled libbox parser before Android
+                                                // foreground-service/VPN startup. Invalid schema must
+                                                // never be able to crash the service process again.
+                                                Libbox.checkConfig(configJson)
+                                                configJson
+                                            }
+                                        }
+
+                                        result.onSuccess { configJson ->
+                                            startVpnWithPermissionCheck(configJson, targetNode.tag, targetNode.id)
+                                        }.onFailure { error ->
+                                            toast("配置校验失败：${error.message ?: error.javaClass.simpleName}")
+                                        }
+                                    }
                                 }
                             }
                         },
                         onNavigateToNodes = { selectedTab = 1 }
                     )
+
                     1 -> NodeListScreen(
                         nodes = allNodes,
                         selectedNodeId = selectedNodeId,
@@ -280,6 +270,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onGoToSubscription = { selectedTab = 3 }
                     )
+
                     2 -> AppRoutingScreen(
                         apps = apps,
                         perAppMode = perAppMode,
@@ -291,6 +282,7 @@ class MainActivity : ComponentActivity() {
                             apps = apps.map { if (it.packageName == updatedApp.packageName) updatedApp else it }
                         }
                     )
+
                     3 -> SubscriptionScreen(
                         profiles = subProfiles,
                         busyIds = refreshingIds,
@@ -299,6 +291,7 @@ class MainActivity : ComponentActivity() {
                         onRefreshProfile = { id -> refreshProfile(id) },
                         onDeleteProfile = { id -> deleteProfile(id) }
                     )
+
                     4 -> SettingsScreen(
                         smartRouting = smartRouting,
                         onSmartRoutingChanged = {
@@ -317,12 +310,7 @@ class MainActivity : ComponentActivity() {
         pendingNodeId = nodeId
 
         val intent = VpnService.prepare(this)
-        if (intent != null) {
-            vpnLauncher.launch(intent)
-        } else {
-            // Permission already granted, start VPN directly
-            startVpnServiceInternal()
-        }
+        if (intent != null) vpnLauncher.launch(intent) else startVpnServiceInternal()
     }
 
     private fun startVpnServiceInternal() {
@@ -335,6 +323,22 @@ class MainActivity : ComponentActivity() {
             putExtra(RRVpnService.EXTRA_NODE_TAG, tag)
             putExtra(RRVpnService.EXTRA_NODE_ID, id)
         }
-        startForegroundService(serviceIntent)
+
+        runCatching {
+            ContextCompat.startForegroundService(this, serviceIntent)
+        }.onFailure { error ->
+            Toast.makeText(
+                this,
+                "无法启动 VPN 服务：${error.message ?: error.javaClass.simpleName}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+        clearPendingVpn()
+    }
+
+    private fun clearPendingVpn() {
+        pendingConfigJson = null
+        pendingNodeTag = null
+        pendingNodeId = null
     }
 }
