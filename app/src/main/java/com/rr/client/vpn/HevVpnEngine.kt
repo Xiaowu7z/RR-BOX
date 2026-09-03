@@ -49,9 +49,7 @@ class HevVpnEngine(
                 .setSession("RRBOX · HEV")
                 .setMtu(HevTunnelConfig.MTU)
                 .addAddress(HevTunnelConfig.IPV4_CLIENT, HevTunnelConfig.IPV4_PREFIX)
-                .addAddress(HevTunnelConfig.IPV6_CLIENT, HevTunnelConfig.IPV6_PREFIX)
                 .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
                 .addDnsServer(HevTunnelConfig.MAPPED_DNS)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -63,7 +61,7 @@ class HevVpnEngine(
             val pfd = builder.establish()
                 ?: error("Android 拒绝建立 HEV VPN 接口")
             tunPfd = pfd
-            onLog("HEV Android TUN 已建立，fd=${pfd.fd}, mtu=${HevTunnelConfig.MTU}")
+            onLog("HEV Android TUN 已建立，fd=${pfd.fd}, mtu=${HevTunnelConfig.MTU}, IPv4-only")
 
             workingDir.mkdirs()
             val configFile = File(workingDir, "hev-socks5-tunnel.yaml")
