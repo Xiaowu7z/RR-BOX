@@ -20,7 +20,7 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RRBOX-0.1.9-arm64-v8a.apk
+  OUTPUT_APK_NAME: RRBOX-0.2.0-beta1-arm64-v8a.apk
 
 jobs:
   build:
@@ -212,7 +212,7 @@ jobs:
             >/dev/null
           echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
 
-      - name: Run regression tests and build signed Release APK
+      - name: Run source regressions, unit tests and build signed Release APK
         shell: bash
         env:
           RR_KEYSTORE_PASS: ${{ secrets.RR_KEYSTORE_PASSWORD }}
@@ -220,21 +220,33 @@ jobs:
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+
+          # Stable 0.1.8 network invariants.
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'selfPackage' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'SELF_PACKAGE = "com.rr.client"' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
+          grep -q 'selected + SELF_PACKAGE' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
+          grep -q 'addProperty("stack", "system")' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           if grep -q 'START_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt; then
             echo "ERROR: sticky VPN restore path must not return" >&2
             exit 1
           fi
+
+          # New node/subscription features must stay outside the stable VPN core.
+          grep -q 'LOCAL_PROFILE_ID' app/src/main/java/com/rr/client/subscription/model/SubProfile.kt
+          grep -q 'SubscriptionUrlNormalizer' app/src/main/java/com/rr/client/subscription/SubscriptionFetcher.kt
+          grep -q 'ClashSubscriptionConverter' app/src/main/java/com/rr/client/subscription/SubscriptionParser.kt
+          grep -q 'ScanContract' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
+          grep -q 'FAST_FORWARDING' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'usesCleartextTraffic="true"' app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.CAMERA' app/src/main/AndroidManifest.xml
+          grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'clearApplicationUserData' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' app/src/main/AndroidManifest.xml
-          grep -q 'NodeLatencyTester' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'PROXY_SELECTED_PACKAGES' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
           grep -q 'BYPASS_SELECTED_PACKAGES' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
           grep -q 'PIN_MAX_FAILED_ATTEMPTS' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
@@ -276,8 +288,10 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.9'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionCode='11'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.2.0-beta1'" build-reports/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
+          grep -q "uses-permission: name='android.permission.CAMERA'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
@@ -307,8 +321,9 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.1.9 Build Report
+          # RRBOX 0.2.0-beta1 Build Report
 
+          - Status: feature test build; real-device stable baseline remains 0.1.8-stability allow-list hotfix
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
           - Version code: ${version_code}
@@ -327,19 +342,19 @@ jobs:
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - VPN lifecycle: deterministic START_NOT_STICKY, no stale runtime restore
-          - Per-app filtering: sing-box TUN include/exclude package fields
-          - Allow-list fix: RRBOX itself stays inside the allowed VPN UID set, matching official SFA behavior
-          - Proxy-only and bypass app lists: persisted independently
+          - Stable VPN invariants: system TUN, START_NOT_STICKY, selected proxy + direct topology
+          - Allow-list invariant: selected applications + com.rr.client inside VPN UID set
+          - Node UI: expandable subscription groups + separate local-node group
+          - Local import: QR, clipboard, pasted share/Base64/native sing-box JSON/Clash YAML, manual basic protocols
+          - Subscription URL input: HTTP/HTTPS, IPv4, bracket IPv6, port and scheme-less HTTPS→HTTP fallback
+          - Protocol strategy: native sing-box raw outbound passthrough where possible; libbox checkConfig is authoritative
+          - Experimental fast forwarding: system TUN preserved; warn logging and optional sniff removal when smart routing is off
           - Smart routing: SagerNet China geosite + geoip binary rules
-          - Rule updater: atomic runtime replacement with sing-box 1.14 version validation
           - Notification actions: restart + disconnect
           - PIN lock: PBKDF2 credential + configurable failed-attempt self-wipe policy
-          - R8/minification: disabled for alpha
           - SystemUI/Xposed module: not included
-          - CI verification: unit tests, SRS assets, signature, app label, package, version and ABI passed
 
-          Allow-list networking was additionally validated on a real Android device with Termux HTTP/HTTPS traffic.
+          0.2.0-beta1 requires real-device regression tests before it can replace the 0.1.8 stable baseline.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
@@ -352,7 +367,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.1.9-arm64-v8a
+          name: RRBOX-0.2.0-beta1-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
