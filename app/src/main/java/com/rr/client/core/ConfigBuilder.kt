@@ -9,8 +9,9 @@ import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.ChinaRuleSetManager
+import com.rr.client.routing.PerAppPolicyResolver
 
-/** Connectivity-first sing-box 1.14 configuration. */
+/** Stable sing-box 1.14 runtime configuration. */
 object ConfigBuilder {
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
@@ -19,7 +20,6 @@ object ConfigBuilder {
     private const val DNS_DIRECT = "dns-direct"
     private const val DNS_REMOTE = "dns-remote"
     private const val RULE_GEOSITE_CN = "geosite-geolocation-cn"
-    private const val RULE_GEOSITE_NOT_CN = "geosite-geolocation-not-cn"
     private const val RULE_GEOIP_CN = "geoip-cn"
 
     @Suppress("UNUSED_PARAMETER")
@@ -29,6 +29,8 @@ object ConfigBuilder {
         appRoutes: List<AppRouteConfig>,
         smartRouting: Boolean = true,
         enableDnsRules: Boolean = true,
+        perAppMode: String = PerAppPolicyResolver.MODE_ALL,
+        selectedPackages: Set<String> = emptySet(),
         ruleSets: ChinaRuleSetManager.Paths? = null
     ): String {
         val proxy = buildSelectedOutbound(selectedNode)
@@ -53,14 +55,12 @@ object ConfigBuilder {
                     addProperty("mtu", 1500)
                     addProperty("auto_route", true)
                     addProperty("strict_route", true)
-                    // sing-box system stack keeps TCP forwarding on the Android
-                    // system networking path and avoids an extra local SOCKS hop.
                     addProperty("stack", "system")
+                    applyPerAppMode(this, perAppMode, selectedPackages)
                 })
             })
 
-            // Only the selected proxy is instantiated. Unrelated subscription
-            // nodes cannot poison or slow down the active runtime graph.
+            // Preserve the known-good 0.1.4/0.1.6 topology: selected proxy + direct only.
             add("outbounds", JsonArray().apply {
                 add(proxy)
                 add(JsonObject().apply {
@@ -86,31 +86,15 @@ object ConfigBuilder {
                         })
 
                         if (ruleSets != null) {
-                            // Mainland domains are directly classified.
                             add(JsonObject().apply {
                                 add("rule_set", JsonArray().apply { add(RULE_GEOSITE_CN) })
                                 addProperty("outbound", TAG_DIRECT)
                             })
-
-                            // Follow the official client strategy for China IPs:
-                            // direct a CN IP only when the domain is not explicitly
-                            // classified as geolocation-!cn.
                             add(JsonObject().apply {
-                                addProperty("type", "logical")
-                                addProperty("mode", "and")
-                                add("rules", JsonArray().apply {
-                                    add(JsonObject().apply {
-                                        add("rule_set", JsonArray().apply { add(RULE_GEOIP_CN) })
-                                    })
-                                    add(JsonObject().apply {
-                                        add("rule_set", JsonArray().apply { add(RULE_GEOSITE_NOT_CN) })
-                                        addProperty("invert", true)
-                                    })
-                                })
+                                add("rule_set", JsonArray().apply { add(RULE_GEOIP_CN) })
                                 addProperty("outbound", TAG_DIRECT)
                             })
                         } else {
-                            // Safe fallback when a bundled rule snapshot is unavailable.
                             add(JsonObject().apply {
                                 add("domain_suffix", JsonArray().apply { add("cn") })
                                 addProperty("outbound", TAG_DIRECT)
@@ -122,18 +106,38 @@ object ConfigBuilder {
                 if (smartRouting && ruleSets != null) {
                     add("rule_set", JsonArray().apply {
                         addLocalRuleSet(RULE_GEOSITE_CN, ruleSets.geositeChina)
-                        addLocalRuleSet(RULE_GEOSITE_NOT_CN, ruleSets.geositeNotChina)
                         addLocalRuleSet(RULE_GEOIP_CN, ruleSets.geoipChina)
                     })
                 }
 
                 addProperty("final", TAG_PROXY)
                 addProperty("default_domain_resolver", DNS_DIRECT)
-                // Installs libbox's platform ProtectFunc so proxy/DNS sockets
-                // call VpnService.protect(fd) and do not loop back into tun0.
                 addProperty("auto_detect_interface", true)
             })
         })
+    }
+
+    private fun applyPerAppMode(tun: JsonObject, mode: String, packages: Set<String>) {
+        val selected = packages.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+            .sorted()
+            .toList()
+
+        when (mode) {
+            PerAppPolicyResolver.MODE_ALL -> Unit
+            PerAppPolicyResolver.MODE_ALLOW_LIST -> {
+                require(selected.isNotEmpty()) { "仅选中代理模式至少需要选择 1 个应用" }
+                tun.add("include_package", JsonArray().apply { selected.forEach(::add) })
+            }
+            PerAppPolicyResolver.MODE_DISALLOW_LIST -> {
+                if (selected.isNotEmpty()) {
+                    tun.add("exclude_package", JsonArray().apply { selected.forEach(::add) })
+                }
+            }
+            else -> throw IllegalArgumentException("未知分应用模式：$mode")
+        }
     }
 
     private fun JsonArray.addLocalRuleSet(tag: String, path: String) {
