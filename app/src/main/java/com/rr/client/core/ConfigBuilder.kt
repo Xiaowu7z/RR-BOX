@@ -21,6 +21,7 @@ object ConfigBuilder {
     private const val DNS_REMOTE = "dns-remote"
     private const val RULE_GEOSITE_CN = "geosite-geolocation-cn"
     private const val RULE_GEOIP_CN = "geoip-cn"
+    private const val SELF_PACKAGE = "com.rr.client"
 
     @Suppress("UNUSED_PARAMETER")
     fun buildSingBoxConfig(
@@ -121,6 +122,7 @@ object ConfigBuilder {
         val selected = packages.asSequence()
             .map(String::trim)
             .filter(String::isNotEmpty)
+            .filterNot { it == SELF_PACKAGE }
             .distinct()
             .sorted()
             .toList()
@@ -129,7 +131,11 @@ object ConfigBuilder {
             PerAppPolicyResolver.MODE_ALL -> Unit
             PerAppPolicyResolver.MODE_ALLOW_LIST -> {
                 require(selected.isNotEmpty()) { "仅选中代理模式至少需要选择 1 个应用" }
-                tun.add("include_package", JsonArray().apply { selected.forEach(::add) })
+                // Match the official SFA behavior: in include mode the VPN app itself
+                // must stay inside the VPN UID set. Its outbound sockets are then
+                // released to the physical network with VpnService.protect(fd).
+                val allowed = (selected + SELF_PACKAGE).distinct().sorted()
+                tun.add("include_package", JsonArray().apply { allowed.forEach(::add) })
             }
             PerAppPolicyResolver.MODE_DISALLOW_LIST -> {
                 if (selected.isNotEmpty()) {
