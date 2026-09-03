@@ -3,6 +3,7 @@ package com.rr.client.storage
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -18,10 +19,14 @@ class PreferencesManager(private val context: Context) {
     companion object {
         val SELECTED_NODE_ID = stringPreferencesKey("selected_node_id")
         val SMART_ROUTING = booleanPreferencesKey("smart_routing")
-        val PER_APP_PROXY_MODE = stringPreferencesKey("per_app_proxy_mode") // ALL / ALLOW_LIST / DISALLOW_LIST
+        val PER_APP_PROXY_MODE = stringPreferencesKey("per_app_proxy_mode")
         val PER_APP_SELECTED_PACKAGES = stringSetPreferencesKey("per_app_selected_packages")
         val NODE_OVERRIDES_JSON = stringPreferencesKey("node_overrides_json")
         val BACKGROUND_GUIDE_SHOWN = booleanPreferencesKey("background_guide_shown")
+        val CHINA_RULESET_LAST_UPDATED = longPreferencesKey("china_ruleset_last_updated")
+        val PIN_ENABLED = booleanPreferencesKey("pin_enabled")
+        val PIN_SALT = stringPreferencesKey("pin_salt")
+        val PIN_HASH = stringPreferencesKey("pin_hash")
     }
 
     private val gson = Gson()
@@ -36,6 +41,12 @@ class PreferencesManager(private val context: Context) {
     val backgroundGuideShown: Flow<Boolean> = context.dataStore.data.map {
         it[BACKGROUND_GUIDE_SHOWN] ?: false
     }
+    val chinaRuleSetLastUpdated: Flow<Long> = context.dataStore.data.map {
+        it[CHINA_RULESET_LAST_UPDATED] ?: 0L
+    }
+    val pinEnabled: Flow<Boolean> = context.dataStore.data.map { it[PIN_ENABLED] ?: false }
+    val pinSalt: Flow<String?> = context.dataStore.data.map { it[PIN_SALT] }
+    val pinHash: Flow<String?> = context.dataStore.data.map { it[PIN_HASH] }
     val nodeOverrides: Flow<Map<String, ProxyNode>> = context.dataStore.data.map { preferences ->
         decodeNodeOverrides(preferences[NODE_OVERRIDES_JSON])
     }
@@ -61,6 +72,26 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setBackgroundGuideShown(shown: Boolean) {
         context.dataStore.edit { it[BACKGROUND_GUIDE_SHOWN] = shown }
+    }
+
+    suspend fun setChinaRuleSetLastUpdated(timestamp: Long) {
+        context.dataStore.edit { it[CHINA_RULESET_LAST_UPDATED] = timestamp.coerceAtLeast(0L) }
+    }
+
+    suspend fun savePinCredential(saltBase64: String, hashBase64: String) {
+        context.dataStore.edit { preferences ->
+            preferences[PIN_SALT] = saltBase64
+            preferences[PIN_HASH] = hashBase64
+            preferences[PIN_ENABLED] = true
+        }
+    }
+
+    suspend fun disablePinLock() {
+        context.dataStore.edit { preferences ->
+            preferences[PIN_ENABLED] = false
+            preferences.remove(PIN_SALT)
+            preferences.remove(PIN_HASH)
+        }
     }
 
     suspend fun setNodeOverride(node: ProxyNode) {
