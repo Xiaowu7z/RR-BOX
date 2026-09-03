@@ -15,22 +15,26 @@ import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSpeed
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
 
 class RRVpnService : VpnService() {
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val coreMutex = Mutex()
+    private val requestGeneration = AtomicLong(0L)
 
     private lateinit var notificationMgr: RRNotificationManager
+    private lateinit var runtimeStateStore: VpnRuntimeStateStore
     private var boxCore: BoxServiceWrapper? = null
-    private var startJob: Job? = null
     private var stopping = false
     private var sessionPersisted = false
 
@@ -86,6 +90,7 @@ class RRVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         notificationMgr = RRNotificationManager(this)
+        runtimeStateStore = VpnRuntimeStateStore(this)
         boxCore = BoxServiceWrapper(
             workingDir = filesDir,
             onLogReceived = { line -> Log.d(TAG, line) },
@@ -100,12 +105,15 @@ class RRVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             RRNotificationManager.ACTION_STOP_VPN -> {
-                stopVpn(persistTraffic = true)
+                stopVpn(persistTraffic = true, clearRuntimeState = true)
                 return START_NOT_STICKY
             }
 
             RRNotificationManager.ACTION_RESTART_VPN -> {
                 applyIntentOverrides(intent)
+                if (activeConfigJson.isNullOrBlank()) {
+                    restoreRuntimeState(runtimeStateStore.load())
+                }
                 val config = activeConfigJson
                 if (config.isNullOrBlank()) {
                     _lastError.value = "没有可用于重启的运行配置"
@@ -114,42 +122,54 @@ class RRVpnService : VpnService() {
                 }
                 ensureForeground("$activeNodeTag · 正在重启")
                 launchCore(config, restarting = true)
-                return START_NOT_STICKY
+                return START_STICKY
             }
         }
 
-        // Every startForegroundService() path must enter foreground before any
-        // validation/native startup work.
-        val incomingTag = intent?.getStringExtra(EXTRA_NODE_TAG) ?: "RRBOX-Node"
-        activeNodeTag = incomingTag
-        ensureForeground("$activeNodeTag · 正在启动")
+        val incomingConfig = intent?.getStringExtra(EXTRA_CONFIG_JSON)
+        if (!incomingConfig.isNullOrBlank()) {
+            activeConfigJson = incomingConfig
+            activeNodeTag = intent.getStringExtra(EXTRA_NODE_TAG)?.takeIf(String::isNotBlank)
+                ?: "RRBOX-Node"
+            activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
+            activePerAppMode = intent.getStringExtra(EXTRA_PER_APP_MODE)
+                ?: PerAppPolicyResolver.MODE_ALL
+            activeSelectedPackages = intent.getStringArrayListExtra(EXTRA_SELECTED_PACKAGES)
+                ?.filter(String::isNotBlank)
+                ?.toSet()
+                .orEmpty()
 
-        val configJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
-        if (configJson.isNullOrBlank()) {
-            _lastError.value = "没有收到可运行的 sing-box 配置"
-            Log.e(TAG, _lastError.value.orEmpty())
-            stopForeground(Service.STOP_FOREGROUND_REMOVE)
-            stopSelf(startId)
-            return START_NOT_STICKY
+            ensureForeground("$activeNodeTag · 正在启动")
+            val restarting = _isStarting.value || _isRunning.value || boxCore?.isCoreRunning() == true
+            launchCore(incomingConfig, restarting = restarting)
+            return START_STICKY
         }
 
-        activeConfigJson = configJson
-        activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
-        activePerAppMode = intent.getStringExtra(EXTRA_PER_APP_MODE)
-            ?: PerAppPolicyResolver.MODE_ALL
-        activeSelectedPackages = intent.getStringArrayListExtra(EXTRA_SELECTED_PACKAGES)
-            ?.filter(String::isNotBlank)
-            ?.toSet()
-            .orEmpty()
-
-        if (_isStarting.value || _isRunning.value || startJob?.isActive == true) {
-            Log.i(TAG, "Active VPN exists; treating new start as a controlled restart")
-            launchCore(configJson, restarting = true)
-        } else {
-            launchCore(configJson, restarting = false)
+        // START_STICKY restarts can arrive with a null intent after Android
+        // reclaims the process. Recover only a previously successful session;
+        // an explicit user disconnect clears this store first.
+        val recovered = runtimeStateStore.load()
+        if (recovered != null) {
+            restoreRuntimeState(recovered)
+            ensureForeground("$activeNodeTag · 正在恢复")
+            Log.i(TAG, "Recovering sticky VPN session for $activeNodeTag")
+            launchCore(recovered.configJson, restarting = false)
+            return START_STICKY
         }
 
+        _lastError.value = "没有收到可运行或可恢复的 sing-box 配置"
+        Log.w(TAG, _lastError.value.orEmpty())
+        stopSelf(startId)
         return START_NOT_STICKY
+    }
+
+    private fun restoreRuntimeState(state: VpnRuntimeState?) {
+        if (state == null) return
+        activeConfigJson = state.configJson
+        activeNodeTag = state.nodeTag.ifBlank { "RRBOX-Node" }
+        activeNodeId = state.nodeId
+        activePerAppMode = state.perAppMode
+        activeSelectedPackages = state.selectedPackages
     }
 
     private fun applyIntentOverrides(intent: Intent) {
@@ -181,8 +201,7 @@ class RRVpnService : VpnService() {
     }
 
     private fun launchCore(configJson: String, restarting: Boolean) {
-        startJob?.cancel()
-        startJob = null
+        val generation = requestGeneration.incrementAndGet()
         stopping = false
         _lastError.value = null
         _isStarting.value = true
@@ -193,19 +212,43 @@ class RRVpnService : VpnService() {
             notificationMgr.updateNotification("$activeNodeTag · 正在重启", TrafficSpeed(), 0L)
         }
 
-        startJob = serviceScope.launch {
+        serviceScope.launch {
             val started = withContext(Dispatchers.IO) {
-                if (restarting && previousSession.durationSeconds > 0L) {
-                    persistSessionOnce(previousSession)
+                coreMutex.withLock {
+                    // Drop obsolete queued requests. A request already executing
+                    // is allowed to finish; the newest request then rebuilds once.
+                    if (generation != requestGeneration.get()) return@withLock false
+
+                    if (restarting && previousSession.durationSeconds > 0L) {
+                        persistSessionOnce(previousSession)
+                    }
+                    if (restarting || boxCore?.isCoreRunning() == true) {
+                        boxCore?.stopService()
+                    }
+
+                    boxCore?.setPerAppPolicy(activePerAppMode, activeSelectedPackages)
+                    boxCore?.startService(configJson, this@RRVpnService) ?: false
                 }
-                if (restarting) boxCore?.stopService()
-                boxCore?.setPerAppPolicy(activePerAppMode, activeSelectedPackages)
-                boxCore?.startService(configJson, this@RRVpnService) ?: false
+            }
+
+            if (generation != requestGeneration.get()) {
+                Log.d(TAG, "Ignoring stale VPN core result generation=$generation")
+                return@launch
             }
 
             if (started) {
+                activeConfigJson = configJson
                 sessionPersisted = false
                 resetTrafficState()
+                runtimeStateStore.save(
+                    VpnRuntimeState(
+                        configJson = configJson,
+                        nodeTag = activeNodeTag,
+                        nodeId = activeNodeId,
+                        perAppMode = activePerAppMode,
+                        selectedPackages = activeSelectedPackages
+                    )
+                )
                 _isStarting.value = false
                 _isRunning.value = true
                 notificationMgr.updateNotification(activeNodeTag, TrafficSpeed(), 0L)
@@ -218,7 +261,7 @@ class RRVpnService : VpnService() {
                 _lastError.value = reason
                 Log.e(TAG, reason)
                 _isStarting.value = false
-                stopVpn(persistTraffic = false)
+                stopVpn(persistTraffic = false, clearRuntimeState = true)
             }
         }
     }
@@ -226,7 +269,7 @@ class RRVpnService : VpnService() {
     override fun onRevoke() {
         _lastError.value = "Android 已撤销 VPN 权限"
         Log.w(TAG, _lastError.value.orEmpty())
-        stopVpn(persistTraffic = true)
+        stopVpn(persistTraffic = true, clearRuntimeState = true)
         super.onRevoke()
     }
 
@@ -320,17 +363,19 @@ class RRVpnService : VpnService() {
         }
     }
 
-    private fun stopVpn(persistTraffic: Boolean) {
+    private fun stopVpn(persistTraffic: Boolean, clearRuntimeState: Boolean) {
         if (stopping) return
         stopping = true
-        startJob?.cancel()
-        startJob = null
-
+        requestGeneration.incrementAndGet()
         val finalSession = _sessionTraffic.value
+
         serviceScope.launch {
             withContext(Dispatchers.IO) {
-                if (persistTraffic) persistSessionOnce(finalSession)
-                boxCore?.stopService()
+                coreMutex.withLock {
+                    if (persistTraffic) persistSessionOnce(finalSession)
+                    boxCore?.stopService()
+                    if (clearRuntimeState) runtimeStateStore.clear()
+                }
             }
             _isStarting.value = false
             _isRunning.value = false
@@ -361,8 +406,7 @@ class RRVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        startJob?.cancel()
-        startJob = null
+        requestGeneration.incrementAndGet()
         runCatching { boxCore?.stopService() }
         _isStarting.value = false
         _isRunning.value = false
