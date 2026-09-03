@@ -137,25 +137,14 @@ fun NodeListScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = node.tag,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = TextPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
-                                    if (isEdited) {
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            text = "已编辑",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = CyanSecondary
-                                        )
-                                    }
-                                }
+                                Text(
+                                    text = node.tag,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                                 Spacer(modifier = Modifier.height(3.dp))
                                 Text(
                                     text = buildString {
@@ -163,7 +152,9 @@ fun NodeListScreen(
                                             append(node.profileName)
                                             append(" · ")
                                         }
-                                        append("${node.server}:${node.serverPort}")
+                                        append(maskNodeAddress(node.server))
+                                        append(":")
+                                        append(node.serverPort)
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = TextSecondary,
@@ -235,6 +226,23 @@ fun NodeListScreen(
             }
         }
     }
+}
+
+private fun maskNodeAddress(value: String): String {
+    val host = value.trim()
+    val ipv4 = host.split('.')
+    if (ipv4.size == 4 && ipv4.all { it.toIntOrNull()?.let { octet -> octet in 0..255 } == true }) {
+        return "${ipv4[0]}.***.***.${ipv4[3]}"
+    }
+
+    if (host.contains(':')) {
+        val parts = host.removePrefix("[").removeSuffix("]").split(':')
+        val first = parts.firstOrNull().orEmpty()
+        val last = parts.lastOrNull().orEmpty()
+        return "[$first:****:****:$last]"
+    }
+
+    return host
 }
 
 @Composable
