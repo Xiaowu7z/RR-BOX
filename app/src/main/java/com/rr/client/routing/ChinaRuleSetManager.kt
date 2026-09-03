@@ -9,11 +9,9 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * Manages the binary sing-box rule-sets used by RRBOX smart routing.
- *
- * A build-time snapshot is bundled in assets/rules. Runtime updates are
- * downloaded atomically from SagerNet (with jsDelivr fallback), and the old
- * files remain untouched if any member of the set fails validation.
+ * Maintains the two binary sing-box rule-sets RRBOX needs for mainland routing:
+ * China domains and China IP ranges. Build-time snapshots are bundled in the APK;
+ * runtime updates replace both files only after both pass validation.
  */
 object ChinaRuleSetManager {
     // sing-box v1.14.0 constant.RuleSetVersionCurrent == 5.
@@ -21,7 +19,6 @@ object ChinaRuleSetManager {
 
     data class Paths(
         val geositeChina: String,
-        val geositeNotChina: String,
         val geoipChina: String
     )
 
@@ -43,14 +40,6 @@ object ChinaRuleSetManager {
             urls = listOf(
                 "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs",
                 "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
-            )
-        ),
-        RuleSpec(
-            assetName = "geosite-geolocation-not-cn.srs",
-            localName = "geosite-geolocation-not-cn.srs",
-            urls = listOf(
-                "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs",
-                "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-!cn.srs"
             )
         ),
         RuleSpec(
@@ -78,11 +67,11 @@ object ChinaRuleSetManager {
                 val temporary = File(directory, ".${spec.localName}.asset.tmp")
                 temporary.delete()
                 context.assets.open("rules/${spec.assetName}").use { input ->
-                    temporary.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
+                    temporary.outputStream().use { output -> input.copyTo(output) }
                 }
-                require(isValidSrs(temporary)) { "内置规则集损坏或版本不兼容：${spec.localName}" }
+                require(isValidSrs(temporary)) {
+                    "内置规则集损坏或版本不兼容：${spec.localName}"
+                }
                 replaceAtomically(temporary, destination)
             }
         }
@@ -92,12 +81,10 @@ object ChinaRuleSetManager {
     fun currentPaths(context: Context): Paths? {
         val directory = ruleDirectory(context)
         val geositeChina = File(directory, "geosite-geolocation-cn.srs")
-        val geositeNotChina = File(directory, "geosite-geolocation-not-cn.srs")
         val geoipChina = File(directory, "geoip-cn.srs")
-        if (!listOf(geositeChina, geositeNotChina, geoipChina).all(::isValidSrs)) return null
+        if (!listOf(geositeChina, geoipChina).all(::isValidSrs)) return null
         return Paths(
             geositeChina = geositeChina.absolutePath,
-            geositeNotChina = geositeNotChina.absolutePath,
             geoipChina = geoipChina.absolutePath
         )
     }
@@ -117,10 +104,10 @@ object ChinaRuleSetManager {
                     downloaded += temp to File(directory, spec.localName)
                 }
 
-                // Commit only after all three files passed validation.
+                // Commit only after both files passed validation.
                 downloaded.forEach { (temp, destination) -> replaceAtomically(temp, destination) }
                 val paths = currentPaths(context) ?: error("规则集更新后校验失败")
-                val bytes = listOf(paths.geositeChina, paths.geositeNotChina, paths.geoipChina)
+                val bytes = listOf(paths.geositeChina, paths.geoipChina)
                     .sumOf { File(it).length() }
                 UpdateResult(System.currentTimeMillis(), bytes)
             } finally {
