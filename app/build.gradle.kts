@@ -13,8 +13,8 @@ android {
         applicationId = "com.rr.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.1.9"
+        versionCode = 11
+        versionName = "0.2.0-beta1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -101,6 +101,11 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.gson)
+
+    // Local-node import UX: QR scanning compatible with standard proxy QR codes.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // Clash/Mihomo `proxies:` subscription compatibility. Only node definitions are imported.
+    implementation("org.yaml:snakeyaml:2.3")
 
     testImplementation("junit:junit:4.13.2")
 }
