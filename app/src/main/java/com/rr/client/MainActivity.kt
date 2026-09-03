@@ -1,11 +1,15 @@
 package com.rr.client
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,7 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Settings as SettingsIcon
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -58,6 +62,7 @@ import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,6 +72,8 @@ import java.util.Locale
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
+    private val backgroundOptimizationExempt = MutableStateFlow(false)
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -79,6 +86,7 @@ class MainActivity : ComponentActivity() {
             },
             Toast.LENGTH_LONG
         ).show()
+        requestBackgroundProtectionGuideIfNeeded()
     }
 
     private val vpnLauncher = registerForActivityResult(
@@ -98,12 +106,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestNotificationPermissionIfNeeded()
+        updateBackgroundProtectionState()
         setContent {
             RRClientTheme {
                 MainApp()
             }
         }
+        requestNotificationPermissionIfNeeded()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateBackgroundProtectionState()
     }
 
     @Composable
@@ -114,10 +128,12 @@ class MainActivity : ComponentActivity() {
         val lastVpnError by RRVpnService.lastError.collectAsState()
         val currentSpeed by RRVpnService.currentSpeed.collectAsState()
         val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
+        val backgroundProtected by backgroundOptimizationExempt.collectAsState()
 
         val db = RRApplication.instance.database
         val prefs = RRApplication.instance.preferencesManager
         val nodeOverrides by prefs.nodeOverrides.collectAsState(initial = emptyMap())
+        val selectedAppPackages by prefs.selectedAppPackages.collectAsState(initial = emptySet())
 
         var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
         var selectedNodeId by remember { mutableStateOf<String?>(null) }
@@ -287,7 +303,7 @@ class MainActivity : ComponentActivity() {
                     NavigationBarItem(selected = selectedTab == 1, onClick = { selectedTab = 1 }, icon = { Icon(Icons.Default.Dns, "节点") }, label = { Text("节点") })
                     NavigationBarItem(selected = selectedTab == 2, onClick = { selectedTab = 2 }, icon = { Icon(Icons.Default.Apps, "分流") }, label = { Text("分流") })
                     NavigationBarItem(selected = selectedTab == 3, onClick = { selectedTab = 3 }, icon = { Icon(Icons.Default.CloudDownload, "订阅") }, label = { Text("订阅") })
-                    NavigationBarItem(selected = selectedTab == 4, onClick = { selectedTab = 4 }, icon = { Icon(Icons.Default.Settings, "设置") }, label = { Text("设置") })
+                    NavigationBarItem(selected = selectedTab == 4, onClick = { selectedTab = 4 }, icon = { Icon(Icons.Default.SettingsIcon, "设置") }, label = { Text("设置") })
                 }
             }
         ) { paddingValues ->
@@ -318,6 +334,11 @@ class MainActivity : ComponentActivity() {
                                         selectedTab = 3
                                         return@onToggle
                                     }
+                                    if (perAppMode == "ALLOW_LIST" && selectedAppPackages.isEmpty()) {
+                                        toast("当前是「仅选中代理」模式，请先到「分流」页至少选择 1 个应用")
+                                        selectedTab = 2
+                                        return@onToggle
+                                    }
                                     if (selectedNode == null) selectNode(targetNode.id)
 
                                     lifecycleScope.launch {
@@ -327,7 +348,9 @@ class MainActivity : ComponentActivity() {
                                                     selectedNode = targetNode,
                                                     allNodes = allNodes,
                                                     appRoutes = apps,
-                                                    smartRouting = smartRouting
+                                                    smartRouting = smartRouting,
+                                                    perAppMode = perAppMode,
+                                                    selectedPackages = selectedAppPackages
                                                 )
                                                 Libbox.checkConfig(configJson)
                                                 configJson
@@ -370,12 +393,22 @@ class MainActivity : ComponentActivity() {
                     2 -> AppRoutingScreen(
                         apps = apps,
                         perAppMode = perAppMode,
-                        onModeChanged = {
-                            perAppMode = it
-                            lifecycleScope.launch { prefs.setPerAppMode(it) }
+                        selectedPackages = selectedAppPackages,
+                        onModeChanged = { mode ->
+                            perAppMode = mode
+                            lifecycleScope.launch { prefs.setPerAppMode(mode) }
+                            if (isVpnRunning || isVpnStarting) {
+                                toast("分应用模式已保存，断开并重新连接后生效")
+                            }
                         },
-                        onAppRouteChanged = { updatedApp ->
-                            apps = apps.map { if (it.packageName == updatedApp.packageName) updatedApp else it }
+                        onAppSelectionChanged = { packageName, selected ->
+                            val updated = selectedAppPackages.toMutableSet().apply {
+                                if (selected) add(packageName) else remove(packageName)
+                            }.toSet()
+                            lifecycleScope.launch { prefs.setSelectedAppPackages(updated) }
+                            if (isVpnRunning || isVpnStarting) {
+                                toast("应用选择已保存，断开并重新连接后生效")
+                            }
                         }
                     )
 
@@ -390,10 +423,15 @@ class MainActivity : ComponentActivity() {
 
                     4 -> SettingsScreen(
                         smartRouting = smartRouting,
+                        backgroundProtected = backgroundProtected,
                         onSmartRoutingChanged = {
                             smartRouting = it
                             lifecycleScope.launch { prefs.setSmartRouting(it) }
-                        }
+                            if (isVpnRunning || isVpnStarting) {
+                                toast("智能分流设置已保存，断开并重新连接后生效")
+                            }
+                        },
+                        onRequestBackgroundProtection = { requestBackgroundProtection() }
                     )
                 }
             }
@@ -427,7 +465,62 @@ class MainActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            requestBackgroundProtectionGuideIfNeeded()
         }
+    }
+
+    private fun requestBackgroundProtectionGuideIfNeeded() {
+        lifecycleScope.launch {
+            val prefs = RRApplication.instance.preferencesManager
+            val shown = runCatching { prefs.backgroundGuideShown.first() }.getOrDefault(false)
+            if (shown) return@launch
+            prefs.setBackgroundGuideShown(true)
+            if (isIgnoringBatteryOptimizations()) {
+                updateBackgroundProtectionState()
+                return@launch
+            }
+
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("允许 RRBOX 后台持续运行")
+                .setMessage("为了减少息屏、锁屏或长时间后台时 VPN 被系统停止，建议允许 RRBOX 不受 Android 电池优化限制。此设置不是 Root 权限，可稍后在设置页重新授权。")
+                .setPositiveButton("去授权") { _, _ -> requestBackgroundProtection() }
+                .setNegativeButton("稍后") { dialog, _ -> dialog.dismiss() }
+                .show()
+        }
+    }
+
+    private fun requestBackgroundProtection() {
+        if (isIgnoringBatteryOptimizations()) {
+            updateBackgroundProtectionState()
+            Toast.makeText(this, "RRBOX 已不受电池优化限制", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val directRequest = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:$packageName")
+        )
+        runCatching { startActivity(directRequest) }
+            .onFailure {
+                runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                    .onFailure { error ->
+                        Toast.makeText(
+                            this,
+                            "无法打开电池优化设置：${error.message ?: error.javaClass.simpleName}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+            }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val powerManager = getSystemService(PowerManager::class.java) ?: return false
+        return powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun updateBackgroundProtectionState() {
+        backgroundOptimizationExempt.value = isIgnoringBatteryOptimizations()
     }
 
     private fun startVpnWithPermissionCheck(configJson: String, nodeTag: String, nodeId: String) {
