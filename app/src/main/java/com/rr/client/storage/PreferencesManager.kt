@@ -20,6 +20,7 @@ class PreferencesManager(private val context: Context) {
     companion object {
         val SELECTED_NODE_ID = stringPreferencesKey("selected_node_id")
         val SMART_ROUTING = booleanPreferencesKey("smart_routing")
+        val FAST_FORWARDING = booleanPreferencesKey("fast_forwarding")
         val PER_APP_PROXY_MODE = stringPreferencesKey("per_app_proxy_mode")
 
         // Legacy 0.1.6/0.1.7 shared selection. Keep only as a migration seed.
@@ -47,6 +48,7 @@ class PreferencesManager(private val context: Context) {
 
     val selectedNodeId: Flow<String?> = context.dataStore.data.map { it[SELECTED_NODE_ID] }
     val smartRouting: Flow<Boolean> = context.dataStore.data.map { it[SMART_ROUTING] ?: true }
+    val fastForwarding: Flow<Boolean> = context.dataStore.data.map { it[FAST_FORWARDING] ?: false }
     val perAppMode: Flow<String> = context.dataStore.data.map { it[PER_APP_PROXY_MODE] ?: "ALL" }
 
     val proxySelectedAppPackages: Flow<Set<String>> = context.dataStore.data.map { preferences ->
@@ -89,6 +91,10 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setSmartRouting(enabled: Boolean) {
         context.dataStore.edit { it[SMART_ROUTING] = enabled }
+    }
+
+    suspend fun setFastForwarding(enabled: Boolean) {
+        context.dataStore.edit { it[FAST_FORWARDING] = enabled }
     }
 
     suspend fun setPerAppMode(mode: String) {
