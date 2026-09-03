@@ -51,18 +51,15 @@ fun NodeEditDialog(
     var hoppingPorts by remember(node.id) { mutableStateOf(node.hoppingPorts) }
     var obfs by remember(node.id) { mutableStateOf(node.obfs) }
     var obfsPassword by remember(node.id) { mutableStateOf(node.obfsPassword) }
+    var ssMethod by remember(node.id) { mutableStateOf(node.ssMethod) }
     var tlsEnabled by remember(node.id) { mutableStateOf(node.tlsEnabled) }
     var validationError by remember(node.id) { mutableStateOf<String?>(null) }
-
-    fun field(label: String, value: String, onValueChange: (String) -> Unit) {
-        // Placeholder for readability at call sites; Compose fields are emitted below.
-    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text("编辑节点", fontWeight = FontWeight.Bold)
+                Text(if (node.profileId == com.rr.client.subscription.model.SubProfile.LOCAL_PROFILE_ID && node.server.isBlank()) "新建节点" else "编辑节点", fontWeight = FontWeight.Bold)
                 Text(node.type.friendlyLabel())
             }
         },
@@ -126,6 +123,20 @@ fun NodeEditDialog(
                         EditField("ALPN（逗号分隔）", alpn) { alpn = it }
                     }
 
+                    ProtocolType.SHADOWSOCKS -> {
+                        EditField("加密方式", ssMethod) { ssMethod = it }
+                        EditField("密码", credential) { credential = it }
+                    }
+
+                    ProtocolType.TROJAN -> {
+                        EditField("密码", credential) { credential = it }
+                        EditField("SNI", sni) { sni = it }
+                        EditField("传输层（tcp/ws/grpc）", network) { network = it }
+                        EditField("Path / gRPC Service", path) { path = it }
+                        EditField("Host", host) { host = it }
+                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                    }
+
                     else -> {
                         EditField("UUID / 密码", credential) { credential = it }
                         EditField("SNI", sni) { sni = it }
@@ -136,9 +147,7 @@ fun NodeEditDialog(
                     }
                 }
 
-                validationError?.let {
-                    Text(it)
-                }
+                validationError?.let { Text(it) }
                 Spacer(Modifier.height(2.dp))
             }
         },
@@ -149,6 +158,7 @@ fun NodeEditDialog(
                     tag.isBlank() -> "节点名称不能为空"
                     server.isBlank() -> "服务器地址不能为空"
                     parsedPort == null || parsedPort !in 1..65535 -> "端口必须是 1-65535"
+                    node.type == ProtocolType.SHADOWSOCKS && ssMethod.isBlank() -> "Shadowsocks 加密方式不能为空"
                     credential.isBlank() && node.type !in setOf(
                         ProtocolType.NAIVE_H2,
                         ProtocolType.NAIVE_H3,
@@ -175,18 +185,15 @@ fun NodeEditDialog(
                             hoppingPorts = hoppingPorts.trim(),
                             obfs = obfs.trim(),
                             obfsPassword = obfsPassword,
+                            ssMethod = ssMethod.trim(),
                             tlsEnabled = tlsEnabled
                         )
                     )
                 }
-            }) {
-                Text("保存")
-            }
+            }) { Text("保存") }
         },
         dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
-                Text("取消")
-            }
+            OutlinedButton(onClick = onDismiss) { Text("取消") }
         }
     )
 }
