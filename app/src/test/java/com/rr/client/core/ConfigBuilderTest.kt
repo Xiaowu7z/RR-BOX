@@ -28,6 +28,7 @@ class ConfigBuilderTest {
 
     private fun build(
         smartRouting: Boolean = false,
+        fastForwarding: Boolean = false,
         paths: ChinaRuleSetManager.Paths? = null,
         mode: String = PerAppPolicyResolver.MODE_ALL,
         packages: Set<String> = emptySet()
@@ -41,6 +42,7 @@ class ConfigBuilderTest {
                 smartRouting = smartRouting,
                 perAppMode = mode,
                 selectedPackages = packages,
+                fastForwarding = fastForwarding,
                 ruleSets = paths
             )
         ).asJsonObject
@@ -154,5 +156,52 @@ class ConfigBuilderTest {
         assertFalse(rules.any { it.asJsonObject.has("domain_suffix") })
         assertFalse(rules.any { it.asJsonObject.has("rule_set") })
         assertFalse(rules.any { it.asJsonObject.get("ip_is_private")?.asBoolean == true })
+    }
+
+    @Test
+    fun stableModeKeepsInfoLoggingAndSniffing() {
+        val root = build(smartRouting = false, fastForwarding = false)
+        assertEquals("info", root.getAsJsonObject("log").get("level").asString)
+        val rules = root.getAsJsonObject("route").getAsJsonArray("rules")
+        assertTrue(rules.any { it.asJsonObject.get("action")?.asString == "sniff" })
+        assertEquals("system", tun(root).get("stack").asString)
+    }
+
+    @Test
+    fun fastModeWithoutSmartRoutingCutsOptionalSniffButKeepsSystemTun() {
+        val root = build(smartRouting = false, fastForwarding = true)
+        assertEquals("warn", root.getAsJsonObject("log").get("level").asString)
+        val rules = root.getAsJsonObject("route").getAsJsonArray("rules")
+        assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "sniff" })
+        assertEquals("system", tun(root).get("stack").asString)
+    }
+
+    @Test
+    fun fastModeStillSniffsWhenSmartDomainRoutingNeedsIt() {
+        val root = build(smartRouting = true, fastForwarding = true)
+        val rules = root.getAsJsonObject("route").getAsJsonArray("rules")
+        assertTrue(rules.any { it.asJsonObject.get("action")?.asString == "sniff" })
+    }
+
+    @Test
+    fun nativeSocksOutboundIsNotMistakenForInternalControlOutbound() {
+        val raw = """{"type":"socks","tag":"s","server":"192.0.2.8","server_port":1080,"version":"5"}"""
+        val socks = ProxyNode(
+            id = "socks",
+            tag = "SOCKS",
+            type = ProtocolType.SOCKS,
+            server = "192.0.2.8",
+            serverPort = 1080,
+            rawJson = raw
+        )
+        val root = JsonParser.parseString(
+            ConfigBuilder.buildSingBoxConfig(
+                selectedNode = socks,
+                allNodes = listOf(socks),
+                appRoutes = emptyList(),
+                smartRouting = false
+            )
+        ).asJsonObject
+        assertEquals("socks", root.getAsJsonArray("outbounds")[0].asJsonObject.get("type").asString)
     }
 }
