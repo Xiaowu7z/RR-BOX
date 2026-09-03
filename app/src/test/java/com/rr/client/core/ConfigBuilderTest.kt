@@ -68,7 +68,7 @@ class ConfigBuilderTest {
     }
 
     @Test
-    fun allowListWritesOnlyIncludePackage() {
+    fun allowListIncludesSelectedAppsAndRRBOXItself() {
         val inbound = tun(
             build(
                 mode = PerAppPolicyResolver.MODE_ALLOW_LIST,
@@ -77,7 +77,11 @@ class ConfigBuilderTest {
         )
         assertTrue(inbound.has("include_package"))
         assertFalse(inbound.has("exclude_package"))
-        assertEquals(2, inbound.getAsJsonArray("include_package").size())
+        val include = inbound.getAsJsonArray("include_package").map { it.asString }.toSet()
+        assertEquals(
+            setOf("com.rr.client", "org.telegram.messenger", "com.twitter.android"),
+            include
+        )
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -86,15 +90,16 @@ class ConfigBuilderTest {
     }
 
     @Test
-    fun bypassListWritesOnlyExcludePackage() {
+    fun bypassListWritesOnlyExcludePackageAndNeverExcludesRRBOX() {
         val inbound = tun(
             build(
                 mode = PerAppPolicyResolver.MODE_DISALLOW_LIST,
-                packages = setOf("com.example.direct")
+                packages = setOf("com.example.direct", "com.rr.client")
             )
         )
         assertFalse(inbound.has("include_package"))
-        assertEquals("com.example.direct", inbound.getAsJsonArray("exclude_package")[0].asString)
+        val exclude = inbound.getAsJsonArray("exclude_package").map { it.asString }.toSet()
+        assertEquals(setOf("com.example.direct"), exclude)
     }
 
     @Test
