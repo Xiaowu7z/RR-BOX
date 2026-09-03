@@ -1,5 +1,7 @@
 package com.rr.client.core
 
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -32,7 +34,6 @@ import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
 import java.io.File
-import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface as JavaNetworkInterface
 import java.util.Collections
@@ -52,10 +53,8 @@ class BoxServiceWrapper(
     private var isRunning = false
     private var isStopping = false
 
-    /** 最近的内核/运行日志（错误诊断用） */
     private val recentLogs = ArrayDeque<String>()
 
-    /** 最近一次启动失败的详细原因（供 UI 展示） */
     @Volatile
     var lastError: String? = null
         private set
@@ -94,8 +93,6 @@ class BoxServiceWrapper(
             workingDir.mkdirs()
             File(workingDir, "config.json").writeText(configJson)
 
-            // Validate before native service startup so a schema problem is
-            // returned as a normal error instead of taking the process down.
             Libbox.checkConfig(configJson)
 
             val server = Libbox.newCommandServer(this, this)
@@ -105,12 +102,9 @@ class BoxServiceWrapper(
             isRunning = true
             isStopping = false
 
-            // CommandStatus is observation only. A transient command socket
-            // failure must not tear down a working VPN tunnel.
             runCatching {
                 val clientOptions = CommandClientOptions().apply {
                     addCommand(Libbox.CommandStatus)
-                    // Go time.Duration is expressed in nanoseconds.
                     statusInterval = 1_000_000_000L
                 }
                 val client = Libbox.newCommandClient(this, clientOptions)
@@ -122,7 +116,7 @@ class BoxServiceWrapper(
                 recordLog("实时流量通道暂不可用，但代理隧道已启动：${error.message.orEmpty()}")
             }
 
-            onLogReceived("sing-box v1.14.0 代理隧道已启动")
+            recordLog("sing-box v1.14.0 代理隧道已启动")
             true
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to start sing-box service", e)
@@ -168,6 +162,10 @@ class BoxServiceWrapper(
             .setSession("RR Client")
             .setMtu(options.mtu)
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setMetered(false)
+        }
+
         val inet4Address = options.inet4Address
         while (inet4Address.hasNext()) {
             val prefix = inet4Address.next()
@@ -204,6 +202,20 @@ class BoxServiceWrapper(
                 val prefix = inet6Routes.next()
                 builder.addRoute(prefix.address(), prefix.prefix())
             }
+
+            val includePackage = options.includePackage
+            while (includePackage.hasNext()) {
+                val packageName = includePackage.next()
+                runCatching { builder.addAllowedApplication(packageName) }
+                    .onFailure { Log.w(TAG, "Unable to include package $packageName", it) }
+            }
+
+            val excludePackage = options.excludePackage
+            while (excludePackage.hasNext()) {
+                val packageName = excludePackage.next()
+                runCatching { builder.addDisallowedApplication(packageName) }
+                    .onFailure { Log.w(TAG, "Unable to exclude package $packageName", it) }
+            }
         }
 
         val pfd = builder.establish()
@@ -238,20 +250,12 @@ class BoxServiceWrapper(
         if (Build.VERSION.SDK_INT < 29) return owner
 
         return runCatching {
-            val connectivity = vpn.getSystemService("connectivity")
-                ?: return@runCatching owner
-            val method = connectivity.javaClass.getMethod(
-                "getConnectionOwnerUid",
-                Int::class.javaPrimitiveType,
-                InetSocketAddress::class.java,
-                InetSocketAddress::class.java
-            )
-            val uid = method.invoke(
-                connectivity,
+            val connectivity = vpn.getSystemService(ConnectivityManager::class.java)
+            val uid = connectivity.getConnectionOwnerUid(
                 ipProtocol,
                 InetSocketAddress(sourceAddress, sourcePort),
                 InetSocketAddress(destinationAddress, destinationPort)
-            ) as Int
+            )
             val packages = vpn.packageManager.getPackagesForUid(uid)?.toList().orEmpty()
             ConnectionOwner().apply {
                 userId = uid
@@ -266,16 +270,50 @@ class BoxServiceWrapper(
     }
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
-        val defaultInterface = runCatching {
-            Collections.list(JavaNetworkInterface.getNetworkInterfaces())
-                .firstOrNull { it.isUp && !it.isLoopback && !it.name.startsWith("tun") }
+        val vpn = vpnService
+        if (vpn == null) {
+            listener.updateDefaultInterface("", -1, false, false)
+            return
+        }
+
+        val connectivity = vpn.getSystemService(ConnectivityManager::class.java)
+
+        fun isUsablePhysicalNetwork(network: android.net.Network): Boolean {
+            val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
+            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+
+        val activePhysical = connectivity.activeNetwork?.takeIf(::isUsablePhysicalNetwork)
+        val network = activePhysical
+            ?: connectivity.allNetworks.firstOrNull { candidate ->
+                val capabilities = connectivity.getNetworkCapabilities(candidate)
+                isUsablePhysicalNetwork(candidate) &&
+                    capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+            }
+            ?: connectivity.allNetworks.firstOrNull(::isUsablePhysicalNetwork)
+
+        val linkProperties = network?.let(connectivity::getLinkProperties)
+        val interfaceName = linkProperties?.interfaceName.orEmpty()
+        val networkInterface = runCatching {
+            interfaceName.takeIf(String::isNotBlank)?.let(JavaNetworkInterface::getByName)
         }.getOrNull()
 
-        if (defaultInterface == null) {
+        if (networkInterface == null) {
+            Log.w(TAG, "No physical default interface available")
             listener.updateDefaultInterface("", -1, false, false)
-        } else {
-            listener.updateDefaultInterface(defaultInterface.name, defaultInterface.index, false, false)
+            return
         }
+
+        val capabilities = network?.let(connectivity::getNetworkCapabilities)
+        val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
+        listener.updateDefaultInterface(
+            networkInterface.name,
+            networkInterface.index,
+            metered,
+            false
+        )
+        recordLog("默认物理出口：${networkInterface.name} (${networkInterface.index})")
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) = Unit
@@ -321,7 +359,7 @@ class BoxServiceWrapper(
     override fun localDNSTransport(): LocalDNSTransport? = null
 
     override fun sendNotification(notification: Notification) {
-        onLogReceived("sing-box notification: ${notification.title}: ${notification.body}")
+        recordLog("sing-box notification: ${notification.title}: ${notification.body}")
     }
 
     override fun cancelNotification(identifier: String, typeID: Int) = Unit
@@ -378,21 +416,21 @@ class BoxServiceWrapper(
     override fun setSystemProxyEnabled(enabled: Boolean) = Unit
 
     override fun triggerNativeCrash() {
-        onLogReceived("Native crash request ignored in RR Client")
+        recordLog("Native crash request ignored in RR Client")
     }
 
     override fun writeDebugMessage(message: String) {
-        onLogReceived(message)
+        recordLog(message)
     }
 
     override fun connectSSHAgent(): Int = -1
 
     override fun connected() {
-        Log.i(TAG, "CommandClient connected")
+        recordLog("CommandClient connected")
     }
 
     override fun disconnected(message: String) {
-        Log.i(TAG, "CommandClient disconnected: $message")
+        recordLog("CommandClient disconnected: $message")
     }
 
     override fun setDefaultLogLevel(level: Int) = Unit
