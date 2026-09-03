@@ -3,7 +3,6 @@ package com.rr.client.qr
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
-import android.provider.Settings
 import android.widget.TextView
 import android.widget.Toast
 import com.google.zxing.BarcodeFormat
@@ -35,24 +34,24 @@ class QrScanActivity : CaptureActivity() {
         return scannerView
     }
 
-    @Deprecated("Deprecated in Android framework; retained for the local image picker result.")
+    @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == REQUEST_PICK_IMAGE) {
-            if (resultCode == Activity.RESULT_OK) {
-                data?.data?.let(::decodeImageFile)
-            }
+            if (resultCode == Activity.RESULT_OK) data?.data?.let(::decodeImageFile)
             return
         }
         super.onActivityResult(requestCode, resultCode, data)
     }
 
+    @Suppress("DEPRECATION")
     private fun openImagePicker() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "image/*"
-        }
-        @Suppress("DEPRECATION")
-        startActivityForResult(intent, REQUEST_PICK_IMAGE)
+        startActivityForResult(
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            },
+            REQUEST_PICK_IMAGE
+        )
     }
 
     private fun decodeImageFile(uri: Uri) {
