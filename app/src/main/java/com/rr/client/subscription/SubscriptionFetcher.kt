@@ -43,7 +43,14 @@ class SubscriptionFetcher(
                             val body = response.body?.string().orEmpty()
                             if (body.isBlank()) error("订阅返回空内容")
 
-                            val nodes = SubscriptionParser.parseContent(body, profileId, profileName)
+                            val parsedNodes = SubscriptionParser.parseContent(body, profileId, profileName)
+                            val recoveredAnyTls = AnyTlsLinkParser.extractFromContent(
+                                rawContent = body,
+                                profileId = profileId,
+                                profileName = profileName,
+                                startIndex = parsedNodes.size
+                            )
+                            val nodes = mergeRecoveredNodes(parsedNodes, recoveredAnyTls)
                             if (nodes.isEmpty()) error("返回内容中没有识别到可用节点")
 
                             val userInfo = SubscriptionParser.parseUserInfoHeader(
@@ -65,15 +72,32 @@ class SubscriptionFetcher(
         }
     }
 
+    private fun mergeRecoveredNodes(
+        parsed: List<ProxyNode>,
+        recovered: List<ProxyNode>
+    ): List<ProxyNode> {
+        if (recovered.isEmpty()) return parsed
+        val identities = parsed.mapTo(linkedSetOf(), ::nodeIdentity)
+        val additions = recovered.filter { identities.add(nodeIdentity(it)) }
+        return if (additions.isEmpty()) parsed else parsed + additions
+    }
+
+    private fun nodeIdentity(node: ProxyNode): String = buildString {
+        append(node.type.name)
+        append('|')
+        append(node.server.trim().lowercase())
+        append('|')
+        append(node.serverPort)
+        append('|')
+        append(node.uuidOrPassword)
+    }
+
     companion object {
-        /**
-         * Subscription panels often return different formats according to User-Agent.
-         * Prefer our own UA, then request formats widely supported by modern panels.
-         */
         private val COMPATIBILITY_USER_AGENTS = listOf(
             "RRBOX/0.2 (Android; sing-box/1.14.0)",
             "sing-box",
             "NekoBox",
+            "v2rayNG",
             "v2rayN/7.0",
             "clash.meta"
         )
