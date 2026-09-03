@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import android.util.Log
+import com.rr.client.routing.PerAppPolicyResolver
 import io.nekohasekai.libbox.BridgeOptions
 import io.nekohasekai.libbox.BridgeSession
 import io.nekohasekai.libbox.CommandClient
@@ -54,11 +55,19 @@ class BoxServiceWrapper(
     private var isRunning = false
     private var isStopping = false
 
+    @Volatile private var perAppMode: String = PerAppPolicyResolver.MODE_ALL
+    @Volatile private var selectedPackages: Set<String> = emptySet()
+
     private val recentLogs = ArrayDeque<String>()
 
     @Volatile
     var lastError: String? = null
         private set
+
+    fun setPerAppPolicy(mode: String, packages: Set<String>) {
+        perAppMode = mode
+        selectedPackages = packages.filter(String::isNotBlank).toSet()
+    }
 
     private fun recordLog(line: String) {
         synchronized(recentLogs) {
@@ -162,7 +171,7 @@ class BoxServiceWrapper(
         }
 
         val builder = vpn.Builder()
-            .setSession("RR Client")
+            .setSession("RRBOX")
             .setMtu(options.mtu)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -205,27 +214,35 @@ class BoxServiceWrapper(
                 val prefix = inet6Routes.next()
                 builder.addRoute(prefix.address(), prefix.prefix())
             }
-
-            val includePackage = options.includePackage
-            while (includePackage.hasNext()) {
-                val packageName = includePackage.next()
-                runCatching { builder.addAllowedApplication(packageName) }
-                    .onFailure { Log.w(TAG, "Unable to include package $packageName", it) }
-            }
-
-            val excludePackage = options.excludePackage
-            while (excludePackage.hasNext()) {
-                val packageName = excludePackage.next()
-                runCatching { builder.addDisallowedApplication(packageName) }
-                    .onFailure { Log.w(TAG, "Unable to exclude package $packageName", it) }
-            }
         }
+
+        applyAndroidPerAppPolicy(builder, vpn.packageName)
 
         val pfd = builder.establish()
             ?: error("VPN interface creation was rejected or revoked")
         tunPfd = pfd
         recordLog("Android TUN 已建立，fd=${pfd.fd}")
         return pfd.fd
+    }
+
+    private fun applyAndroidPerAppPolicy(builder: VpnService.Builder, selfPackage: String) {
+        val policy = PerAppPolicyResolver.resolve(perAppMode, selectedPackages, selfPackage)
+        policy.allowedPackages.forEach { packageName ->
+            runCatching { builder.addAllowedApplication(packageName) }
+                .onSuccess { recordLog("仅选中代理：$packageName") }
+                .onFailure { error ->
+                    Log.w(TAG, "Unable to allow package $packageName", error)
+                    throw error
+                }
+        }
+        policy.disallowedPackages.forEach { packageName ->
+            runCatching { builder.addDisallowedApplication(packageName) }
+                .onSuccess { recordLog("绕过 VPN：$packageName") }
+                .onFailure { error ->
+                    Log.w(TAG, "Unable to disallow package $packageName", error)
+                    throw error
+                }
+        }
     }
 
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
@@ -445,12 +462,12 @@ class BoxServiceWrapper(
         throw UnsupportedOperationException("Platform shell is disabled")
 
     override fun lookupSFTPServer(): String =
-        throw UnsupportedOperationException("Platform shell is disabled")
+        throw UnsupportedOperationException("SFTP is disabled")
 
     override fun readSystemSSHHostKey(): String =
-        throw UnsupportedOperationException("Platform shell is disabled")
+        throw UnsupportedOperationException("SSH is disabled")
 
-    override fun tailscaleHostname(): String = "RR Client"
+    override fun tailscaleHostname(): String = "RRBOX"
 
     override fun usePlatformBridge(): Boolean = false
 
@@ -474,7 +491,7 @@ class BoxServiceWrapper(
     override fun setSystemProxyEnabled(enabled: Boolean) = Unit
 
     override fun triggerNativeCrash() {
-        recordLog("Native crash request ignored in RR Client")
+        recordLog("Native crash request ignored in RRBOX")
     }
 
     override fun writeDebugMessage(message: String) {
