@@ -39,7 +39,6 @@ fun SubscriptionScreen(
     var urlInput by remember { mutableStateOf("") }
     var deleteCandidate by remember { mutableStateOf<SubProfile?>(null) }
 
-    // 删除确认
     deleteCandidate?.let { candidate ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
@@ -74,13 +73,12 @@ fun SubscriptionScreen(
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "支持添加多组订阅链接，节点会自动合并到节点列表",
+            text = "HTTP/HTTPS、IPv4、[IPv6]、带端口及省略协议头的订阅地址均可尝试；不同订阅组会在节点页分组显示。",
             style = MaterialTheme.typography.bodySmall,
             color = TextSecondary
         )
         Spacer(modifier = Modifier.height(12.dp))
 
-        // 添加订阅入口
         if (!showAddForm) {
             OutlinedButton(
                 onClick = { showAddForm = true },
@@ -128,12 +126,18 @@ fun SubscriptionScreen(
                     OutlinedTextField(
                         value = urlInput,
                         onValueChange = { urlInput = it },
-                        label = { Text("订阅链接", color = TextSecondary) },
-                        placeholder = { Text("https://xxx/sub?token=...", color = TextSecondary.copy(alpha = 0.6f)) },
+                        label = { Text("订阅地址", color = TextSecondary) },
+                        placeholder = { Text("1.2.3.4:8080/sub 或 https://example.com/sub", color = TextSecondary.copy(alpha = 0.6f)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
                         colors = textFieldColors()
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "省略 http:// 或 https:// 时，RRBOX 会先尝试 HTTPS，再尝试 HTTP。HTTP 订阅本身不加密，只建议用于你信任的自建面板。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -145,10 +149,9 @@ fun SubscriptionScreen(
                         Button(
                             onClick = {
                                 onAddProfile(nameInput, urlInput)
-                                // 乐观收起；失败时输入仍保留（下次展开可改）
                                 showAddForm = false
                             },
-                            enabled = !adding,
+                            enabled = !adding && urlInput.isNotBlank(),
                             modifier = Modifier.weight(2f),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
@@ -172,7 +175,7 @@ fun SubscriptionScreen(
         if (profiles.isEmpty() && !showAddForm) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "还没有订阅组\n点击上方「添加订阅」粘贴你的订阅链接",
+                    text = "还没有订阅组\n点击上方「添加订阅」输入订阅地址",
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -226,10 +229,7 @@ private fun SubscriptionCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = DarkBackground
-                ) {
+                Surface(shape = RoundedCornerShape(6.dp), color = DarkBackground) {
                     Text(
                         text = "${profile.nodes.size} 节点",
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
@@ -251,7 +251,7 @@ private fun SubscriptionCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary
                 )
-                if (ui != null && ui.total > 0L) {
+                if (ui.total > 0L) {
                     Text(
                         text = "已用 ${formatGb(ui.usedBytes)} / ${formatGb(ui.total)}",
                         style = MaterialTheme.typography.labelSmall,
@@ -260,7 +260,7 @@ private fun SubscriptionCard(
                 }
             }
 
-            if (ui != null && ui.total > 0L) {
+            if (ui.total > 0L) {
                 Spacer(modifier = Modifier.height(6.dp))
                 LinearProgressIndicator(
                     progress = { ui.usagePercentage },
@@ -289,11 +289,7 @@ private fun SubscriptionCard(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("同步中", style = MaterialTheme.typography.labelMedium)
                     } else {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = "刷新",
-                            modifier = Modifier.size(16.dp)
-                        )
+                        Icon(Icons.Default.Refresh, contentDescription = "刷新", modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("更新", style = MaterialTheme.typography.labelMedium)
                     }
@@ -302,11 +298,7 @@ private fun SubscriptionCard(
                     onClick = onDelete,
                     colors = ButtonDefaults.textButtonColors(contentColor = AccentRed)
                 ) {
-                    Icon(
-                        Icons.Default.Delete,
-                        contentDescription = "删除",
-                        modifier = Modifier.size(16.dp)
-                    )
+                    Icon(Icons.Default.Delete, contentDescription = "删除", modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("删除", style = MaterialTheme.typography.labelMedium)
                 }
