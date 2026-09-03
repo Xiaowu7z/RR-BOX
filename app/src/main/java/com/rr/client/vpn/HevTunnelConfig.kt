@@ -5,14 +5,13 @@ package com.rr.client.vpn
  *
  * HEV upstream ships an 8500-byte virtual TUN MTU in its reference config. Compared with the
  * common 1500-byte Android VPN MTU this reduces user-space TUN packet/syscall churn for TCP-heavy
- * traffic. This engine is experimental and can always be switched back to the stable system TUN.
+ * traffic. Beta2 deliberately stays IPv4-only to match the real-device stable system-TUN baseline;
+ * IPv6 can be enabled later as an independent compatibility change.
  */
 object HevTunnelConfig {
     const val MTU = 8500
     const val IPV4_CLIENT = "198.18.0.1"
     const val IPV4_PREFIX = 30
-    const val IPV6_CLIENT = "fdfe:dcba:9876::1"
-    const val IPV6_PREFIX = 126
     const val MAPPED_DNS = "198.18.0.2"
     const val SOCKS_HOST = "127.0.0.1"
 
@@ -20,7 +19,6 @@ object HevTunnelConfig {
         appendLine("tunnel:")
         appendLine("  mtu: $MTU")
         appendLine("  ipv4: $IPV4_CLIENT")
-        appendLine("  ipv6: '$IPV6_CLIENT'")
         appendLine("  icmp: 'off'")
         appendLine()
 
