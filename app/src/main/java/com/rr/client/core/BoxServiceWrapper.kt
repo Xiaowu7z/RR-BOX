@@ -79,38 +79,50 @@ class BoxServiceWrapper(
     }
 
     fun startService(configJson: String, vpn: VpnService): Boolean {
-        // If service is already running, just return true
-        if (isRunning && commandServer != null && commandClient != null) {
+        if (isRunning && commandServer != null) {
             onLogReceived("sing-box service already running, skipping restart")
             return true
         }
 
-        // Stop any existing service first
         stopService()
         lastError = null
-        recentLogs.clear()
+        synchronized(recentLogs) { recentLogs.clear() }
 
         return try {
             vpnService = vpn
             lastConfigJson = configJson
+            workingDir.mkdirs()
             File(workingDir, "config.json").writeText(configJson)
+
+            // Validate before native service startup so a schema problem is
+            // returned as a normal error instead of taking the process down.
+            Libbox.checkConfig(configJson)
 
             val server = Libbox.newCommandServer(this, this)
             commandServer = server
             server.start()
             server.startOrReloadService(configJson, OverrideOptions())
-
-            val clientOptions = CommandClientOptions().apply {
-                addCommand(Libbox.CommandStatus)
-                statusInterval = 1000L
-            }
-            val client = Libbox.newCommandClient(this, clientOptions)
-            commandClient = client
-            client.connect()
-
             isRunning = true
             isStopping = false
-            onLogReceived("sing-box v1.14.0 服务与状态监听器已启动")
+
+            // CommandStatus is observation only. A transient command socket
+            // failure must not tear down a working VPN tunnel.
+            runCatching {
+                val clientOptions = CommandClientOptions().apply {
+                    addCommand(Libbox.CommandStatus)
+                    // Go time.Duration is expressed in nanoseconds.
+                    statusInterval = 1_000_000_000L
+                }
+                val client = Libbox.newCommandClient(this, clientOptions)
+                client.connect()
+                commandClient = client
+            }.onFailure { error ->
+                commandClient = null
+                Log.w(TAG, "Status client unavailable; VPN remains active", error)
+                recordLog("实时流量通道暂不可用，但代理隧道已启动：${error.message.orEmpty()}")
+            }
+
+            onLogReceived("sing-box v1.14.0 代理隧道已启动")
             true
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to start sing-box service", e)
@@ -123,12 +135,8 @@ class BoxServiceWrapper(
     }
 
     fun stopService() {
-        // Prevent double-stop race condition
-        if (isStopping) {
-            return
-        }
+        if (isStopping) return
         isStopping = true
-
         isRunning = false
 
         runCatching { commandClient?.disconnect() }
@@ -147,7 +155,6 @@ class BoxServiceWrapper(
 
         vpnService = null
         lastConfigJson = null
-
         isStopping = false
     }
 
