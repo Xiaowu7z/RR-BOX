@@ -5,6 +5,7 @@ import com.google.gson.JsonParser
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.ChinaRuleSetManager
+import com.rr.client.routing.PerAppPolicyResolver
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -27,7 +28,9 @@ class ConfigBuilderTest {
 
     private fun build(
         smartRouting: Boolean = false,
-        paths: ChinaRuleSetManager.Paths? = null
+        paths: ChinaRuleSetManager.Paths? = null,
+        mode: String = PerAppPolicyResolver.MODE_ALL,
+        packages: Set<String> = emptySet()
     ): JsonObject {
         val node = node()
         return JsonParser.parseString(
@@ -36,10 +39,14 @@ class ConfigBuilderTest {
                 allNodes = listOf(node),
                 appRoutes = emptyList(),
                 smartRouting = smartRouting,
+                perAppMode = mode,
+                selectedPackages = packages,
                 ruleSets = paths
             )
         ).asJsonObject
     }
+
+    private fun tun(root: JsonObject): JsonObject = root.getAsJsonArray("inbounds")[0].asJsonObject
 
     @Test
     fun directDnsDoesNotDetourThroughDirectOutbound() {
@@ -54,17 +61,53 @@ class ConfigBuilderTest {
     }
 
     @Test
-    fun smartRoutingUsesThreeBinaryRuleSets() {
+    fun allModeDoesNotInstallAnyAndroidPackageFilter() {
+        val inbound = tun(build(mode = PerAppPolicyResolver.MODE_ALL, packages = setOf("com.example")))
+        assertFalse(inbound.has("include_package"))
+        assertFalse(inbound.has("exclude_package"))
+    }
+
+    @Test
+    fun allowListWritesOnlyIncludePackage() {
+        val inbound = tun(
+            build(
+                mode = PerAppPolicyResolver.MODE_ALLOW_LIST,
+                packages = setOf("org.telegram.messenger", "com.twitter.android")
+            )
+        )
+        assertTrue(inbound.has("include_package"))
+        assertFalse(inbound.has("exclude_package"))
+        assertEquals(2, inbound.getAsJsonArray("include_package").size())
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun emptyAllowListIsRejected() {
+        build(mode = PerAppPolicyResolver.MODE_ALLOW_LIST, packages = emptySet())
+    }
+
+    @Test
+    fun bypassListWritesOnlyExcludePackage() {
+        val inbound = tun(
+            build(
+                mode = PerAppPolicyResolver.MODE_DISALLOW_LIST,
+                packages = setOf("com.example.direct")
+            )
+        )
+        assertFalse(inbound.has("include_package"))
+        assertEquals("com.example.direct", inbound.getAsJsonArray("exclude_package")[0].asString)
+    }
+
+    @Test
+    fun smartRoutingUsesTwoStableBinaryRuleSets() {
         val paths = ChinaRuleSetManager.Paths(
             geositeChina = "/rules/geosite-cn.srs",
-            geositeNotChina = "/rules/geosite-not-cn.srs",
             geoipChina = "/rules/geoip-cn.srs"
         )
         val root = build(smartRouting = true, paths = paths)
         val route = root.getAsJsonObject("route")
         val sets = route.getAsJsonArray("rule_set")
 
-        assertEquals(3, sets.size())
+        assertEquals(2, sets.size())
         assertTrue(sets.all { it.asJsonObject.get("format").asString == "binary" })
         assertTrue(sets.all { it.asJsonObject.get("type").asString == "local" })
 
@@ -75,15 +118,11 @@ class ConfigBuilderTest {
             } == true
         })
         assertTrue(rules.any {
-            it.asJsonObject.get("type")?.asString == "logical"
-        })
-
-        val dnsRules = root.getAsJsonObject("dns").getAsJsonArray("rules")
-        assertTrue(dnsRules.any {
             it.asJsonObject.getAsJsonArray("rule_set")?.any { tag ->
-                tag.asString == "geosite-geolocation-cn"
+                tag.asString == "geoip-cn"
             } == true
         })
+        assertFalse(rules.any { it.asJsonObject.get("type")?.asString == "logical" })
     }
 
     @Test
@@ -101,7 +140,7 @@ class ConfigBuilderTest {
     fun disablingSmartRoutingRemovesCnRules() {
         val root = build(
             smartRouting = false,
-            paths = ChinaRuleSetManager.Paths("/a.srs", "/b.srs", "/c.srs")
+            paths = ChinaRuleSetManager.Paths("/a.srs", "/b.srs")
         )
         val route = root.getAsJsonObject("route")
         val rules = route.getAsJsonArray("rules")
