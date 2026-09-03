@@ -9,9 +9,12 @@ import android.os.SystemClock
 import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
+import com.rr.client.core.HevConfigAdapter
+import com.rr.client.storage.PreferencesManager
 import com.rr.client.storage.TrafficHistoryEntity
 import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSpeed
+import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,6 +23,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -32,14 +36,17 @@ class RRVpnService : VpnService() {
 
     private lateinit var notificationMgr: RRNotificationManager
     private var boxCore: BoxServiceWrapper? = null
+    private var hevEngine: HevVpnEngine? = null
     private var startJob: Job? = null
     private var stopping = false
     private var sessionPersisted = false
     private var requestGeneration = 0L
 
+    /** Always the canonical stable system-TUN config, never the HEV-adapted config. */
     private var activeConfigJson: String? = null
     private var activeNodeTag = "Default"
     private var activeNodeId = ""
+    private var activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
 
     private var startElapsedRealtime = 0L
     private var lastCalculationTime = 0L
@@ -69,6 +76,9 @@ class RRVpnService : VpnService() {
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
 
+        /** Restart the current canonical config after a forwarding-engine preference change. */
+        const val ACTION_RESTART_ACTIVE_ENGINE = "com.rr.client.action.RESTART_ACTIVE_ENGINE"
+
         private const val TAG = "RRVpnService"
 
         fun clearLastError() {
@@ -94,12 +104,29 @@ class RRVpnService : VpnService() {
                 }
             }
         )
+        hevEngine = HevVpnEngine(
+            vpnService = this,
+            workingDir = filesDir,
+            onLog = { line -> Log.d(TAG, line) }
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             RRNotificationManager.ACTION_STOP_VPN -> {
                 stopVpn(persistTraffic = true)
+                return START_NOT_STICKY
+            }
+
+            ACTION_RESTART_ACTIVE_ENGINE -> {
+                val config = activeConfigJson
+                if (config.isNullOrBlank()) {
+                    _lastError.value = "没有当前运行配置可供切换转发引擎"
+                    Log.e(TAG, _lastError.value.orEmpty())
+                    return START_NOT_STICKY
+                }
+                ensureForeground("$activeNodeTag · 正在切换引擎")
+                launchCore(config, restarting = true)
                 return START_NOT_STICKY
             }
 
@@ -145,7 +172,8 @@ class RRVpnService : VpnService() {
         }
 
         activeConfigJson = configJson
-        val restarting = _isRunning.value || _isStarting.value || boxCore?.isCoreRunning() == true
+        val restarting = _isRunning.value || _isStarting.value ||
+            boxCore?.isCoreRunning() == true || hevEngine?.isRunning == true
         launchCore(configJson, restarting)
         return START_NOT_STICKY
     }
@@ -157,7 +185,7 @@ class RRVpnService : VpnService() {
         )
     }
 
-    private fun launchCore(configJson: String, restarting: Boolean) {
+    private fun launchCore(stableConfigJson: String, restarting: Boolean) {
         val generation = ++requestGeneration
         stopping = false
         _lastError.value = null
@@ -166,37 +194,91 @@ class RRVpnService : VpnService() {
         val previousSession = _sessionTraffic.value
         startJob?.cancel()
         startJob = serviceScope.launch {
+            var resolvedEngine = PreferencesManager.TUN_ENGINE_SYSTEM
+
             val started = withContext(Dispatchers.IO) {
                 coreMutex.withLock {
                     if (generation != requestGeneration) return@withLock false
-                    if (restarting || boxCore?.isCoreRunning() == true) {
+
+                    if (restarting || boxCore?.isCoreRunning() == true || hevEngine?.isRunning == true) {
                         if (previousSession.durationSeconds > 0L) {
                             persistSessionOnce(previousSession)
                         }
-                        boxCore?.stopService()
+                        stopDataPlane()
                     }
-                    boxCore?.startService(configJson, this@RRVpnService) ?: false
+
+                    val prefs = RRApplication.instance.preferencesManager
+                    resolvedEngine = runCatching { prefs.tunEngine.first() }
+                        .getOrDefault(PreferencesManager.TUN_ENGINE_SYSTEM)
+
+                    if (resolvedEngine == PreferencesManager.TUN_ENGINE_HEV) {
+                        val runtime = runCatching { HevConfigAdapter.adapt(stableConfigJson) }
+                            .getOrElse { error ->
+                                Log.e(TAG, "Unable to adapt config for HEV", error)
+                                return@withLock false
+                            }
+
+                        // Validate the exact HEV-side config, not only the canonical system config.
+                        runCatching { Libbox.checkConfig(runtime.configJson) }
+                            .getOrElse { error ->
+                                Log.e(TAG, "HEV sing-box config validation failed", error)
+                                return@withLock false
+                            }
+
+                        val coreStarted = boxCore?.startService(runtime.configJson, this@RRVpnService) == true
+                        if (!coreStarted) return@withLock false
+
+                        val hevStarted = hevEngine?.start(runtime.perAppPolicy) == true
+                        if (!hevStarted) {
+                            boxCore?.stopService()
+                            return@withLock false
+                        }
+                        true
+                    } else {
+                        // Stable path: feed the exact canonical config into the same libbox path
+                        // that was real-device verified in 0.1.8. No HEV transformation occurs.
+                        boxCore?.startService(stableConfigJson, this@RRVpnService) ?: false
+                    }
                 }
             }
 
             if (generation != requestGeneration) return@launch
 
             if (started) {
-                activeConfigJson = configJson
+                activeConfigJson = stableConfigJson
+                activeEngine = resolvedEngine
                 sessionPersisted = false
                 resetTrafficState()
                 _isStarting.value = false
                 _isRunning.value = true
-                notificationMgr.updateNotification(activeNodeTag, TrafficSpeed(), 0L)
-                Log.i(TAG, "VPN tunnel started: $activeNodeTag")
+                notificationMgr.updateNotification(displayNodeTag(), TrafficSpeed(), 0L)
+                Log.i(TAG, "VPN tunnel started: $activeNodeTag · engine=$activeEngine")
             } else {
-                val reason = boxCore?.lastError ?: "sing-box 内核未能启动"
+                val reason = hevEngine?.lastError
+                    ?: boxCore?.lastError
+                    ?: if (resolvedEngine == PreferencesManager.TUN_ENGINE_HEV) {
+                        "HEV 极速引擎未能启动"
+                    } else {
+                        "sing-box 内核未能启动"
+                    }
                 _lastError.value = reason
                 Log.e(TAG, reason)
                 _isStarting.value = false
                 stopVpn(persistTraffic = false)
             }
         }
+    }
+
+    private fun stopDataPlane() {
+        // HEV must stop consuming the TUN before its loopback SOCKS listener/core is removed.
+        hevEngine?.stop()
+        boxCore?.stopService()
+    }
+
+    private fun displayNodeTag(): String = if (activeEngine == PreferencesManager.TUN_ENGINE_HEV) {
+        "$activeNodeTag · HEV"
+    } else {
+        activeNodeTag
     }
 
     override fun onRevoke() {
@@ -292,7 +374,7 @@ class RRVpnService : VpnService() {
             durationSeconds = durationSeconds
         )
         if (_isRunning.value) {
-            notificationMgr.updateNotification(activeNodeTag, speed, durationSeconds)
+            notificationMgr.updateNotification(displayNodeTag(), speed, durationSeconds)
         }
     }
 
@@ -308,10 +390,11 @@ class RRVpnService : VpnService() {
             withContext(Dispatchers.IO) {
                 coreMutex.withLock {
                     if (persistTraffic) persistSessionOnce(finalSession)
-                    boxCore?.stopService()
+                    stopDataPlane()
                 }
             }
             activeConfigJson = null
+            activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             _isStarting.value = false
             _isRunning.value = false
             _currentSpeed.value = TrafficSpeed()
@@ -344,6 +427,7 @@ class RRVpnService : VpnService() {
         ++requestGeneration
         startJob?.cancel()
         startJob = null
+        runCatching { hevEngine?.stop() }
         runCatching { boxCore?.stopService() }
         _isStarting.value = false
         _isRunning.value = false
