@@ -5,6 +5,7 @@ import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.system.OsConstants
 import android.util.Log
 import io.nekohasekai.libbox.BridgeOptions
 import io.nekohasekai.libbox.BridgeSession
@@ -79,7 +80,7 @@ class BoxServiceWrapper(
 
     fun startService(configJson: String, vpn: VpnService): Boolean {
         if (isRunning && commandServer != null) {
-            onLogReceived("sing-box service already running, skipping restart")
+            recordLog("sing-box service already running, skipping restart")
             return true
         }
 
@@ -91,7 +92,9 @@ class BoxServiceWrapper(
             vpnService = vpn
             lastConfigJson = configJson
             workingDir.mkdirs()
-            File(workingDir, "config.json").writeText(configJson)
+            val configFile = File(workingDir, "config.json")
+            configFile.writeText(configJson)
+            recordLog("运行配置路径：${configFile.absolutePath}")
 
             Libbox.checkConfig(configJson)
 
@@ -221,6 +224,7 @@ class BoxServiceWrapper(
         val pfd = builder.establish()
             ?: error("VPN interface creation was rejected or revoked")
         tunPfd = pfd
+        recordLog("Android TUN 已建立，fd=${pfd.fd}")
         return pfd.fd
     }
 
@@ -319,8 +323,21 @@ class BoxServiceWrapper(
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) = Unit
 
     override fun getInterfaces(): NetworkInterfaceIterator {
+        val vpn = vpnService
+        val connectivity = vpn?.getSystemService(ConnectivityManager::class.java)
+        val androidNetworks = connectivity?.allNetworks.orEmpty().mapNotNull { network ->
+            val properties = connectivity?.getLinkProperties(network) ?: return@mapNotNull null
+            val name = properties.interfaceName ?: return@mapNotNull null
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            name to Pair(properties, capabilities)
+        }.toMap()
+
         val interfaces = runCatching {
             Collections.list(JavaNetworkInterface.getNetworkInterfaces()).map { source ->
+                val androidNetwork = androidNetworks[source.name]
+                val properties = androidNetwork?.first
+                val capabilities = androidNetwork?.second
+
                 BoxNetworkInterface().apply {
                     index = source.index
                     name = source.name.orEmpty()
@@ -332,20 +349,59 @@ class BoxServiceWrapper(
                             "$host/${interfaceAddress.networkPrefixLength.toInt()}"
                         }
                     )
-                    flags = 0
+                    flags = buildInterfaceFlags(source, capabilities)
                     type = when {
-                        name.startsWith("wlan") || name.startsWith("wifi") -> Libbox.InterfaceTypeWIFI
-                        name.startsWith("rmnet") || name.startsWith("ccmni") -> Libbox.InterfaceTypeCellular
-                        name.startsWith("eth") -> Libbox.InterfaceTypeEthernet
+                        capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> Libbox.InterfaceTypeWIFI
+                        capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> Libbox.InterfaceTypeCellular
+                        capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> Libbox.InterfaceTypeEthernet
+                        source.name.startsWith("wlan") || source.name.startsWith("wifi") -> Libbox.InterfaceTypeWIFI
+                        source.name.startsWith("rmnet") || source.name.startsWith("ccmni") -> Libbox.InterfaceTypeCellular
+                        source.name.startsWith("eth") -> Libbox.InterfaceTypeEthernet
                         else -> Libbox.InterfaceTypeOther
                     }
-                    dnsServer = StringArray(emptyList())
-                    gateway = StringArray(emptyList())
-                    metered = false
+                    dnsServer = StringArray(
+                        properties?.dnsServers
+                            ?.mapNotNull { it.hostAddress }
+                            .orEmpty()
+                    )
+                    gateway = StringArray(
+                        properties?.routes
+                            ?.filter { it.destination.prefixLength == 0 }
+                            ?.mapNotNull { it.gateway?.hostAddress }
+                            .orEmpty()
+                    )
+                    metered = capabilities?.hasCapability(
+                        NetworkCapabilities.NET_CAPABILITY_NOT_METERED
+                    ) == false
                 }
             }
         }.getOrDefault(emptyList())
+
+        val usable = interfaces.filter { it.flags and OsConstants.IFF_UP != 0 }
+        recordLog("libbox 可用网卡：${usable.joinToString { "${it.name}(${it.index})" }.ifBlank { "无" }}")
         return NetworkInterfaceArray(interfaces)
+    }
+
+    private fun buildInterfaceFlags(
+        source: JavaNetworkInterface,
+        capabilities: NetworkCapabilities?
+    ): Int {
+        var flags = 0
+        val isUp = runCatching { source.isUp }.getOrDefault(false) ||
+            capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        if (isUp) {
+            flags = flags or OsConstants.IFF_UP or OsConstants.IFF_RUNNING
+        }
+        if (runCatching { source.isLoopback }.getOrDefault(false)) {
+            flags = flags or OsConstants.IFF_LOOPBACK
+        }
+        if (runCatching { source.isPointToPoint }.getOrDefault(false)) {
+            flags = flags or OsConstants.IFF_POINTOPOINT
+        }
+        if (runCatching { source.supportsMulticast() }.getOrDefault(false)) {
+            flags = flags or OsConstants.IFF_MULTICAST
+        }
+        return flags
     }
 
     override fun underNetworkExtension(): Boolean = false
@@ -368,7 +424,9 @@ class BoxServiceWrapper(
 
     override fun closeNeighborMonitor(listener: NeighborUpdateListener) = Unit
 
-    override fun registerMyInterface(name: String) = Unit
+    override fun registerMyInterface(name: String) {
+        recordLog("libbox 注册自身网卡：$name")
+    }
 
     override fun usePlatformShell(): Boolean = false
 
