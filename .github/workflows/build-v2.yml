@@ -20,7 +20,7 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RRBOX-0.1.7-smart-routing-arm64-v8a.apk
+  OUTPUT_APK_NAME: RRBOX-0.1.8-stability-arm64-v8a.apk
 
 jobs:
   build:
@@ -93,7 +93,19 @@ jobs:
         run: |
           set -euo pipefail
           rules_dir="app/src/main/assets/rules"
+          rm -rf "$rules_dir"
           mkdir -p "$rules_dir" build-reports
+
+          validate_rule() {
+            local file="$1"
+            test "$(xxd -p -l 3 "$file")" = "535253"
+            test "$(stat -c '%s' "$file")" -gt 8
+            local version
+            version="$(od -An -tu1 -j3 -N1 "$file" | tr -d ' ')"
+            test -n "$version"
+            test "$version" -ge 1
+            test "$version" -le 5
+          }
 
           fetch_rule() {
             local output="$1"
@@ -105,14 +117,14 @@ jobs:
                 --retry 3 --retry-delay 2 \
                 --connect-timeout 15 --max-time 60 \
                 "$url" -o "$temp"; then
-                if [ "$(xxd -p -l 3 "$temp")" = "535253" ] && [ "$(stat -c '%s' "$temp")" -gt 8 ]; then
+                if validate_rule "$temp"; then
                   mv "$temp" "$output"
                   return 0
                 fi
               fi
               rm -f "$temp"
             done
-            echo "ERROR: unable to download valid SRS: $output" >&2
+            echo "ERROR: unable to download sing-box 1.14-compatible SRS: $output" >&2
             return 1
           }
 
@@ -120,16 +132,13 @@ jobs:
             "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs" \
             "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
 
-          fetch_rule "$rules_dir/geosite-geolocation-not-cn.srs" \
-            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-%21cn.srs" \
-            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-%21cn.srs"
-
           fetch_rule "$rules_dir/geoip-cn.srs" \
             "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" \
             "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
 
           sha256sum "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SHA256.txt
           ls -lh "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SIZES.txt
+          test "$(find "$rules_dir" -maxdepth 1 -name '*.srs' | wc -l)" -eq 2
 
       - name: Build official sing-box libbox.aar
         shell: bash
@@ -223,13 +232,21 @@ jobs:
 
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
-          grep -q 'PerAppPolicyResolver' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
+          grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
+          grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
+          if grep -q 'START_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt; then
+            echo "ERROR: sticky VPN restore path must not return" >&2
+            exit 1
+          fi
           grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
+          grep -q 'clearApplicationUserData' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' app/src/main/AndroidManifest.xml
           grep -q 'NodeLatencyTester' app/src/main/java/com/rr/client/MainActivity.kt
-          grep -q 'NODE_OVERRIDES_JSON' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
-          grep -q 'PIN_HASH' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'PROXY_SELECTED_PACKAGES' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'BYPASS_SELECTED_PACKAGES' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'PIN_MAX_FAILED_ATTEMPTS' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
           grep -q 'RRBOX' app/src/main/res/values/strings.xml
 
           gradle \
@@ -269,14 +286,17 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.7-smart-routing'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.8-stability'" build-reports/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
           grep -q '^assets/rules/geosite-geolocation-cn\.srs$' build-reports/APK-FILE-LIST.txt
-          grep -q '^assets/rules/geosite-geolocation-not-cn\.srs$' build-reports/APK-FILE-LIST.txt
           grep -q '^assets/rules/geoip-cn\.srs$' build-reports/APK-FILE-LIST.txt
+          if grep -q '^assets/rules/geosite-geolocation-not-cn\.srs$' build-reports/APK-FILE-LIST.txt; then
+            echo "ERROR: obsolete not-cn rule is still packaged" >&2
+            exit 1
+          fi
 
           if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' build-reports/APK-FILE-LIST.txt; then
             echo "ERROR: APK contains an unexpected ABI" >&2
@@ -299,7 +319,7 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.1.7-smart-routing Build Report
+          # RRBOX 0.1.8-stability Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
@@ -319,16 +339,18 @@ jobs:
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - Per-app filtering: Android VpnService.Builder allow/disallow policy
-          - Smart routing: bundled SagerNet geosite/geoip China binary rule snapshots
-          - Rule updater: atomic runtime replacement with validation
+          - VPN lifecycle: deterministic START_NOT_STICKY, no stale runtime restore
+          - Per-app filtering: authoritative sing-box TUN include/exclude package fields
+          - Proxy-only and bypass app lists: persisted independently
+          - Smart routing: SagerNet China geosite + geoip binary rules
+          - Rule updater: atomic runtime replacement with sing-box 1.14 version validation
           - Notification actions: restart + disconnect
-          - PIN lock: optional PBKDF2-HMAC-SHA256 credential
+          - PIN lock: PBKDF2 credential + configurable failed-attempt self-wipe policy
           - R8/minification: disabled for alpha
           - SystemUI/Xposed module: not included
           - CI verification: unit tests, SRS assets, signature, app label, package, version and ABI passed
 
-          Real-device validation remains required for routing behavior and throughput.
+          Real-device validation remains required for node connectivity, per-app behavior, UI stability and throughput.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
@@ -341,7 +363,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.1.7-smart-routing-arm64-v8a
+          name: RRBOX-0.1.8-stability-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
