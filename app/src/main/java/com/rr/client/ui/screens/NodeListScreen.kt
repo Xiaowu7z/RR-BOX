@@ -24,11 +24,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -64,6 +65,10 @@ import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.friendlyLabel
+import com.rr.client.security.NodeSecurityInspector
+import com.rr.client.security.NodeSecurityRating
+import com.rr.client.security.NodeSecurityReport
+import com.rr.client.security.NodeSecuritySeverity
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
 import com.rr.client.ui.theme.CyanSecondary
@@ -254,13 +259,14 @@ fun NodeListScreen(
 
 @Composable
 private fun GroupHeader(group: NodeGroupUi, expanded: Boolean, onToggle: () -> Unit) {
+    val accent = if (group.isLocal) CyanSecondary else CyanPrimary
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle),
-        color = if (group.isLocal) CyanPrimary.copy(alpha = 0.10f) else DarkSurface,
+        color = accent.copy(alpha = if (expanded) 0.18f else 0.12f),
         shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, if (group.isLocal) CyanPrimary.copy(alpha = 0.45f) else CardBorder)
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.68f))
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
@@ -269,22 +275,28 @@ private fun GroupHeader(group: NodeGroupUi, expanded: Boolean, onToggle: () -> U
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = group.name,
-                    color = if (group.isLocal) CyanPrimary else TextPrimary,
+                    color = accent,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = if (group.isLocal) "本机单独添加 · ${group.nodes.size} 个" else "订阅节点 · ${group.nodes.size} 个",
-                    color = TextSecondary,
+                    color = accent.copy(alpha = 0.78f),
                     style = MaterialTheme.typography.labelSmall
                 )
             }
-            Icon(
-                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                contentDescription = if (expanded) "收起" else "展开",
-                tint = TextSecondary
-            )
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = DarkBackground.copy(alpha = 0.72f)
+            ) {
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = accent,
+                    modifier = Modifier.padding(3.dp)
+                )
+            }
         }
     }
 }
@@ -303,6 +315,7 @@ private fun NodeCard(
     onDeleteLocalNode: () -> Unit
 ) {
     var menuExpanded by remember(node.id) { mutableStateOf(false) }
+    var securityReport by remember(node.id) { mutableStateOf<NodeSecurityReport?>(null) }
 
     Card(
         modifier = Modifier
@@ -361,6 +374,14 @@ private fun NodeCard(
                         onClick = { menuExpanded = false; onPingNode() }
                     )
                     DropdownMenuItem(
+                        text = { Text("安全检查") },
+                        leadingIcon = { Icon(Icons.Default.Security, null) },
+                        onClick = {
+                            menuExpanded = false
+                            securityReport = NodeSecurityInspector.inspect(node)
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("编辑节点") },
                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                         onClick = { menuExpanded = false; onEditNode() }
@@ -383,6 +404,94 @@ private fun NodeCard(
             }
         }
     }
+
+    securityReport?.let { report ->
+        NodeSecurityDialog(
+            node = node,
+            report = report,
+            onDismiss = { securityReport = null }
+        )
+    }
+}
+
+@Composable
+private fun NodeSecurityDialog(
+    node: ProxyNode,
+    report: NodeSecurityReport,
+    onDismiss: () -> Unit
+) {
+    val ratingColor = when (report.rating) {
+        NodeSecurityRating.GOOD -> CyanPrimary
+        NodeSecurityRating.ATTENTION -> MaterialTheme.colorScheme.tertiary
+        NodeSecurityRating.HIGH_RISK -> MaterialTheme.colorScheme.error
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("节点安全检查")
+                Text(
+                    node.tag,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = ratingColor.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, ratingColor.copy(alpha = 0.48f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(report.title, color = ratingColor, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(3.dp))
+                        Text(report.summary, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                    }
+                }
+
+                report.findings.forEach { finding ->
+                    val findingColor = when (finding.severity) {
+                        NodeSecuritySeverity.PASS -> CyanPrimary
+                        NodeSecuritySeverity.WARNING -> MaterialTheme.colorScheme.tertiary
+                        NodeSecuritySeverity.DANGER -> MaterialTheme.colorScheme.error
+                    }
+                    val marker = when (finding.severity) {
+                        NodeSecuritySeverity.PASS -> "✓"
+                        NodeSecuritySeverity.WARNING -> "!"
+                        NodeSecuritySeverity.DANGER -> "×"
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(marker, color = findingColor, fontWeight = FontWeight.Bold)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                finding.title,
+                                color = TextPrimary,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                finding.detail,
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    "说明：这里只检查节点配置、协议和 TLS 暴露面；不能证明节点运营者可信，也不判断出口 IP 信誉或服务端是否记录流量。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
 }
 
 @Composable
@@ -457,7 +566,7 @@ private fun ManualProtocolDialog(onDismiss: () -> Unit, onSelect: (ProtocolType)
                     }
                 }
                 Text(
-                    "AnyTLS、Naive、SOCKS/HTTP/SSH 等可扫码、粘贴分享链接或导入 sing-box JSON。",
+                    "AnyTLS 已支持订阅、扫码和链接导入；Naive、SOCKS/HTTP/SSH 等也可通过链接或 sing-box JSON 导入。",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
