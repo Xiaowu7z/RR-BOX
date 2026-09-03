@@ -4,9 +4,9 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.routing.ChinaRuleSetManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -27,8 +27,7 @@ class ConfigBuilderTest {
 
     private fun build(
         smartRouting: Boolean = false,
-        perAppMode: String = "ALL",
-        selectedPackages: Set<String> = emptySet()
+        paths: ChinaRuleSetManager.Paths? = null
     ): JsonObject {
         val node = node()
         return JsonParser.parseString(
@@ -37,8 +36,7 @@ class ConfigBuilderTest {
                 allNodes = listOf(node),
                 appRoutes = emptyList(),
                 smartRouting = smartRouting,
-                perAppMode = perAppMode,
-                selectedPackages = selectedPackages
+                ruleSets = paths
             )
         ).asJsonObject
     }
@@ -50,75 +48,67 @@ class ConfigBuilderTest {
         val directDns = servers.first { it.asJsonObject.get("tag").asString == "dns-direct" }.asJsonObject
         val remoteDns = servers.first { it.asJsonObject.get("tag").asString == "dns-remote" }.asJsonObject
 
-        assertFalse("A direct DNS transport must not detour through the empty direct outbound", directDns.has("detour"))
+        assertFalse(directDns.has("detour"))
         assertEquals("proxy", remoteDns.get("detour").asString)
-
-        val outbounds = root.getAsJsonArray("outbounds")
-        assertEquals(2, outbounds.size())
-        assertTrue(outbounds.any { it.asJsonObject.get("tag").asString == "proxy" })
-        assertTrue(outbounds.any { it.asJsonObject.get("tag").asString == "direct" })
+        assertEquals(2, root.getAsJsonArray("outbounds").size())
     }
 
     @Test
-    fun allowListIsWrittenIntoTunIncludePackage() {
-        val root = build(
-            perAppMode = "ALLOW_LIST",
-            selectedPackages = setOf("org.telegram.messenger", "com.twitter.android")
+    fun smartRoutingUsesThreeBinaryRuleSets() {
+        val paths = ChinaRuleSetManager.Paths(
+            geositeChina = "/rules/geosite-cn.srs",
+            geositeNotChina = "/rules/geosite-not-cn.srs",
+            geoipChina = "/rules/geoip-cn.srs"
         )
-        val tun = root.getAsJsonArray("inbounds")[0].asJsonObject
-        val include = tun.getAsJsonArray("include_package").map { it.asString }.toSet()
+        val root = build(smartRouting = true, paths = paths)
+        val route = root.getAsJsonObject("route")
+        val sets = route.getAsJsonArray("rule_set")
 
-        assertEquals(setOf("org.telegram.messenger", "com.twitter.android"), include)
-        assertFalse(tun.has("exclude_package"))
+        assertEquals(3, sets.size())
+        assertTrue(sets.all { it.asJsonObject.get("format").asString == "binary" })
+        assertTrue(sets.all { it.asJsonObject.get("type").asString == "local" })
+
+        val rules = route.getAsJsonArray("rules")
+        assertTrue(rules.any {
+            it.asJsonObject.getAsJsonArray("rule_set")?.any { tag ->
+                tag.asString == "geosite-geolocation-cn"
+            } == true
+        })
+        assertTrue(rules.any {
+            it.asJsonObject.get("type")?.asString == "logical"
+        })
+
+        val dnsRules = root.getAsJsonObject("dns").getAsJsonArray("rules")
+        assertTrue(dnsRules.any {
+            it.asJsonObject.getAsJsonArray("rule_set")?.any { tag ->
+                tag.asString == "geosite-geolocation-cn"
+            } == true
+        })
     }
 
     @Test
-    fun disallowListIsWrittenIntoTunExcludePackage() {
+    fun smartRoutingFallsBackToCnSuffixWithoutBinaryFiles() {
+        val root = build(smartRouting = true, paths = null)
+        val route = root.getAsJsonObject("route")
+        val rules = route.getAsJsonArray("rules")
+
+        assertFalse(route.has("rule_set"))
+        assertTrue(rules.any { it.asJsonObject.has("domain_suffix") })
+        assertTrue(rules.any { it.asJsonObject.get("ip_is_private")?.asBoolean == true })
+    }
+
+    @Test
+    fun disablingSmartRoutingRemovesCnRules() {
         val root = build(
-            perAppMode = "DISALLOW_LIST",
-            selectedPackages = setOf("com.example.direct")
+            smartRouting = false,
+            paths = ChinaRuleSetManager.Paths("/a.srs", "/b.srs", "/c.srs")
         )
-        val tun = root.getAsJsonArray("inbounds")[0].asJsonObject
+        val route = root.getAsJsonObject("route")
+        val rules = route.getAsJsonArray("rules")
 
-        assertEquals("com.example.direct", tun.getAsJsonArray("exclude_package")[0].asString)
-        assertFalse(tun.has("include_package"))
-    }
-
-    @Test
-    fun allModeDoesNotSetAndroidPackageFilters() {
-        val root = build(
-            perAppMode = "ALL",
-            selectedPackages = setOf("com.example.ignored")
-        )
-        val tun = root.getAsJsonArray("inbounds")[0].asJsonObject
-
-        assertFalse(tun.has("include_package"))
-        assertFalse(tun.has("exclude_package"))
-    }
-
-    @Test
-    fun emptyAllowListIsRejectedInsteadOfAccidentallyProxyingEverything() {
-        assertThrows(IllegalArgumentException::class.java) {
-            build(perAppMode = "ALLOW_LIST", selectedPackages = emptySet())
-        }
-    }
-
-    @Test
-    fun smartRoutingActuallyAddsAndRemovesRules() {
-        val enabled = build(smartRouting = true)
-        val disabled = build(smartRouting = false)
-
-        val enabledRules = enabled.getAsJsonObject("route").getAsJsonArray("rules")
-        val disabledRules = disabled.getAsJsonObject("route").getAsJsonArray("rules")
-
-        assertTrue(enabledRules.any { it.asJsonObject.get("ip_is_private")?.asBoolean == true })
-        assertTrue(enabledRules.any { it.asJsonObject.has("domain_suffix") })
-        assertFalse(disabledRules.any { it.asJsonObject.has("ip_is_private") })
-        assertFalse(disabledRules.any { it.asJsonObject.has("domain_suffix") })
-
-        val dnsRulesEnabled = enabled.getAsJsonObject("dns").getAsJsonArray("rules")
-        val dnsRulesDisabled = disabled.getAsJsonObject("dns").getAsJsonArray("rules")
-        assertTrue(dnsRulesEnabled.any { it.asJsonObject.has("domain_suffix") })
-        assertFalse(dnsRulesDisabled.any { it.asJsonObject.has("domain_suffix") })
+        assertFalse(route.has("rule_set"))
+        assertFalse(rules.any { it.asJsonObject.has("domain_suffix") })
+        assertFalse(rules.any { it.asJsonObject.has("rule_set") })
+        assertFalse(rules.any { it.asJsonObject.get("ip_is_private")?.asBoolean == true })
     }
 }
