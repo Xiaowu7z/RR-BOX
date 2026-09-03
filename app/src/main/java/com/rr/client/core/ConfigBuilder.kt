@@ -14,8 +14,8 @@ object ConfigBuilder {
     private const val TAG_PROXY = "proxy"
     private const val TAG_DIRECT = "direct"
     private const val TAG_BLOCK = "block"
-    private const val TAG_DNS_OUT = "dns-out"
-    private val RESERVED_TAGS = setOf(TAG_PROXY, TAG_DIRECT, TAG_BLOCK, TAG_DNS_OUT)
+    // sing-box 1.13+ removed legacy "type":"dns" outbound; DNS hijacking done via route rule action="hijack-dns"
+    private val RESERVED_TAGS = setOf(TAG_PROXY, TAG_DIRECT, TAG_BLOCK)
 
     /**
      * 生成 sing-box 配置。
@@ -133,10 +133,7 @@ object ConfigBuilder {
                 addProperty("type", "block")
                 addProperty("tag", TAG_BLOCK)
             })
-            add(JsonObject().apply {
-                addProperty("type", "dns")
-                addProperty("tag", TAG_DNS_OUT)
-            })
+            // sing-box 1.13+ removed legacy "type":"dns" outbound; DNS hijacking done via route rule action="hijack-dns"
 
             allNodes.forEach { node ->
                 if (node.id == selectedNode.id) return@forEach
@@ -157,10 +154,9 @@ object ConfigBuilder {
         // 5. Route
         root.add("route", JsonObject().apply {
             val rules = JsonArray().apply {
-                // DNS Hijacking
+                // DNS Hijacking (sing-box 1.13+: replaced "outbound":"dns-out" with action="hijack-dns")
                 add(JsonObject().apply {
-                    addProperty("protocol", "dns")
-                    addProperty("outbound", TAG_DNS_OUT)
+                    addProperty("action", "hijack-dns")
                 })
 
                 // 服务器域名/IP 直连防环路
