@@ -16,6 +16,9 @@ import java.util.concurrent.TimeUnit
  * files remain untouched if any member of the set fails validation.
  */
 object ChinaRuleSetManager {
+    // sing-box v1.14.0 constant.RuleSetVersionCurrent == 5.
+    private const val MAX_SUPPORTED_SRS_VERSION = 5
+
     data class Paths(
         val geositeChina: String,
         val geositeNotChina: String,
@@ -77,7 +80,7 @@ object ChinaRuleSetManager {
                 context.assets.open("rules/${spec.assetName}").use { input ->
                     temporary.outputStream().use(input::copyTo)
                 }
-                require(isValidSrs(temporary)) { "内置规则集损坏：${spec.localName}" }
+                require(isValidSrs(temporary)) { "内置规则集损坏或版本不兼容：${spec.localName}" }
                 replaceAtomically(temporary, destination)
             }
         }
@@ -106,7 +109,9 @@ object ChinaRuleSetManager {
                     val temp = File(directory, ".${spec.localName}.download.tmp")
                     temp.delete()
                     downloadFirstAvailable(spec.urls, temp)
-                    require(isValidSrs(temp)) { "下载到的规则集无效：${spec.localName}" }
+                    require(isValidSrs(temp)) {
+                        "下载到的规则集无效或高于 sing-box 1.14 支持版本：${spec.localName}"
+                    }
                     downloaded += temp to File(directory, spec.localName)
                 }
 
@@ -117,8 +122,9 @@ object ChinaRuleSetManager {
                     .sumOf { File(it).length() }
                 UpdateResult(System.currentTimeMillis(), bytes)
             } finally {
-                directory.listFiles { file -> file.name.endsWith(".download.tmp") || file.name.endsWith(".asset.tmp") }
-                    ?.forEach(File::delete)
+                directory.listFiles { file ->
+                    file.name.endsWith(".download.tmp") || file.name.endsWith(".asset.tmp")
+                }?.forEach(File::delete)
             }
         }
     }
@@ -148,7 +154,12 @@ object ChinaRuleSetManager {
         if (!file.isFile || file.length() < 8L) return false
         return runCatching {
             file.inputStream().use { input ->
-                input.read() == 0x53 && input.read() == 0x52 && input.read() == 0x53
+                val s = input.read()
+                val r = input.read()
+                val s2 = input.read()
+                val version = input.read()
+                s == 0x53 && r == 0x52 && s2 == 0x53 &&
+                    version in 1..MAX_SUPPORTED_SRS_VERSION
             }
         }.getOrDefault(false)
     }
