@@ -1,7 +1,10 @@
 package com.rr.client
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -9,31 +12,75 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
+import com.rr.client.core.NodeLatencyState
+import com.rr.client.core.NodeLatencyTester
+import com.rr.client.core.NodeOverridePatcher
 import com.rr.client.core.model.AppRouteConfig
+import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.AppManager
 import com.rr.client.subscription.SubscriptionFetcher
 import com.rr.client.subscription.model.SubProfile
-import com.rr.client.ui.screens.*
+import com.rr.client.ui.components.NodeEditDialog
+import com.rr.client.ui.screens.AppRoutingScreen
+import com.rr.client.ui.screens.DashboardScreen
+import com.rr.client.ui.screens.NodeListScreen
+import com.rr.client.ui.screens.SettingsScreen
+import com.rr.client.ui.screens.SubscriptionScreen
 import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.RRClientTheme
+import com.rr.client.vpn.RRNotificationManager
 import com.rr.client.vpn.RRVpnService
 import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        Toast.makeText(
+            this,
+            if (granted) {
+                "通知权限已开启：连接后会显示实时速度"
+            } else {
+                "通知权限未开启：VPN 仍可使用，但通知栏不会显示实时速度"
+            },
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
     private val vpnLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -51,6 +98,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionIfNeeded()
         setContent {
             RRClientTheme {
                 MainApp()
@@ -69,6 +117,7 @@ class MainActivity : ComponentActivity() {
 
         val db = RRApplication.instance.database
         val prefs = RRApplication.instance.preferencesManager
+        val nodeOverrides by prefs.nodeOverrides.collectAsState(initial = emptyMap())
 
         var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
         var selectedNodeId by remember { mutableStateOf<String?>(null) }
@@ -77,8 +126,13 @@ class MainActivity : ComponentActivity() {
         var refreshingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
         var addingProfile by remember { mutableStateOf(false) }
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
+        var latencyStates by remember { mutableStateOf<Map<String, NodeLatencyState>>(emptyMap()) }
+        var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
 
-        val allNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
+        val baseNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
+        val allNodes = remember(baseNodes, nodeOverrides) {
+            baseNodes.map { base -> nodeOverrides[base.id] ?: base }
+        }
         val selectedNode = allNodes.find { it.id == selectedNodeId }
         val selectedProfile = subProfiles.firstOrNull { p -> p.nodes.any { it.id == selectedNodeId } }
 
@@ -116,6 +170,7 @@ class MainActivity : ComponentActivity() {
                 selectedNodeId = resolved
                 if (resolved != null) lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
             }
+            latencyStates = latencyStates.filterKeys { id -> nodesNow.any { it.id == id } }
         }
 
         fun toast(text: String) = Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
@@ -181,6 +236,7 @@ class MainActivity : ComponentActivity() {
             }
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) { db.profileDao().deleteProfile(existing.toEntity()) }
+                existing.nodes.forEach { prefs.clearNodeOverride(it.id) }
                 refreshFromProfiles(subProfiles.filterNot { it.id == profileId })
                 toast("已删除订阅「${existing.name}」")
             }
@@ -189,6 +245,38 @@ class MainActivity : ComponentActivity() {
         fun selectNode(nodeId: String) {
             selectedNodeId = nodeId
             lifecycleScope.launch { prefs.setSelectedNodeId(nodeId) }
+        }
+
+        fun pingNode(node: ProxyNode) {
+            if (isVpnRunning || isVpnStarting) {
+                toast("请先断开 VPN 再测速，避免当前代理影响 Ping 结果")
+                return
+            }
+            if (latencyStates[node.id] == NodeLatencyState.Testing) return
+            latencyStates = latencyStates + (node.id to NodeLatencyState.Testing)
+            lifecycleScope.launch {
+                val result = NodeLatencyTester.ping(node.server)
+                latencyStates = latencyStates + (node.id to result)
+            }
+        }
+
+        fun pingAllNodes() {
+            if (isVpnRunning || isVpnStarting) {
+                toast("请先断开 VPN 再测速，避免当前代理影响 Ping 结果")
+                return
+            }
+            if (allNodes.isEmpty()) return
+            latencyStates = latencyStates + allNodes.associate { it.id to NodeLatencyState.Testing }
+            lifecycleScope.launch {
+                allNodes.chunked(3).forEach { batch ->
+                    val batchResults = batch.map { node ->
+                        async { node.id to NodeLatencyTester.ping(node.server) }
+                    }.awaitAll()
+                    batchResults.forEach { (id, result) ->
+                        latencyStates = latencyStates + (id to result)
+                    }
+                }
+            }
         }
 
         Scaffold(
@@ -216,7 +304,7 @@ class MainActivity : ComponentActivity() {
                             when {
                                 isVpnRunning -> {
                                     val stopIntent = Intent(this@MainActivity, RRVpnService::class.java).apply {
-                                        action = com.rr.client.vpn.RRNotificationManager.ACTION_STOP_VPN
+                                        action = RRNotificationManager.ACTION_STOP_VPN
                                     }
                                     startService(stopIntent)
                                 }
@@ -241,9 +329,6 @@ class MainActivity : ComponentActivity() {
                                                     appRoutes = apps,
                                                     smartRouting = smartRouting
                                                 )
-                                                // Use the exact bundled libbox parser before Android
-                                                // foreground-service/VPN startup. Invalid schema must
-                                                // never be able to crash the service process again.
                                                 Libbox.checkConfig(configJson)
                                                 configJson
                                             }
@@ -264,9 +349,20 @@ class MainActivity : ComponentActivity() {
                     1 -> NodeListScreen(
                         nodes = allNodes,
                         selectedNodeId = selectedNodeId,
+                        latencyStates = latencyStates,
+                        editedNodeIds = nodeOverrides.keys,
                         onSelectNode = { node ->
                             selectNode(node.id)
                             toast("已切换节点：${node.tag}")
+                        },
+                        onPingAll = ::pingAllNodes,
+                        onPingNode = ::pingNode,
+                        onEditNode = { node -> editingNode = node },
+                        onResetNodeEdit = { node ->
+                            lifecycleScope.launch {
+                                prefs.clearNodeOverride(node.id)
+                                toast("已恢复订阅中的原始节点参数")
+                            }
                         },
                         onGoToSubscription = { selectedTab = 3 }
                     )
@@ -301,6 +397,36 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+
+        editingNode?.let { original ->
+            NodeEditDialog(
+                node = original,
+                onDismiss = { editingNode = null },
+                onSave = { edited ->
+                    val patched = NodeOverridePatcher.apply(original, edited)
+                    lifecycleScope.launch {
+                        prefs.setNodeOverride(patched)
+                        editingNode = null
+                        toast(
+                            if (isVpnRunning || isVpnStarting) {
+                                "节点已保存；当前连接仍使用旧参数，断开后重新连接即可生效"
+                            } else {
+                                "节点参数已保存"
+                            }
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
