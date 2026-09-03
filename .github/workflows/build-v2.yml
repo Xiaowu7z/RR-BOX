@@ -1,4 +1,4 @@
-name: RR Client Automated Build (arm64-v8a)
+name: RRBOX Automated Build (arm64-v8a)
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: rr-client-arm64-${{ github.workflow }}-${{ github.ref }}
+  group: rrbox-arm64-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -20,11 +20,11 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RR-Client-0.1.5-node-tools-arm64-v8a.apk
+  OUTPUT_APK_NAME: RRBOX-0.1.6-rrbox-routing-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RR Client APK
+    name: Build signed RRBOX APK
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -181,8 +181,12 @@ jobs:
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
+          grep -q 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' app/src/main/AndroidManifest.xml
+          grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
+          grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'NodeLatencyTester' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'NODE_OVERRIDES_JSON' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'RRBOX' app/src/main/res/values/strings.xml
 
           gradle \
             --no-daemon \
@@ -221,7 +225,8 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.5-node-tools'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.6-rrbox-routing'" build-reports/PACKAGE-REPORT.txt
+          grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
@@ -247,12 +252,13 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RR Client 0.1.5-node-tools Build Report
+          # RRBOX 0.1.6-rrbox-routing Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
           - Version code: ${version_code}
           - Version name: ${version_name}
+          - App label: RRBOX
           - ABI: arm64-v8a only
           - sing-box tag: ${SING_BOX_TAG}
           - sing-box commit: ${SING_BOX_COMMIT}
@@ -266,18 +272,18 @@ jobs:
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - Target device: OnePlus PLK110 / CPH2745, Android 16
-          - Known-good VPN core preserved from 0.1.4-netfix
           - DNS direct-detour regression test: passed
           - Android network-interface flag guard: passed
+          - Per-app include/exclude configuration tests: passed
+          - Smart-routing on/off regression test: passed
           - Node Ping parser test: passed
           - Node raw-outbound edit preservation test: passed
-          - Notification permission guard: passed
+          - Notification and battery-protection permission guards: passed
           - R8/minification: disabled for alpha
           - SystemUI/Xposed module: not included
-          - CI verification: unit test, signature, package, version and ABI passed
+          - CI verification: unit test, signature, app label, package, version and ABI passed
 
-          Real-device verification is still required for notification permission UI and node editor interaction.
+          Real-device verification is still required for vendor-specific background behavior and per-app VPN behavior.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
@@ -288,7 +294,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RR-Client-0.1.5-node-tools-arm64-v8a
+          name: RRBOX-0.1.6-rrbox-routing-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
