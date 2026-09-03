@@ -20,7 +20,7 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RR-Client-0.1.3-dnsfix-arm64-v8a.apk
+  OUTPUT_APK_NAME: RR-Client-0.1.4-netfix-arm64-v8a.apk
 
 jobs:
   build:
@@ -177,6 +177,10 @@ jobs:
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+
+          grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
+          grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
+
           gradle \
             --no-daemon \
             --max-workers=2 \
@@ -214,7 +218,7 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.3-dnsfix'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.4-netfix'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
@@ -240,7 +244,7 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RR Client 0.1.3-dnsfix Build Report
+          # RR Client 0.1.4-netfix Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
@@ -260,7 +264,8 @@ jobs:
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
           - Target device: OnePlus PLK110 / CPH2745, Android 16
-          - Config regression test: passed
+          - DNS direct-detour regression test: passed
+          - Android network-interface flag guard: passed
           - R8/minification: disabled for alpha
           - SystemUI/Xposed module: not included
           - CI verification: unit test, signature, package, version and ABI passed
@@ -276,7 +281,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RR-Client-0.1.3-dnsfix-arm64-v8a
+          name: RR-Client-0.1.4-netfix-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
