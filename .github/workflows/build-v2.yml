@@ -20,7 +20,7 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RRBOX-0.1.6-rrbox-routing-arm64-v8a.apk
+  OUTPUT_APK_NAME: RRBOX-0.1.7-smart-routing-arm64-v8a.apk
 
 jobs:
   build:
@@ -87,6 +87,49 @@ jobs:
             echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
             grep -F "Pkg.Revision" "${ANDROID_NDK_HOME}/source.properties"
           } | tee build-reports/TOOLCHAIN.txt
+
+      - name: Download maintained China binary rule snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          rules_dir="app/src/main/assets/rules"
+          mkdir -p "$rules_dir" build-reports
+
+          fetch_rule() {
+            local output="$1"
+            shift
+            local temp="${output}.tmp"
+            rm -f "$temp"
+            for url in "$@"; do
+              if curl --fail --location --silent --show-error \
+                --retry 3 --retry-delay 2 \
+                --connect-timeout 15 --max-time 60 \
+                "$url" -o "$temp"; then
+                if [ "$(xxd -p -l 3 "$temp")" = "535253" ] && [ "$(stat -c '%s' "$temp")" -gt 8 ]; then
+                  mv "$temp" "$output"
+                  return 0
+                fi
+              fi
+              rm -f "$temp"
+            done
+            echo "ERROR: unable to download valid SRS: $output" >&2
+            return 1
+          }
+
+          fetch_rule "$rules_dir/geosite-geolocation-cn.srs" \
+            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs" \
+            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
+
+          fetch_rule "$rules_dir/geosite-geolocation-not-cn.srs" \
+            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-%21cn.srs" \
+            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-%21cn.srs"
+
+          fetch_rule "$rules_dir/geoip-cn.srs" \
+            "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" \
+            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
+
+          sha256sum "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SHA256.txt
+          ls -lh "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SIZES.txt
 
       - name: Build official sing-box libbox.aar
         shell: bash
@@ -180,12 +223,13 @@ jobs:
 
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
+          grep -q 'PerAppPolicyResolver' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
+          grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' app/src/main/AndroidManifest.xml
-          grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'NodeLatencyTester' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'NODE_OVERRIDES_JSON' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'PIN_HASH' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
           grep -q 'RRBOX' app/src/main/res/values/strings.xml
 
           gradle \
@@ -225,11 +269,14 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.6-rrbox-routing'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.7-smart-routing'" build-reports/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
+          grep -q '^assets/rules/geosite-geolocation-cn\.srs$' build-reports/APK-FILE-LIST.txt
+          grep -q '^assets/rules/geosite-geolocation-not-cn\.srs$' build-reports/APK-FILE-LIST.txt
+          grep -q '^assets/rules/geoip-cn\.srs$' build-reports/APK-FILE-LIST.txt
 
           if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' build-reports/APK-FILE-LIST.txt; then
             echo "ERROR: APK contains an unexpected ABI" >&2
@@ -252,7 +299,7 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.1.6-rrbox-routing Build Report
+          # RRBOX 0.1.7-smart-routing Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
@@ -272,29 +319,29 @@ jobs:
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - DNS direct-detour regression test: passed
-          - Android network-interface flag guard: passed
-          - Per-app include/exclude configuration tests: passed
-          - Smart-routing on/off regression test: passed
-          - Node Ping parser test: passed
-          - Node raw-outbound edit preservation test: passed
-          - Notification and battery-protection permission guards: passed
+          - Per-app filtering: Android VpnService.Builder allow/disallow policy
+          - Smart routing: bundled SagerNet geosite/geoip China binary rule snapshots
+          - Rule updater: atomic runtime replacement with validation
+          - Notification actions: restart + disconnect
+          - PIN lock: optional PBKDF2-HMAC-SHA256 credential
           - R8/minification: disabled for alpha
           - SystemUI/Xposed module: not included
-          - CI verification: unit test, signature, app label, package, version and ABI passed
+          - CI verification: unit tests, SRS assets, signature, app label, package, version and ABI passed
 
-          Real-device verification is still required for vendor-specific background behavior and per-app VPN behavior.
+          Real-device validation remains required for routing behavior and throughput.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
           cp build-reports/PACKAGE-REPORT.txt dist/
           cp build-reports/LIBBOX-SHA256.txt dist/
+          cp build-reports/CHINA-RULES-SHA256.txt dist/
+          cp build-reports/CHINA-RULES-SIZES.txt dist/
           cp build-reports/TOOLCHAIN.txt dist/
 
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.1.6-rrbox-routing-arm64-v8a
+          name: RRBOX-0.1.7-smart-routing-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
