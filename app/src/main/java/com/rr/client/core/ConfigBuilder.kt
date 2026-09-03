@@ -88,6 +88,10 @@ object ConfigBuilder {
                     })
                     addProperty("final", TAG_PROXY)
                     addProperty("default_domain_resolver", DNS_DIRECT)
+                    // On Android this causes libbox's dialer to install the
+                    // platform ProtectFunc, which calls VpnService.protect(fd)
+                    // and prevents proxy/DNS sockets from looping into TUN.
+                    addProperty("auto_detect_interface", true)
                 })
             }
         )
