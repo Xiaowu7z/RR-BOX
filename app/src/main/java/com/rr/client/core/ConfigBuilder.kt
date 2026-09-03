@@ -2,26 +2,55 @@ package com.rr.client.core
 
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 
+/**
+ * Builds a small sing-box 1.14 client profile for the selected node.
+ *
+ * Connectivity is the first milestone. An unrelated node in the same
+ * subscription must never make the selected node fail configuration parsing,
+ * so only the selected proxy outbound and the direct outbound are emitted.
+ */
 object ConfigBuilder {
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
     private const val TAG_PROXY = "proxy"
     private const val TAG_DIRECT = "direct"
-    private const val TAG_BLOCK = "block"
-    // sing-box 1.13+ removed legacy "type":"dns" outbound; DNS hijacking done via route rule action="hijack-dns"
-    private val RESERVED_TAGS = setOf(TAG_PROXY, TAG_DIRECT, TAG_BLOCK)
+    private const val DNS_DIRECT = "dns-direct"
+    private const val DNS_REMOTE = "dns-remote"
 
-    /**
-     * 生成 sing-box 配置。
-     * 不支持/缺失关键字段的节点会被安全跳过（不作为出站生成），
-     * 仅当选中节点本身无法生成时抛出异常，由 UI 层给出提示。
-     */
+    private val INTERNAL_OUTBOUND_TYPES = setOf(
+        "direct",
+        "block",
+        "dns",
+        "selector",
+        "urltest"
+    )
+
+    private val DIRECT_DOMAIN_SUFFIXES = listOf(
+        ".cn",
+        ".baidu.com",
+        ".qq.com",
+        ".taobao.com",
+        ".tmall.com",
+        ".jd.com",
+        ".alipay.com",
+        ".aliyun.com",
+        ".tencent.com",
+        ".weixin.com",
+        ".wechat.com",
+        ".bilibili.com",
+        ".163.com",
+        ".126.com",
+        ".zhihu.com"
+    )
+
+    @Suppress("UNUSED_PARAMETER")
     fun buildSingBoxConfig(
         selectedNode: ProxyNode,
         allNodes: List<ProxyNode>,
@@ -29,287 +58,238 @@ object ConfigBuilder {
         smartRouting: Boolean = true,
         enableDnsRules: Boolean = true
     ): String {
-        val root = JsonObject()
-
-        // 1. Log
-        root.add("log", JsonObject().apply {
-            addProperty("level", "warn")
-            addProperty("timestamp", true)
-        })
-
-        // 2. DNS: 代理服务器域名走直连解析防死锁
-        root.add("dns", JsonObject().apply {
-            val servers = JsonArray().apply {
-                add(JsonObject().apply {
-                    addProperty("type", "udp")
-                    addProperty("tag", "dns-direct")
-                    addProperty("server", "223.5.5.5")
-                    addProperty("detour", TAG_DIRECT)
-                })
-                add(JsonObject().apply {
-                    addProperty("type", "udp")
-                    addProperty("tag", "dns-remote")
-                    addProperty("server", "1.1.1.1")
-                    addProperty("detour", TAG_PROXY)
-                })
-            }
-            add("servers", servers)
-
-            val rules = JsonArray().apply {
-                // 节点服务器域名直连解析
-                val domains = JsonArray().apply {
-                    allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
-                }
-                add(JsonObject().apply {
-                    add("domain", domains)
-                    addProperty("server", "dns-direct")
-                })
-                // 国内域名直连解析（用已知域名列表，不用 rule_set）
-                if (smartRouting) {
-                    add(JsonObject().apply {
-                        val cnDomains = JsonArray().apply {
-                            add("cn")
-                            add("baidu.com")
-                            add("qq.com")
-                            add("taobao.com")
-                            add("tmall.com")
-                            add("jd.com")
-                            add("alipay.com")
-                            add("aliyun.com")
-                            add("tencent.com")
-                            add("weixin.com")
-                            add("wechat.com")
-                            add("bilibili.com")
-                            add("163.com")
-                            add("126.com")
-                            add("sina.com")
-                            add("sohu.com")
-                            add("ifeng.com")
-                            add("zhihu.com")
-                        }
-                        add("domain", cnDomains)
-                        addProperty("server", "dns-direct")
-                    })
-                }
-            }
-            add("rules", rules)
-            addProperty("final", "dns-remote")
-        })
-
-        // 3. Inbounds: TUN system stack
-        root.add("inbounds", JsonArray().apply {
-            add(JsonObject().apply {
-                addProperty("type", "tun")
-                addProperty("tag", "tun-in")
-                addProperty("interface_name", "tun0")
-                addProperty("mtu", 1500)
-                addProperty("auto_route", true)
-                addProperty("strict_route", false)
-                addProperty("stack", "system")
-                addProperty("sniff", true)
-                val inet4 = JsonArray().apply { add("172.19.0.1/30") }
-                add("inet4_address", inet4)
-            })
-        })
-
-        // 4. Outbounds: 选中节点作为默认代理，其余节点供分流选择
-        val usedTags = mutableSetOf<String>()
-
-        // 先构建选中节点（tag 固定为 proxy）
-        val selectedOutbound = buildOutboundJson(selectedNode)
+        val proxyOutbound = buildOutboundJson(selectedNode)
             ?: throw IllegalArgumentException(
-                "选中节点「${selectedNode.tag}」缺少可用的协议配置，无法连接。请换一个节点。"
+                "节点「${selectedNode.tag}」缺少可用配置，暂时无法连接"
             )
-        selectedOutbound.addProperty("tag", TAG_PROXY)
-        usedTags.add(TAG_PROXY)
 
-        root.add("outbounds", JsonArray().apply {
-            add(selectedOutbound)
-            add(JsonObject().apply {
-                addProperty("type", "direct")
-                addProperty("tag", TAG_DIRECT)
-            })
-            add(JsonObject().apply {
-                addProperty("type", "block")
-                addProperty("tag", TAG_BLOCK)
-            })
-            // sing-box 1.13+ removed legacy "type":"dns" outbound; DNS hijacking done via route rule action="hijack-dns"
+        proxyOutbound.addProperty("tag", TAG_PROXY)
+        configureBootstrapResolver(proxyOutbound)
 
-            allNodes.forEach { node ->
-                if (node.id == selectedNode.id) return@forEach
-                val built = buildOutboundJson(node) ?: return@forEach
-                // 节点 tag 可能重复（不同订阅同名）或撞保留字，做唯一化
-                var tag = node.tag.ifBlank { "Node-${node.server}" }
-                if (tag in usedTags || tag in RESERVED_TAGS) {
-                    var suffix = 2
-                    while ("${tag}_$suffix" in usedTags) suffix++
-                    tag = "${tag}_$suffix"
-                }
-                built.addProperty("tag", tag)
-                usedTags.add(tag)
-                add(built)
-            }
-        })
-
-        // 5. Route
-        root.add("route", JsonObject().apply {
-            val rules = JsonArray().apply {
-                // DNS Hijacking (sing-box 1.13+: replaced "outbound":"dns-out" with action="hijack-dns")
-                add(JsonObject().apply {
-                    addProperty("action", "hijack-dns")
+        return gson.toJson(
+            JsonObject().apply {
+                add("log", JsonObject().apply {
+                    addProperty("level", "info")
+                    addProperty("timestamp", true)
                 })
 
-                // 服务器域名/IP 直连防环路
-                add(JsonObject().apply {
-                    val serverList = JsonArray().apply {
-                        allNodes.forEach { if (it.server.isNotEmpty()) add(it.server) }
-                    }
-                    add("domain", serverList)
-                    addProperty("outbound", TAG_DIRECT)
+                add("dns", buildDnsConfig(selectedNode, smartRouting))
+
+                add("inbounds", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("type", "tun")
+                        addProperty("tag", "tun-in")
+                        add("address", JsonArray().apply {
+                            add("172.19.0.1/30")
+                        })
+                        addProperty("mtu", 1500)
+                        addProperty("auto_route", true)
+                        addProperty("strict_route", true)
+                        addProperty("stack", "system")
+                    })
                 })
 
-                // 分应用路由
-                appRoutes.forEach { appRoute ->
-                    when (appRoute.routeMode) {
-                        "DIRECT", "BYPASS" -> {
+                add("outbounds", JsonArray().apply {
+                    add(proxyOutbound)
+                    add(JsonObject().apply {
+                        addProperty("type", "direct")
+                        addProperty("tag", TAG_DIRECT)
+                    })
+                })
+
+                add("route", JsonObject().apply {
+                    add("rules", JsonArray().apply {
+                        // Legacy inbound sniff fields were removed before 1.14.
+                        add(JsonObject().apply {
+                            addProperty("action", "sniff")
+                        })
+
+                        if (enableDnsRules) {
                             add(JsonObject().apply {
-                                val pkg = JsonArray().apply { add(appRoute.packageName) }
-                                add("package_name", pkg)
+                                addProperty("protocol", "dns")
+                                addProperty("action", "hijack-dns")
+                            })
+                        }
+
+                        add(JsonObject().apply {
+                            addProperty("ip_is_private", true)
+                            addProperty("outbound", TAG_DIRECT)
+                        })
+
+                        if (smartRouting) {
+                            add(JsonObject().apply {
+                                add("domain_suffix", JsonArray().apply {
+                                    DIRECT_DOMAIN_SUFFIXES.forEach(::add)
+                                })
                                 addProperty("outbound", TAG_DIRECT)
                             })
                         }
-                        "PROXY_NODE" -> {
-                            appRoute.assignedNodeTag?.let { targetTag ->
+
+                        // Keep only direct/bypass package rules during the
+                        // connectivity milestone. Per-app alternate-node rules
+                        // need an explicit outbound dependency graph.
+                        appRoutes.asSequence()
+                            .filter { it.packageName.isNotBlank() }
+                            .filter { it.routeMode == "DIRECT" || it.routeMode == "BYPASS" }
+                            .forEach { appRoute ->
                                 add(JsonObject().apply {
-                                    val pkg = JsonArray().apply { add(appRoute.packageName) }
-                                    add("package_name", pkg)
-                                    addProperty("outbound", targetTag)
+                                    add("package_name", JsonArray().apply {
+                                        add(appRoute.packageName)
+                                    })
+                                    addProperty("outbound", TAG_DIRECT)
                                 })
                             }
-                        }
-                    }
-                }
-
-                // 私有 IP 与局域网直连
-                add(JsonObject().apply {
-                    val ip = JsonArray().apply {
-                        add("10.0.0.0/8")
-                        add("172.16.0.0/12")
-                        add("192.168.0.0/16")
-                        add("127.0.0.0/8")
-                    }
-                    add("ip_cidr", ip)
-                    addProperty("outbound", TAG_DIRECT)
+                    })
+                    addProperty("final", TAG_PROXY)
+                    addProperty("default_domain_resolver", DNS_DIRECT)
+                    addProperty("auto_detect_interface", true)
                 })
+            }
+        )
+    }
 
-                if (smartRouting) {
+    private fun buildDnsConfig(selectedNode: ProxyNode, smartRouting: Boolean): JsonObject =
+        JsonObject().apply {
+            add("servers", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("type", "udp")
+                    addProperty("tag", DNS_DIRECT)
+                    addProperty("server", "223.5.5.5")
+                    addProperty("server_port", 53)
+                    addProperty("detour", TAG_DIRECT)
+                })
+                add(JsonObject().apply {
+                    addProperty("type", "tls")
+                    addProperty("tag", DNS_REMOTE)
+                    addProperty("server", "1.1.1.1")
+                    addProperty("server_port", 853)
+                    addProperty("detour", TAG_PROXY)
+                    add("tls", JsonObject().apply {
+                        addProperty("enabled", true)
+                        addProperty("server_name", "cloudflare-dns.com")
+                    })
+                })
+            })
+
+            add("rules", JsonArray().apply {
+                if (!isIpLiteral(selectedNode.server)) {
                     add(JsonObject().apply {
-                        // 用私有 + CGNAT IP 段粗略代表国内流量兜底直连
-                        // 精确分流由应用层（package_name）按需处理
-                        val cnIps = JsonArray().apply {
-                            // 国内主流云厂商常用 IP 段示例
-                            add("36.0.0.0/12")     // 部分电信
-                            add("39.0.0.0/8")      // 移动
-                            add("42.0.0.0/8")      // 部分国内
-                            add("43.0.0.0/8")
-                            add("47.74.0.0/16")    // 阿里云
-                            add("47.75.0.0/16")
-                            add("47.76.0.0/16")
-                            add("59.108.0.0/16")   // 联通
-                            add("101.6.0.0/16")    // 教育网
-                            add("103.0.0.0/8")
-                            add("106.11.0.0/16")   // 阿里云
-                            add("110.242.0.0/16")  // 百度云
-                            add("111.0.0.0/10")
-                            add("112.0.0.0/10")
-                            add("114.114.114.0/24")
-                            add("115.0.0.0/8")
-                            add("116.0.0.0/8")
-                            add("117.0.0.0/8")
-                            add("118.0.0.0/8")
-                            add("119.0.0.0/8")
-                            add("120.0.0.0/8")
-                            add("121.0.0.0/8")
-                            add("122.0.0.0/8")
-                            add("123.0.0.0/8")
-                            add("124.0.0.0/8")
-                            add("125.0.0.0/8")
-                            add("139.155.0.0/16")  // 腾讯云
-                            add("140.143.0.0/16")
-                            add("150.109.0.0/16")  // 腾讯云
-                            add("180.76.76.0/24")  // 百度
-                            add("202.0.0.0/8")
-                            add("203.0.0.0/8")
-                            add("211.0.0.0/8")
-                            add("218.0.0.0/8")
-                            add("219.0.0.0/8")
-                            add("220.0.0.0/8")
-                            add("221.0.0.0/8")
-                            add("222.0.0.0/8")
-                            add("223.0.0.0/8")
-                        }
-                        add("ip_cidr", cnIps)
-                        addProperty("outbound", TAG_DIRECT)
+                        add("domain", JsonArray().apply { add(selectedNode.server) })
+                        addProperty("action", "route")
+                        addProperty("server", DNS_DIRECT)
                     })
                 }
+                if (smartRouting) {
+                    add(JsonObject().apply {
+                        add("domain_suffix", JsonArray().apply {
+                            DIRECT_DOMAIN_SUFFIXES.forEach(::add)
+                        })
+                        addProperty("action", "route")
+                        addProperty("server", DNS_DIRECT)
+                    })
+                }
+            })
+            addProperty("final", DNS_REMOTE)
+            addProperty("strategy", "prefer_ipv4")
+        }
 
-                // 兜底走代理
-                add(JsonObject().apply {
-                    addProperty("outbound", TAG_PROXY)
-                })
-            }
-            add("rules", rules)
-            addProperty("auto_detect_interface", true)
-        })
-
-        return gson.toJson(root)
-    }
-
-    /** 返回 null 表示该节点无法生成可用出站（自动跳过，不影响其他节点） */
+    /** Returns null only when a URI-derived node lacks essential fields. */
     private fun buildOutboundJson(node: ProxyNode): JsonObject? {
-        // RRVPS sing-box JSON 订阅原文优先透传
         if (node.rawJson.isNotBlank()) {
-            try {
-                val parsed = JsonParser.parseString(node.rawJson).asJsonObject
-                if (parsed.get("type")?.asString.isNullOrBlank()) return null
+            return runCatching {
+                val parsed = JsonParser.parseString(node.rawJson).asJsonObject.deepCopy()
                 parsed.remove("tag")
-                return parsed
-            } catch (e: Exception) {
-                // fallthrough，尝试手写
+                normalizeRawOutbound(parsed)
+            }.getOrNull()?.takeIf { outbound ->
+                val type = primitiveString(outbound.get("type"))
+                type.isNotBlank() && type !in INTERNAL_OUTBOUND_TYPES
             }
         }
 
-        val obj = JsonObject()
-        obj.addProperty("tag", node.tag)
+        val outbound = JsonObject()
+        return when (node.type) {
+            ProtocolType.VLESS_REALITY,
+            ProtocolType.VLESS_TLS -> buildVless(outbound, node)
 
-        return try {
-            when (node.type) {
-                ProtocolType.VLESS_REALITY, ProtocolType.VLESS_TLS -> buildVless(obj, node)
-                ProtocolType.HYSTERIA2 -> buildHysteria2(obj, node)
-                ProtocolType.TUIC_V5 -> buildTuic(obj, node)
-                ProtocolType.VMESS_TLS, ProtocolType.VMESS_WS_ARGO -> buildVmess(obj, node)
-                ProtocolType.TROJAN -> buildTrojan(obj, node)
-                ProtocolType.SHADOWSOCKS -> buildShadowsocks(obj, node)
-                else -> null
-            }
-        } catch (e: Exception) {
-            null
+            ProtocolType.HYSTERIA2 -> buildHysteria2(outbound, node)
+            ProtocolType.TUIC_V5 -> buildTuic(outbound, node)
+            ProtocolType.VMESS_TLS,
+            ProtocolType.VMESS_WS_ARGO -> buildVmess(outbound, node)
+
+            ProtocolType.TROJAN -> buildTrojan(outbound, node)
+            ProtocolType.SHADOWSOCKS -> buildShadowsocks(outbound, node)
+
+            // AnyTLS and Naive contain protocol-specific fields that must come
+            // from the RRVPS sing-box JSON outbound until dedicated URI
+            // parsers are implemented.
+            ProtocolType.ANYTLS,
+            ProtocolType.NAIVE_H2,
+            ProtocolType.NAIVE_H3,
+            ProtocolType.CUSTOM -> null
         }
     }
 
-    private fun buildVless(obj: JsonObject, node: ProxyNode): JsonObject? {
-        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
-        obj.addProperty("type", "vless")
-        obj.addProperty("server", node.server)
-        obj.addProperty("server_port", node.serverPort)
-        obj.addProperty("uuid", node.uuidOrPassword)
-        if (node.flow.isNotEmpty()) obj.addProperty("flow", node.flow)
-        addTransport(obj, node)
+    private fun normalizeRawOutbound(outbound: JsonObject): JsonObject {
+        val type = primitiveString(outbound.get("type"))
+
+        // Some URI converters put TLS fields beside the outbound. sing-box
+        // 1.14 accepts ALPN only inside the nested tls object.
+        val legacyAlpn = outbound.remove("alpn")
+        val legacySni = outbound.remove("sni")
+        val legacyInsecure = outbound.remove("insecure")
+            ?: outbound.remove("allow_insecure")
+            ?: outbound.remove("skip_cert_verify")
+
+        if (legacyAlpn != null || legacySni != null || legacyInsecure != null) {
+            val tls = ensureTls(outbound)
+            if (legacyAlpn != null) {
+                val values = toStringArray(legacyAlpn)
+                if (values.size() > 0) tls.add("alpn", values)
+            }
+            val serverName = primitiveString(legacySni)
+            if (serverName.isNotBlank() && !tls.has("server_name")) {
+                tls.addProperty("server_name", serverName)
+            }
+            if (legacyInsecure != null && !tls.has("insecure")) {
+                tls.addProperty("insecure", primitiveBoolean(legacyInsecure))
+            }
+        }
+
+        if (type == "hysteria2" || type == "hy2") {
+            val legacyPorts = outbound.remove("ports") ?: outbound.remove("mport")
+            if (!outbound.has("server_ports") && legacyPorts != null) {
+                val ports = toPortArray(legacyPorts)
+                if (ports.size() > 0) outbound.add("server_ports", ports)
+            }
+        }
+
+        // The generated profile contains only proxy and direct. A stale detour
+        // to an omitted selector/url-test would make an otherwise valid node
+        // impossible to start.
+        val detour = primitiveString(outbound.get("detour"))
+        if (detour.isNotBlank() && detour != TAG_DIRECT) {
+            outbound.remove("detour")
+        }
+
+        return outbound
+    }
+
+    private fun buildVless(outbound: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.server.isBlank() || node.uuidOrPassword.isBlank()) return null
+        outbound.addProperty("type", "vless")
+        outbound.addProperty("server", node.server)
+        outbound.addProperty("server_port", node.serverPort)
+        outbound.addProperty("uuid", node.uuidOrPassword)
+        if (node.flow.isNotBlank()) outbound.addProperty("flow", node.flow)
+        addTransport(outbound, node)
+
         if (node.tlsEnabled) {
-            val tls = JsonObject().apply { addProperty("enabled", true) }
-            if (node.sni.isNotEmpty()) tls.addProperty("server_name", node.sni)
+            val tls = JsonObject().apply {
+                addProperty("enabled", true)
+                if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
+            }
             if (node.type == ProtocolType.VLESS_REALITY) {
-                if (node.realityPublicKey.isBlank()) return null // reality 缺公钥不可用
+                if (node.realityPublicKey.isBlank()) return null
                 tls.add("utls", JsonObject().apply {
                     addProperty("enabled", true)
                     addProperty("fingerprint", "chrome")
@@ -317,137 +297,230 @@ object ConfigBuilder {
                 tls.add("reality", JsonObject().apply {
                     addProperty("enabled", true)
                     addProperty("public_key", node.realityPublicKey)
-                    addProperty("short_id", node.realityShortId.ifBlank { "" })
-                })
-            } else {
-                // 普通 TLS（可选 utls 指纹，缺省即标准指纹）
-                tls.add("utls", JsonObject().apply {
-                    addProperty("enabled", true)
-                    addProperty("fingerprint", "chrome")
+                    if (node.realityShortId.isNotBlank()) {
+                        addProperty("short_id", node.realityShortId)
+                    }
                 })
             }
-            obj.add("tls", tls)
+            addAlpn(tls, node.alpn)
+            outbound.add("tls", tls)
         }
-        return obj
+        return outbound
     }
 
-    private fun buildHysteria2(obj: JsonObject, node: ProxyNode): JsonObject? {
-        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
-        obj.addProperty("type", "hysteria2")
-        obj.addProperty("server", node.server)
-        obj.addProperty("server_port", node.serverPort)
-        obj.addProperty("password", node.uuidOrPassword)
-        if (node.hoppingPorts.isNotEmpty()) {
-            obj.addProperty("ports", node.hoppingPorts)
+    private fun buildHysteria2(outbound: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.server.isBlank() || node.uuidOrPassword.isBlank()) return null
+        outbound.addProperty("type", "hysteria2")
+        outbound.addProperty("server", node.server)
+
+        val serverPorts = parsePortList(node.hoppingPorts)
+        if (serverPorts.isEmpty()) {
+            outbound.addProperty("server_port", node.serverPort)
+        } else {
+            outbound.add("server_ports", JsonArray().apply {
+                serverPorts.forEach(::add)
+            })
         }
-        if (node.obfs.isNotEmpty()) {
-            val obfs = JsonObject().apply {
+
+        outbound.addProperty("password", node.uuidOrPassword)
+        if (node.obfs.isNotBlank()) {
+            outbound.add("obfs", JsonObject().apply {
                 addProperty("type", node.obfs)
-                if (node.obfsPassword.isNotEmpty()) addProperty("password", node.obfsPassword)
-            }
-            obj.add("obfs", obfs)
+                if (node.obfsPassword.isNotBlank()) {
+                    addProperty("password", node.obfsPassword)
+                }
+            })
         }
-        obj.add("tls", JsonObject().apply {
+        outbound.add("tls", JsonObject().apply {
             addProperty("enabled", true)
-            if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
-            // hy2 惯例多数自签证书，insecure 兜底，避免握手失败
+            if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
             addProperty("insecure", true)
+            addAlpn(this, node.alpn)
         })
-        return obj
+        return outbound
     }
 
-    private fun buildTuic(obj: JsonObject, node: ProxyNode): JsonObject? {
-        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
-        obj.addProperty("type", "tuic")
-        obj.addProperty("server", node.server)
-        obj.addProperty("server_port", node.serverPort)
-        obj.addProperty("uuid", node.uuidOrPassword)
-        if (node.extraPassword.isNotEmpty()) obj.addProperty("password", node.extraPassword)
-        if (node.alpn.isNotEmpty()) {
-            val alpn = JsonArray()
-            node.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { alpn.add(it) }
-            if (alpn.size() > 0) obj.add("alpn", alpn)
+    private fun buildTuic(outbound: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.server.isBlank() || node.uuidOrPassword.isBlank()) return null
+        outbound.addProperty("type", "tuic")
+        outbound.addProperty("server", node.server)
+        outbound.addProperty("server_port", node.serverPort)
+        outbound.addProperty("uuid", node.uuidOrPassword)
+        if (node.extraPassword.isNotBlank()) {
+            outbound.addProperty("password", node.extraPassword)
         }
-        obj.add("tls", JsonObject().apply {
+        outbound.addProperty("congestion_control", "bbr")
+        outbound.addProperty("udp_relay_mode", "native")
+        outbound.add("tls", JsonObject().apply {
             addProperty("enabled", true)
-            if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
+            if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
             addProperty("insecure", true)
+            addAlpn(this, node.alpn)
         })
-        return obj
+        return outbound
     }
 
-    private fun buildVmess(obj: JsonObject, node: ProxyNode): JsonObject? {
-        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
-        obj.addProperty("type", "vmess")
-        obj.addProperty("server", node.server)
-        obj.addProperty("server_port", node.serverPort)
-        obj.addProperty("uuid", node.uuidOrPassword)
-        addTransport(obj, node)
+    private fun buildVmess(outbound: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.server.isBlank() || node.uuidOrPassword.isBlank()) return null
+        outbound.addProperty("type", "vmess")
+        outbound.addProperty("server", node.server)
+        outbound.addProperty("server_port", node.serverPort)
+        outbound.addProperty("uuid", node.uuidOrPassword)
+        outbound.addProperty("security", "auto")
+        addTransport(outbound, node)
         if (node.tlsEnabled) {
-            obj.add("tls", JsonObject().apply {
+            outbound.add("tls", JsonObject().apply {
                 addProperty("enabled", true)
-                if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
+                if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
                 add("utls", JsonObject().apply {
                     addProperty("enabled", true)
                     addProperty("fingerprint", "chrome")
                 })
+                addAlpn(this, node.alpn)
             })
         }
-        return obj
+        return outbound
     }
 
-    private fun buildTrojan(obj: JsonObject, node: ProxyNode): JsonObject? {
-        if (node.uuidOrPassword.isBlank() || node.server.isBlank()) return null
-        obj.addProperty("type", "trojan")
-        obj.addProperty("server", node.server)
-        obj.addProperty("server_port", node.serverPort)
-        obj.addProperty("password", node.uuidOrPassword)
-        addTransport(obj, node)
-        obj.add("tls", JsonObject().apply {
+    private fun buildTrojan(outbound: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.server.isBlank() || node.uuidOrPassword.isBlank()) return null
+        outbound.addProperty("type", "trojan")
+        outbound.addProperty("server", node.server)
+        outbound.addProperty("server_port", node.serverPort)
+        outbound.addProperty("password", node.uuidOrPassword)
+        addTransport(outbound, node)
+        outbound.add("tls", JsonObject().apply {
             addProperty("enabled", true)
-            if (node.sni.isNotEmpty()) addProperty("server_name", node.sni)
-            if (node.alpn.isNotEmpty()) {
-                val alpn = JsonArray()
-                node.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { alpn.add(it) }
-                if (alpn.size() > 0) add("alpn", alpn)
-            }
+            if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
+            addAlpn(this, node.alpn)
         })
-        return obj
+        return outbound
     }
 
-    private fun buildShadowsocks(obj: JsonObject, node: ProxyNode): JsonObject? {
-        if (node.uuidOrPassword.isBlank() || node.ssMethod.isBlank() || node.server.isBlank()) return null
-        obj.addProperty("type", "shadowsocks")
-        obj.addProperty("server", node.server)
-        obj.addProperty("server_port", node.serverPort)
-        obj.addProperty("method", node.ssMethod)
-        obj.addProperty("password", node.uuidOrPassword)
-        return obj
+    private fun buildShadowsocks(outbound: JsonObject, node: ProxyNode): JsonObject? {
+        if (node.server.isBlank() || node.ssMethod.isBlank() || node.uuidOrPassword.isBlank()) {
+            return null
+        }
+        outbound.addProperty("type", "shadowsocks")
+        outbound.addProperty("server", node.server)
+        outbound.addProperty("server_port", node.serverPort)
+        outbound.addProperty("method", node.ssMethod)
+        outbound.addProperty("password", node.uuidOrPassword)
+        return outbound
     }
 
-    /** ws/grpc/tcp 传输层（vmess/trojan/vless 共用） */
-    private fun addTransport(obj: JsonObject, node: ProxyNode) {
+    private fun addTransport(outbound: JsonObject, node: ProxyNode) {
         when (node.network.lowercase()) {
-            "ws" -> {
-                val transport = JsonObject().apply {
-                    addProperty("type", "ws")
-                    if (node.path.isNotEmpty()) addProperty("path", node.path)
-                    if (node.host.isNotEmpty()) {
-                        add("headers", JsonObject().apply { addProperty("Host", node.host) })
-                    }
+            "ws" -> outbound.add("transport", JsonObject().apply {
+                addProperty("type", "ws")
+                if (node.path.isNotBlank()) addProperty("path", node.path)
+                if (node.host.isNotBlank()) {
+                    add("headers", JsonObject().apply {
+                        addProperty("Host", node.host)
+                    })
                 }
-                obj.add("transport", transport)
+            })
+
+            "grpc" -> outbound.add("transport", JsonObject().apply {
+                addProperty("type", "grpc")
+                if (node.path.isNotBlank()) addProperty("service_name", node.path)
+            })
+        }
+    }
+
+    private fun configureBootstrapResolver(outbound: JsonObject) {
+        val server = primitiveString(outbound.get("server"))
+        if (server.isNotBlank() && !isIpLiteral(server)) {
+            outbound.addProperty("domain_resolver", DNS_DIRECT)
+        } else {
+            outbound.remove("domain_resolver")
+        }
+    }
+
+    private fun ensureTls(outbound: JsonObject): JsonObject {
+        val current = outbound.get("tls")
+        val tls = if (current != null && current.isJsonObject) {
+            current.asJsonObject
+        } else {
+            JsonObject().also { outbound.add("tls", it) }
+        }
+        if (!tls.has("enabled")) tls.addProperty("enabled", true)
+        return tls
+    }
+
+    private fun addAlpn(tls: JsonObject, raw: String) {
+        val values = raw.split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+        if (values.isNotEmpty()) {
+            tls.add("alpn", JsonArray().apply { values.forEach(::add) })
+        }
+    }
+
+    private fun toStringArray(element: JsonElement): JsonArray = JsonArray().apply {
+        when {
+            element.isJsonArray -> element.asJsonArray.forEach { value ->
+                val text = primitiveString(value)
+                if (text.isNotBlank()) add(text)
             }
-            "grpc" -> {
-                val transport = JsonObject().apply {
-                    addProperty("type", "grpc")
-                    if (node.path.isNotEmpty()) addProperty("service_name", node.path)
-                }
-                obj.add("transport", transport)
+
+            element.isJsonPrimitive -> primitiveString(element)
+                .split(',')
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .forEach(::add)
+        }
+    }
+
+    private fun toPortArray(element: JsonElement): JsonArray = JsonArray().apply {
+        val source = when {
+            element.isJsonArray -> element.asJsonArray.mapNotNull { value ->
+                primitiveString(value).takeIf(String::isNotBlank)
             }
-            else -> {
-                // tcp: 无 transport 块
-            }
+
+            element.isJsonPrimitive -> primitiveString(element)
+                .split(',')
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+
+            else -> emptyList()
+        }
+        source.map(::normalizePortRange).forEach(::add)
+    }
+
+    private fun parsePortList(raw: String): List<String> = raw
+        .split(',')
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .map(::normalizePortRange)
+
+    private fun normalizePortRange(value: String): String {
+        val trimmed = value.trim()
+        return if ('-' in trimmed && ':' !in trimmed) {
+            trimmed.replaceFirst('-', ':')
+        } else {
+            trimmed
+        }
+    }
+
+    private fun primitiveString(element: JsonElement?): String =
+        if (element != null && element.isJsonPrimitive && element.asJsonPrimitive.isString) {
+            element.asString
+        } else if (element != null && element.isJsonPrimitive) {
+            element.asJsonPrimitive.toString().trim('"')
+        } else {
+            ""
+        }
+
+    private fun primitiveBoolean(element: JsonElement): Boolean =
+        runCatching { element.asBoolean }.getOrDefault(false)
+
+    private fun isIpLiteral(value: String): Boolean {
+        val host = value.trim().removePrefix("[").removeSuffix("]")
+        if (host.contains(':')) return true
+        val parts = host.split('.')
+        return parts.size == 4 && parts.all { part ->
+            part.toIntOrNull()?.let { it in 0..255 } == true
         }
     }
 }
