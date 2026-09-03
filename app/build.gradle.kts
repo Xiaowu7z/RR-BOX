@@ -13,8 +13,8 @@ android {
         applicationId = "com.rr.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2-connectivity"
+        versionCode = 4
+        versionName = "0.1.3-dnsfix"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -101,4 +101,6 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.gson)
+
+    testImplementation("junit:junit:4.13.2")
 }
