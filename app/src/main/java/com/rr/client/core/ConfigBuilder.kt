@@ -9,13 +9,7 @@ import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 
-/**
- * Connectivity-first sing-box 1.14 config builder.
- *
- * Only the selected proxy and a direct outbound are emitted. Known protocols
- * are rebuilt from parsed fields instead of blindly replaying subscription JSON,
- * so stale converter fields cannot poison an otherwise valid node.
- */
+/** Connectivity-first sing-box 1.14 configuration. */
 object ConfigBuilder {
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
@@ -32,69 +26,64 @@ object ConfigBuilder {
         smartRouting: Boolean = true,
         enableDnsRules: Boolean = true
     ): String {
-        val proxyOutbound = buildSelectedOutbound(selectedNode)
-            ?: throw IllegalArgumentException(
-                "节点「${selectedNode.tag}」缺少 sing-box 1.14 可用参数"
-            )
+        val proxy = buildSelectedOutbound(selectedNode)
+            ?: throw IllegalArgumentException("节点「${selectedNode.tag}」缺少 sing-box 1.14 可用参数")
 
-        proxyOutbound.addProperty("tag", TAG_PROXY)
-        configureBootstrapResolver(proxyOutbound)
+        proxy.addProperty("tag", TAG_PROXY)
+        configureBootstrapResolver(proxy)
 
-        return gson.toJson(
-            JsonObject().apply {
-                add("log", JsonObject().apply {
-                    addProperty("level", "info")
-                    addProperty("timestamp", true)
+        return gson.toJson(JsonObject().apply {
+            add("log", JsonObject().apply {
+                addProperty("level", "info")
+                addProperty("timestamp", true)
+            })
+
+            add("dns", buildDnsConfig(selectedNode))
+
+            add("inbounds", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("type", "tun")
+                    addProperty("tag", "tun-in")
+                    add("address", JsonArray().apply { add("172.19.0.1/30") })
+                    addProperty("mtu", 1500)
+                    addProperty("auto_route", true)
+                    addProperty("strict_route", true)
+                    addProperty("stack", "system")
                 })
+            })
 
-                add("dns", buildDnsConfig(selectedNode))
-
-                add("inbounds", JsonArray().apply {
-                    add(JsonObject().apply {
-                        addProperty("type", "tun")
-                        addProperty("tag", "tun-in")
-                        add("address", JsonArray().apply { add("172.19.0.1/30") })
-                        addProperty("mtu", 1500)
-                        addProperty("auto_route", true)
-                        addProperty("strict_route", true)
-                        addProperty("stack", "system")
-                    })
+            // An unrelated subscription node must never poison the selected node.
+            add("outbounds", JsonArray().apply {
+                add(proxy)
+                add(JsonObject().apply {
+                    addProperty("type", "direct")
+                    addProperty("tag", TAG_DIRECT)
                 })
+            })
 
-                add("outbounds", JsonArray().apply {
-                    add(proxyOutbound)
-                    add(JsonObject().apply {
-                        addProperty("type", "direct")
-                        addProperty("tag", TAG_DIRECT)
-                    })
-                })
-
-                // First milestone: make one real node carry traffic reliably.
-                // Smart CN rules and per-app routing stay out of the runtime
-                // config until the minimal tunnel passes real-device testing.
-                add("route", JsonObject().apply {
-                    add("rules", JsonArray().apply {
-                        add(JsonObject().apply { addProperty("action", "sniff") })
-                        if (enableDnsRules) {
-                            add(JsonObject().apply {
-                                addProperty("protocol", "dns")
-                                addProperty("action", "hijack-dns")
-                            })
-                        }
+            // Advanced CN/per-app rules are deliberately deferred until the
+            // minimal real-device tunnel is confirmed working.
+            add("route", JsonObject().apply {
+                add("rules", JsonArray().apply {
+                    add(JsonObject().apply { addProperty("action", "sniff") })
+                    if (enableDnsRules) {
                         add(JsonObject().apply {
-                            addProperty("ip_is_private", true)
-                            addProperty("outbound", TAG_DIRECT)
+                            addProperty("protocol", "dns")
+                            addProperty("action", "hijack-dns")
                         })
+                    }
+                    add(JsonObject().apply {
+                        addProperty("ip_is_private", true)
+                        addProperty("outbound", TAG_DIRECT)
                     })
-                    addProperty("final", TAG_PROXY)
-                    addProperty("default_domain_resolver", DNS_DIRECT)
-                    // On Android this causes libbox's dialer to install the
-                    // platform ProtectFunc, which calls VpnService.protect(fd)
-                    // and prevents proxy/DNS sockets from looping into TUN.
-                    addProperty("auto_detect_interface", true)
                 })
-            }
-        )
+                addProperty("final", TAG_PROXY)
+                addProperty("default_domain_resolver", DNS_DIRECT)
+                // On Android this installs libbox's platform ProtectFunc so
+                // proxy/DNS sockets call VpnService.protect(fd) and do not loop.
+                addProperty("auto_detect_interface", true)
+            })
+        })
     }
 
     private fun buildDnsConfig(selectedNode: ProxyNode): JsonObject = JsonObject().apply {
@@ -118,7 +107,6 @@ object ConfigBuilder {
                 })
             })
         })
-
         add("rules", JsonArray().apply {
             if (!isIpLiteral(selectedNode.server)) {
                 add(JsonObject().apply {
@@ -132,25 +120,110 @@ object ConfigBuilder {
         addProperty("strategy", "prefer_ipv4")
     }
 
-    private fun buildSelectedOutbound(node: ProxyNode): JsonObject? = when (node.type) {
-        ProtocolType.VLESS_REALITY,
-        ProtocolType.VLESS_TLS -> buildVless(node)
-        ProtocolType.HYSTERIA2 -> buildHysteria2(node)
-        ProtocolType.TUIC_V5 -> buildTuic(node)
-        ProtocolType.VMESS_TLS,
-        ProtocolType.VMESS_WS_ARGO -> buildVmess(node)
-        ProtocolType.TROJAN -> buildTrojan(node)
-        ProtocolType.SHADOWSOCKS -> buildShadowsocks(node)
-        ProtocolType.ANYTLS -> buildRawOutbound(node, "anytls")
-        ProtocolType.NAIVE_H2,
-        ProtocolType.NAIVE_H3 -> buildRawOutbound(node, "naive")
-        ProtocolType.CUSTOM -> buildRawOutbound(node, null)
+    /**
+     * RRVPS JSON is already protocol-complete, so preserve it after sanitizing
+     * version-specific fields. URI-derived nodes have no raw JSON and use the
+     * explicit fallback builders below.
+     */
+    private fun buildSelectedOutbound(node: ProxyNode): JsonObject? {
+        if (node.rawJson.isNotBlank()) {
+            val expectedType = when (node.type) {
+                ProtocolType.VLESS_REALITY, ProtocolType.VLESS_TLS -> "vless"
+                ProtocolType.VMESS_WS_ARGO, ProtocolType.VMESS_TLS -> "vmess"
+                ProtocolType.HYSTERIA2 -> "hysteria2"
+                ProtocolType.TUIC_V5 -> "tuic"
+                ProtocolType.ANYTLS -> "anytls"
+                ProtocolType.NAIVE_H2, ProtocolType.NAIVE_H3 -> "naive"
+                ProtocolType.TROJAN -> "trojan"
+                ProtocolType.SHADOWSOCKS -> "shadowsocks"
+                ProtocolType.CUSTOM -> null
+            }
+            val raw = buildRawOutbound(node, expectedType)
+            if (raw != null) return raw
+        }
+
+        return when (node.type) {
+            ProtocolType.VLESS_REALITY, ProtocolType.VLESS_TLS -> buildVless(node)
+            ProtocolType.HYSTERIA2 -> buildHysteria2(node)
+            ProtocolType.TUIC_V5 -> buildTuic(node)
+            ProtocolType.VMESS_TLS, ProtocolType.VMESS_WS_ARGO -> buildVmess(node)
+            ProtocolType.TROJAN -> buildTrojan(node)
+            ProtocolType.SHADOWSOCKS -> buildShadowsocks(node)
+            ProtocolType.ANYTLS,
+            ProtocolType.NAIVE_H2,
+            ProtocolType.NAIVE_H3,
+            ProtocolType.CUSTOM -> null
+        }
+    }
+
+    private fun buildRawOutbound(node: ProxyNode, expectedType: String?): JsonObject? {
+        val outbound = runCatching {
+            JsonParser.parseString(node.rawJson).asJsonObject.deepCopy()
+        }.getOrNull() ?: return null
+
+        outbound.remove("tag")
+        normalizeLegacyTlsFields(outbound)
+        normalizeLegacyPortFields(outbound)
+
+        val type = primitiveString(outbound.get("type")).lowercase()
+        if (expectedType != null && type != expectedType) return null
+        if (type.isBlank() || type in INTERNAL_OUTBOUND_TYPES) return null
+
+        if (type == "naive") sanitizeNaiveTls(outbound)
+
+        // The connectivity profile contains no selector/url-test graph.
+        val detour = primitiveString(outbound.get("detour"))
+        if (detour.isNotBlank() && detour != TAG_DIRECT) outbound.remove("detour")
+        return outbound
+    }
+
+    private fun normalizeLegacyTlsFields(outbound: JsonObject) {
+        val legacyAlpn = outbound.remove("alpn")
+        val legacySni = outbound.remove("sni")
+        val legacyInsecure = outbound.remove("insecure")
+            ?: outbound.remove("allow_insecure")
+            ?: outbound.remove("allowInsecure")
+            ?: outbound.remove("skip_cert_verify")
+
+        if (legacyAlpn == null && legacySni == null && legacyInsecure == null) return
+
+        val tls = ensureTls(outbound)
+        if (legacyAlpn != null && !tls.has("alpn")) {
+            val alpn = toStringArray(legacyAlpn)
+            if (alpn.size() > 0) tls.add("alpn", alpn)
+        }
+        val sni = primitiveString(legacySni)
+        if (sni.isNotBlank() && !tls.has("server_name")) tls.addProperty("server_name", sni)
+        if (legacyInsecure != null && !tls.has("insecure")) {
+            tls.addProperty("insecure", primitiveBoolean(legacyInsecure))
+        }
+    }
+
+    private fun normalizeLegacyPortFields(outbound: JsonObject) {
+        val type = primitiveString(outbound.get("type")).lowercase()
+        if (type != "hysteria2" && type != "hy2") return
+        val legacy = outbound.remove("ports") ?: outbound.remove("mport") ?: return
+        if (!outbound.has("server_ports")) {
+            val ports = toPortArray(legacy)
+            if (ports.size() > 0) outbound.add("server_ports", ports)
+        }
+    }
+
+    private fun sanitizeNaiveTls(outbound: JsonObject) {
+        val tls = ensureTls(outbound)
+        // sing-box 1.14 Naive explicitly rejects these TLS options.
+        listOf(
+            "insecure", "alpn", "disable_sni", "min_version", "max_version",
+            "cipher_suites", "curve_preferences", "client_certificate",
+            "client_certificate_path", "client_key", "client_key_path",
+            "fragment", "record_fragment", "kernel_tx", "kernel_rx", "utls", "reality"
+        ).forEach(tls::remove)
+        tls.addProperty("enabled", true)
     }
 
     private fun buildVless(node: ProxyNode): JsonObject? {
         if (node.server.isBlank() || node.serverPort !in 1..65535 || node.uuidOrPassword.isBlank()) return null
         if (node.type == ProtocolType.VLESS_REALITY && node.realityPublicKey.isBlank()) return null
-
         return JsonObject().apply {
             addProperty("type", "vless")
             addProperty("server", node.server)
@@ -184,9 +257,9 @@ object ConfigBuilder {
         return JsonObject().apply {
             addProperty("type", "hysteria2")
             addProperty("server", node.server)
-            val serverPorts = parsePortList(node.hoppingPorts)
-            if (serverPorts.isEmpty()) addProperty("server_port", node.serverPort)
-            else add("server_ports", JsonArray().apply { serverPorts.forEach(::add) })
+            val ports = parsePortList(node.hoppingPorts)
+            if (ports.isEmpty()) addProperty("server_port", node.serverPort)
+            else add("server_ports", JsonArray().apply { ports.forEach(::add) })
             addProperty("password", node.uuidOrPassword)
             if (node.obfs.isNotBlank()) {
                 add("obfs", JsonObject().apply {
@@ -273,66 +346,6 @@ object ConfigBuilder {
         }
     }
 
-    private fun buildRawOutbound(node: ProxyNode, expectedType: String?): JsonObject? {
-        if (node.rawJson.isBlank()) return null
-        val outbound = runCatching {
-            JsonParser.parseString(node.rawJson).asJsonObject.deepCopy()
-        }.getOrNull() ?: return null
-
-        outbound.remove("tag")
-        normalizeLegacyTlsFields(outbound)
-        normalizeLegacyPortFields(outbound)
-
-        val type = primitiveString(outbound.get("type")).lowercase()
-        if (expectedType != null && type != expectedType) return null
-        if (type.isBlank() || type in INTERNAL_OUTBOUND_TYPES) return null
-        if (type == "naive") sanitizeNaiveTls(outbound)
-
-        val detour = primitiveString(outbound.get("detour"))
-        if (detour.isNotBlank() && detour != TAG_DIRECT) outbound.remove("detour")
-        return outbound
-    }
-
-    private fun normalizeLegacyTlsFields(outbound: JsonObject) {
-        val legacyAlpn = outbound.remove("alpn")
-        val legacySni = outbound.remove("sni")
-        val legacyInsecure = outbound.remove("insecure")
-            ?: outbound.remove("allow_insecure")
-            ?: outbound.remove("allowInsecure")
-            ?: outbound.remove("skip_cert_verify")
-
-        if (legacyAlpn == null && legacySni == null && legacyInsecure == null) return
-        val tls = ensureTls(outbound)
-        if (legacyAlpn != null && !tls.has("alpn")) {
-            val values = toStringArray(legacyAlpn)
-            if (values.size() > 0) tls.add("alpn", values)
-        }
-        val serverName = primitiveString(legacySni)
-        if (serverName.isNotBlank() && !tls.has("server_name")) tls.addProperty("server_name", serverName)
-        if (legacyInsecure != null && !tls.has("insecure")) tls.addProperty("insecure", primitiveBoolean(legacyInsecure))
-    }
-
-    private fun normalizeLegacyPortFields(outbound: JsonObject) {
-        val type = primitiveString(outbound.get("type")).lowercase()
-        if (type != "hysteria2" && type != "hy2") return
-        val legacyPorts = outbound.remove("ports") ?: outbound.remove("mport") ?: return
-        if (!outbound.has("server_ports")) {
-            val ports = toPortArray(legacyPorts)
-            if (ports.size() > 0) outbound.add("server_ports", ports)
-        }
-    }
-
-    private fun sanitizeNaiveTls(outbound: JsonObject) {
-        val tls = ensureTls(outbound)
-        listOf(
-            "insecure", "alpn", "disable_sni", "min_version", "max_version",
-            "cipher_suites", "curve_preferences", "client_certificate",
-            "client_certificate_path", "client_key", "client_key_path",
-            "fragment", "record_fragment", "kernel_tx", "kernel_rx", "utls", "reality"
-        ).forEach(tls::remove)
-        tls.addProperty("enabled", true)
-    }
-
     private fun addTransport(outbound: JsonObject, node: ProxyNode) {
         when (node.network.lowercase()) {
             "ws" -> outbound.add("transport", JsonObject().apply {
@@ -356,8 +369,8 @@ object ConfigBuilder {
     }
 
     private fun ensureTls(outbound: JsonObject): JsonObject {
-        val current = outbound.get("tls")
-        val tls = if (current != null && current.isJsonObject) current.asJsonObject
+        val existing = outbound.get("tls")
+        val tls = if (existing != null && existing.isJsonObject) existing.asJsonObject
         else JsonObject().also { outbound.add("tls", it) }
         if (!tls.has("enabled")) tls.addProperty("enabled", true)
         return tls
