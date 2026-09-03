@@ -46,6 +46,7 @@ import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.NodeLatencyTester
 import com.rr.client.core.NodeOverridePatcher
 import com.rr.client.core.model.AppRouteConfig
+import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.AppManager
 import com.rr.client.routing.ChinaRuleSetManager
@@ -53,12 +54,14 @@ import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.security.PinSecurity
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.subscription.SubscriptionFetcher
+import com.rr.client.subscription.SubscriptionParser
 import com.rr.client.subscription.model.SubProfile
 import com.rr.client.ui.components.NodeEditDialog
 import com.rr.client.ui.components.PinSetupDialog
 import com.rr.client.ui.components.PinUnlockScreen
 import com.rr.client.ui.screens.AppRoutingScreen
 import com.rr.client.ui.screens.DashboardScreen
+import com.rr.client.ui.screens.NodeGroupUi
 import com.rr.client.ui.screens.NodeListScreen
 import com.rr.client.ui.screens.SettingsScreen
 import com.rr.client.ui.screens.SubscriptionScreen
@@ -122,7 +125,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         updateBackgroundProtectionState()
 
-        // Resolve the lock before Compose gets a chance to render app content.
         val prefs = RRApplication.instance.preferencesManager
         pinEnabledCached = runBlocking(Dispatchers.IO) {
             runCatching { prefs.pinEnabled.first() }.getOrDefault(false)
@@ -147,9 +149,7 @@ class MainActivity : ComponentActivity() {
             suppressNextBackgroundLock = false
             return
         }
-        if (pinEnabledCached && !isChangingConfigurations) {
-            appUnlocked.value = false
-        }
+        if (pinEnabledCached && !isChangingConfigurations) appUnlocked.value = false
     }
 
     @Composable
@@ -174,9 +174,7 @@ class MainActivity : ComponentActivity() {
                         verifying = true
                         val salt = runCatching { prefs.pinSalt.first() }.getOrNull()
                         val hash = runCatching { prefs.pinHash.first() }.getOrNull()
-                        val valid = withContext(Dispatchers.Default) {
-                            PinSecurity.verify(pin, salt, hash)
-                        }
+                        val valid = withContext(Dispatchers.Default) { PinSecurity.verify(pin, salt, hash) }
 
                         if (valid) {
                             prefs.resetPinFailures()
@@ -222,6 +220,7 @@ class MainActivity : ComponentActivity() {
         var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
         var selectedNodeId by remember { mutableStateOf<String?>(null) }
         var smartRouting by remember { mutableStateOf(true) }
+        var fastForwarding by remember { mutableStateOf(false) }
         var perAppMode by remember { mutableStateOf(PerAppPolicyResolver.MODE_ALL) }
         var proxySelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
         var bypassSelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -239,10 +238,33 @@ class MainActivity : ComponentActivity() {
         val allNodes = remember(baseNodes, nodeOverrides) {
             baseNodes.map { base -> nodeOverrides[base.id] ?: base }
         }
-        val selectedNode = allNodes.find { it.id == selectedNodeId }
-        val selectedProfile = subProfiles.firstOrNull { profile ->
-            profile.nodes.any { it.id == selectedNodeId }
+        val subscriptionProfiles = remember(subProfiles) { subProfiles.filterNot { it.isLocal } }
+        val nodeGroups = remember(subProfiles, allNodes) {
+            val resolved = allNodes.associateBy { it.id }
+            val local = subProfiles.firstOrNull { it.isLocal }
+            buildList {
+                add(
+                    NodeGroupUi(
+                        id = SubProfile.LOCAL_PROFILE_ID,
+                        name = SubProfile.LOCAL_PROFILE_NAME,
+                        nodes = local?.nodes.orEmpty().mapNotNull { resolved[it.id] },
+                        isLocal = true
+                    )
+                )
+                subscriptionProfiles.forEach { profile ->
+                    add(
+                        NodeGroupUi(
+                            id = profile.id,
+                            name = profile.name,
+                            nodes = profile.nodes.mapNotNull { resolved[it.id] },
+                            isLocal = false
+                        )
+                    )
+                }
+            }
         }
+        val selectedNode = allNodes.find { it.id == selectedNodeId }
+        val selectedProfile = subProfiles.firstOrNull { profile -> profile.nodes.any { it.id == selectedNodeId } }
 
         fun packagesFor(mode: String): Set<String> = when (mode) {
             PerAppPolicyResolver.MODE_ALLOW_LIST -> proxySelectedPackages
@@ -266,8 +288,8 @@ class MainActivity : ComponentActivity() {
 
             val storedId = runCatching { prefs.selectedNodeId.first() }.getOrNull()
             smartRouting = runCatching { prefs.smartRouting.first() }.getOrDefault(true)
-            perAppMode = runCatching { prefs.perAppMode.first() }
-                .getOrDefault(PerAppPolicyResolver.MODE_ALL)
+            fastForwarding = runCatching { prefs.fastForwarding.first() }.getOrDefault(false)
+            perAppMode = runCatching { prefs.perAppMode.first() }.getOrDefault(PerAppPolicyResolver.MODE_ALL)
             proxySelectedPackages = runCatching { prefs.proxySelectedAppPackages.first() }.getOrDefault(emptySet())
             bypassSelectedPackages = runCatching { prefs.bypassSelectedAppPackages.first() }.getOrDefault(emptySet())
 
@@ -278,10 +300,7 @@ class MainActivity : ComponentActivity() {
 
             val appMgr = AppManager(this@MainActivity)
             apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
-
-            withContext(Dispatchers.IO) {
-                ChinaRuleSetManager.ensureBundled(this@MainActivity)
-            }
+            withContext(Dispatchers.IO) { ChinaRuleSetManager.ensureBundled(this@MainActivity) }
         }
 
         fun refreshFromProfiles(updated: List<SubProfile>) {
@@ -299,7 +318,88 @@ class MainActivity : ComponentActivity() {
         fun toast(text: String) = Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
         fun currentTargetNode(): ProxyNode? = selectedNode ?: allNodes.firstOrNull()
 
-        fun scheduleRoutingRestart(mode: String, packages: Set<String>, smart: Boolean) {
+        fun orderedProfilesWithLocal(local: SubProfile): List<SubProfile> =
+            listOf(local) + subProfiles.filterNot { it.isLocal }
+
+        fun persistLocalNodes(nodes: List<ProxyNode>, message: String? = null) {
+            lifecycleScope.launch {
+                val local = SubProfile.local(nodes, System.currentTimeMillis())
+                withContext(Dispatchers.IO) { db.profileDao().insertProfile(local.toEntity()) }
+                refreshFromProfiles(orderedProfilesWithLocal(local))
+                message?.let(::toast)
+            }
+        }
+
+        fun importLocalNodes(raw: String) {
+            if (raw.isBlank()) {
+                toast("没有读取到可导入的节点内容")
+                return
+            }
+            lifecycleScope.launch {
+                val parsed = withContext(Dispatchers.Default) {
+                    SubscriptionParser.parseContent(raw, SubProfile.LOCAL_PROFILE_ID, SubProfile.LOCAL_PROFILE_NAME)
+                }
+                if (parsed.isEmpty()) {
+                    toast("没有识别到支持的节点；可粘贴分享链接、sing-box JSON 或 Clash YAML")
+                    return@launch
+                }
+
+                val valid = withContext(Dispatchers.IO) {
+                    parsed.mapNotNull { candidate ->
+                        val localNode = candidate.copy(
+                            id = "local-${UUID.randomUUID()}",
+                            profileId = SubProfile.LOCAL_PROFILE_ID,
+                            profileName = SubProfile.LOCAL_PROFILE_NAME
+                        )
+                        runCatching {
+                            val check = ConfigBuilder.buildSingBoxConfig(
+                                selectedNode = localNode,
+                                allNodes = listOf(localNode),
+                                appRoutes = emptyList(),
+                                smartRouting = false,
+                                perAppMode = PerAppPolicyResolver.MODE_ALL,
+                                fastForwarding = false
+                            )
+                            Libbox.checkConfig(check)
+                            localNode
+                        }.getOrNull()
+                    }
+                }
+                if (valid.isEmpty()) {
+                    toast("节点格式已识别，但 sing-box 1.14 校验未通过，未写入本地节点")
+                    return@launch
+                }
+
+                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
+                val keys = existing.map(::nodeIdentity).toMutableSet()
+                val newNodes = valid.filter { keys.add(nodeIdentity(it)) }
+                if (newNodes.isEmpty()) {
+                    toast("这些节点已经存在于「${SubProfile.LOCAL_PROFILE_NAME}」")
+                    return@launch
+                }
+                persistLocalNodes(existing + newNodes, "已加入 ${newNodes.size} 个本地节点")
+            }
+        }
+
+        fun deleteLocalNode(node: ProxyNode) {
+            if (!node.profileId.equals(SubProfile.LOCAL_PROFILE_ID)) return
+            if (isVpnRunning || isVpnStarting) {
+                toast("请先断开连接再删除本地节点")
+                return
+            }
+            lifecycleScope.launch {
+                prefs.clearNodeOverride(node.id)
+                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
+                persistLocalNodes(existing.filterNot { it.id == node.id }, "已删除本地节点「${node.tag}」")
+            }
+        }
+
+        fun scheduleRoutingRestart(
+            mode: String,
+            packages: Set<String>,
+            smart: Boolean,
+            fast: Boolean = fastForwarding
+        ) {
             if (!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) return
             val node = currentTargetNode() ?: return
 
@@ -315,13 +415,9 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
 
-                buildRuntimeConfig(node, allNodes, apps, smart, mode, packages)
-                    .onSuccess { config ->
-                        sendRestartVpn(config, node.tag, node.id)
-                    }
-                    .onFailure { error ->
-                        toast("分流配置失败：${error.message ?: error.javaClass.simpleName}")
-                    }
+                buildRuntimeConfig(node, allNodes, apps, smart, mode, packages, fast)
+                    .onSuccess { config -> sendRestartVpn(config, node.tag, node.id) }
+                    .onFailure { error -> toast("分流配置失败：${error.message ?: error.javaClass.simpleName}") }
 
                 delay(400L)
                 applyingRouting = false
@@ -354,14 +450,12 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.IO) { db.profileDao().insertProfile(profile.toEntity()) }
                     refreshFromProfiles(subProfiles + profile)
                     toast("「$profileName」同步成功：${newNodes.size} 个节点")
-                }.onFailure { error ->
-                    toast("添加订阅失败：${error.message ?: "网络错误"}")
-                }
+                }.onFailure { error -> toast("添加订阅失败：${error.message ?: "网络错误"}") }
             }
         }
 
         fun refreshProfile(profileId: String) {
-            val existing = subProfiles.find { it.id == profileId } ?: return
+            val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
             refreshingIds = refreshingIds + profileId
             lifecycleScope.launch {
                 val result = SubscriptionFetcher().fetchSubscription(existing.url, existing.id, existing.name)
@@ -375,14 +469,12 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.IO) { db.profileDao().insertProfile(updated.toEntity()) }
                     refreshFromProfiles(subProfiles.map { if (it.id == profileId) updated else it })
                     toast("「${existing.name}」更新成功：${newNodes.size} 个节点")
-                }.onFailure { error ->
-                    toast("「${existing.name}」更新失败：${error.message ?: "网络错误"}")
-                }
+                }.onFailure { error -> toast("「${existing.name}」更新失败：${error.message ?: "网络错误"}") }
             }
         }
 
         fun deleteProfile(profileId: String) {
-            val existing = subProfiles.find { it.id == profileId } ?: return
+            val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
             if (isVpnRunning || isVpnStarting) {
                 toast("请先断开连接再删除订阅")
                 return
@@ -457,8 +549,8 @@ class MainActivity : ComponentActivity() {
                                 else -> {
                                     val targetNode = currentTargetNode()
                                     if (targetNode == null) {
-                                        toast("还没有任何节点：请先到「订阅」页添加订阅链接并同步")
-                                        selectedTab = 3
+                                        toast("还没有任何节点：可在「节点」页 + 号单独添加，或到「订阅」页添加订阅")
+                                        selectedTab = 1
                                         return@onToggle
                                     }
 
@@ -477,7 +569,8 @@ class MainActivity : ComponentActivity() {
                                             apps,
                                             smartRouting,
                                             perAppMode,
-                                            activePackages
+                                            activePackages,
+                                            fastForwarding
                                         ).onSuccess { configJson ->
                                             startVpnWithPermissionCheck(configJson, targetNode.tag, targetNode.id)
                                         }.onFailure { error ->
@@ -491,7 +584,7 @@ class MainActivity : ComponentActivity() {
                     )
 
                     1 -> NodeListScreen(
-                        nodes = allNodes,
+                        groups = nodeGroups,
                         selectedNodeId = selectedNodeId,
                         latencyStates = latencyStates,
                         editedNodeIds = nodeOverrides.keys,
@@ -507,6 +600,11 @@ class MainActivity : ComponentActivity() {
                                 prefs.clearNodeOverride(node.id)
                                 toast("已恢复订阅中的原始节点参数")
                             }
+                        },
+                        onDeleteLocalNode = ::deleteLocalNode,
+                        onImportText = ::importLocalNodes,
+                        onCreateManualNode = { protocol ->
+                            editingNode = manualNodeTemplate(protocol)
                         },
                         onGoToSubscription = { selectedTab = 3 }
                     )
@@ -548,7 +646,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     3 -> SubscriptionScreen(
-                        profiles = subProfiles,
+                        profiles = subscriptionProfiles,
                         busyIds = refreshingIds,
                         adding = addingProfile,
                         onAddProfile = { name, url -> addProfile(name, url) },
@@ -558,6 +656,7 @@ class MainActivity : ComponentActivity() {
 
                     4 -> SettingsScreen(
                         smartRouting = smartRouting,
+                        fastForwarding = fastForwarding,
                         backgroundProtected = backgroundProtected,
                         ruleSetLastUpdated = ruleSetLastUpdated,
                         ruleSetUpdating = updatingRuleSets,
@@ -568,6 +667,11 @@ class MainActivity : ComponentActivity() {
                             smartRouting = enabled
                             lifecycleScope.launch { prefs.setSmartRouting(enabled) }
                             scheduleRoutingRestart(perAppMode, packagesFor(perAppMode), enabled)
+                        },
+                        onFastForwardingChanged = { enabled ->
+                            fastForwarding = enabled
+                            lifecycleScope.launch { prefs.setFastForwarding(enabled) }
+                            scheduleRoutingRestart(perAppMode, packagesFor(perAppMode), smartRouting, enabled)
                         },
                         onRequestBackgroundProtection = { requestBackgroundProtection() },
                         onUpdateRuleSets = {
@@ -615,20 +719,15 @@ class MainActivity : ComponentActivity() {
                                                 .setMessage(update.releaseName)
                                                 .setPositiveButton("下载更新") { _, _ ->
                                                     suppressNextBackgroundLock = true
-                                                    runCatching {
-                                                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
-                                                    }.onFailure { error ->
-                                                        toast("无法打开下载地址：${error.message ?: "未知错误"}")
-                                                    }
+                                                    runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl))) }
+                                                        .onFailure { error -> toast("无法打开下载地址：${error.message ?: "未知错误"}") }
                                                 }
                                                 .setNegativeButton("稍后", null)
                                                 .show()
                                         } else {
                                             toast("当前已是最新版：${BuildConfig.VERSION_NAME}")
                                         }
-                                    }.onFailure { error ->
-                                        toast("检查更新失败：${error.message ?: "网络错误"}")
-                                    }
+                                    }.onFailure { error -> toast("检查更新失败：${error.message ?: "网络错误"}") }
                                 }
                             }
                         }
@@ -644,7 +743,21 @@ class MainActivity : ComponentActivity() {
                 onSave = { edited ->
                     val patched = NodeOverridePatcher.apply(original, edited)
                     lifecycleScope.launch {
-                        prefs.setNodeOverride(patched)
+                        if (original.profileId == SubProfile.LOCAL_PROFILE_ID) {
+                            val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
+                            val normalized = patched.copy(
+                                profileId = SubProfile.LOCAL_PROFILE_ID,
+                                profileName = SubProfile.LOCAL_PROFILE_NAME
+                            )
+                            val next = if (existing.any { it.id == original.id }) {
+                                existing.map { if (it.id == original.id) normalized else it }
+                            } else {
+                                existing + normalized
+                            }
+                            persistLocalNodes(next)
+                        } else {
+                            prefs.setNodeOverride(patched)
+                        }
                         editingNode = null
                         toast(
                             if (isVpnRunning || isVpnStarting) {
@@ -663,9 +776,7 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { showPinSetup = false },
                 onSave = { pin ->
                     lifecycleScope.launch {
-                        val credential = withContext(Dispatchers.Default) {
-                            PinSecurity.createCredential(pin)
-                        }
+                        val credential = withContext(Dispatchers.Default) { PinSecurity.createCredential(pin) }
                         prefs.savePinCredential(credential.saltBase64, credential.hashBase64)
                         pinEnabledCached = true
                         appUnlocked.value = true
@@ -683,13 +794,11 @@ class MainActivity : ComponentActivity() {
         apps: List<AppRouteConfig>,
         smartRouting: Boolean,
         perAppMode: String,
-        selectedPackages: Set<String>
+        selectedPackages: Set<String>,
+        fastForwarding: Boolean
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val ruleSets = if (smartRouting) {
-                ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrNull()
-            } else null
-
+            val ruleSets = if (smartRouting) ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrNull() else null
             val configJson = ConfigBuilder.buildSingBoxConfig(
                 selectedNode = targetNode,
                 allNodes = allNodes,
@@ -697,6 +806,7 @@ class MainActivity : ComponentActivity() {
                 smartRouting = smartRouting,
                 perAppMode = perAppMode,
                 selectedPackages = selectedPackages,
+                fastForwarding = fastForwarding,
                 ruleSets = ruleSets
             )
             Libbox.checkConfig(configJson)
@@ -704,10 +814,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun manualNodeTemplate(type: ProtocolType): ProxyNode = ProxyNode(
+        id = "local-${UUID.randomUUID()}",
+        tag = "新节点",
+        type = type,
+        server = "",
+        serverPort = when (type) {
+            ProtocolType.SHADOWSOCKS -> 8388
+            else -> 443
+        },
+        network = when (type) {
+            ProtocolType.VMESS_WS_ARGO -> "ws"
+            else -> "tcp"
+        },
+        tlsEnabled = type != ProtocolType.SHADOWSOCKS,
+        ssMethod = if (type == ProtocolType.SHADOWSOCKS) "aes-128-gcm" else "",
+        profileId = SubProfile.LOCAL_PROFILE_ID,
+        profileName = SubProfile.LOCAL_PROFILE_NAME
+    )
+
+    private fun nodeIdentity(node: ProxyNode): String = node.rawJson.takeIf(String::isNotBlank)
+        ?: "${node.type}|${node.server}|${node.serverPort}|${node.uuidOrPassword}|${node.extraPassword}"
+
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
@@ -825,8 +956,7 @@ class MainActivity : ComponentActivity() {
 
     private fun clearOwnApplicationData() {
         runCatching {
-            val manager = getSystemService(ActivityManager::class.java)
-                ?: error("ActivityManager unavailable")
+            val manager = getSystemService(ActivityManager::class.java) ?: error("ActivityManager unavailable")
             check(manager.clearApplicationUserData()) { "Android 拒绝清除应用数据请求" }
         }.onFailure { error ->
             Toast.makeText(
