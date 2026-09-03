@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RR-Android"
+rootProject.name = "RR-BOX"
 include(":app")

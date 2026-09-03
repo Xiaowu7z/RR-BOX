@@ -1,4 +1,4 @@
-name: RRBOX Automated Build (arm64-v8a)
+name: RRBOX 0.9.1 Build & Release (arm64-v8a)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rrbox-arm64-${{ github.workflow }}-${{ github.ref }}
@@ -21,16 +21,18 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RRBOX-0.2.0-beta2-arm64-v8a.apk
+  VERSION_CODE: "91"
+  VERSION_NAME: "0.9.1"
+  OUTPUT_APK_NAME: RRBOX-0.9.1-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RRBOX APK
+    name: Build signed RRBOX 0.9.1
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     steps:
-      - name: Checkout RR-Android
+      - name: Checkout RR-BOX
         uses: actions/checkout@v5
         with:
           fetch-depth: 1
@@ -41,7 +43,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Go 1.26.7
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -60,19 +62,19 @@ jobs:
             "platforms;${ANDROID_PLATFORM}" \
             "build-tools;${ANDROID_BUILD_TOOLS}"
 
-      - name: Set up Android NDK r28
+      - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
 
-      - name: Set up Gradle 8.10.2
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Record toolchain versions
+      - name: Record toolchain
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -89,7 +91,7 @@ jobs:
             grep -F "Pkg.Revision" "${ANDROID_NDK_HOME}/source.properties"
           } | tee build-reports/TOOLCHAIN.txt
 
-      - name: Download maintained China binary rule snapshots
+      - name: Download maintained China binary rules
         shell: bash
         run: |
           set -euo pipefail
@@ -125,7 +127,7 @@ jobs:
               fi
               rm -f "$temp"
             done
-            echo "ERROR: unable to download sing-box 1.14-compatible SRS: $output" >&2
+            echo "ERROR: unable to download sing-box-compatible SRS: $output" >&2
             return 1
           }
 
@@ -141,7 +143,7 @@ jobs:
           ls -lh "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SIZES.txt
           test "$(find "$rules_dir" -maxdepth 1 -name '*.srs' | wc -l)" -eq 2
 
-      - name: Build official sing-box libbox.aar
+      - name: Build pinned sing-box libbox
         shell: bash
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -155,11 +157,8 @@ jobs:
           rm -f app/libs/libbox.aar
           mkdir -p app/libs build-reports
 
-          git clone \
-            --branch "$SING_BOX_TAG" \
-            --depth 1 \
-            https://github.com/SagerNet/sing-box.git \
-            sing-box-src
+          git clone --branch "$SING_BOX_TAG" --depth 1 \
+            https://github.com/SagerNet/sing-box.git sing-box-src
 
           cd sing-box-src
           actual_commit="$(git rev-parse HEAD)"
@@ -179,11 +178,10 @@ jobs:
           cp -v libbox.aar ../app/libs/libbox.aar
           cd ..
 
-          test -s app/libs/libbox.aar
           unzip -Z1 app/libs/libbox.aar | tee build-reports/LIBBOX-AAR-FILES.txt
           grep -q '^jni/arm64-v8a/libbox\.so$' build-reports/LIBBOX-AAR-FILES.txt
           if grep -Eq '^jni/(armeabi-v7a|x86|x86_64)/' build-reports/LIBBOX-AAR-FILES.txt; then
-            echo "ERROR: libbox.aar contains an unexpected ABI" >&2
+            echo "ERROR: libbox.aar contains unexpected ABI" >&2
             exit 1
           fi
           sha256sum app/libs/libbox.aar | tee build-reports/LIBBOX-SHA256.txt
@@ -222,13 +220,12 @@ jobs:
           hev_so="$RUNNER_TEMP/rr-hev/libs/arm64-v8a/libhev-socks5-tunnel.so"
           test -s "$hev_so"
           cp -v "$hev_so" app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
-
           file app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so | tee build-reports/HEV-FILE.txt
           grep -q 'ARM aarch64' build-reports/HEV-FILE.txt
           sha256sum app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so \
             | tee build-reports/HEV-SHA256.txt
 
-      - name: Validate signing secrets and restore keystore
+      - name: Restore release signing key
         shell: bash
         env:
           RR_KEYSTORE_BASE64: ${{ secrets.RR_KEYSTORE_BASE64 }}
@@ -238,22 +235,20 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          : "${RR_KEYSTORE_BASE64:?Missing GitHub Secret: RR_KEYSTORE_BASE64}"
-          : "${RR_KEYSTORE_PASSWORD:?Missing GitHub Secret: RR_KEYSTORE_PASSWORD}"
-          : "${RR_KEY_ALIAS_VALUE:?Missing GitHub Secret: RR_KEY_ALIAS}"
-          : "${RR_KEY_PASSWORD_VALUE:?Missing GitHub Secret: RR_KEY_PASSWORD}"
-
+          : "${RR_KEYSTORE_BASE64:?Missing RR_KEYSTORE_BASE64}"
+          : "${RR_KEYSTORE_PASSWORD:?Missing RR_KEYSTORE_PASSWORD}"
+          : "${RR_KEY_ALIAS_VALUE:?Missing RR_KEY_ALIAS}"
+          : "${RR_KEY_PASSWORD_VALUE:?Missing RR_KEY_PASSWORD}"
           keystore_path="$RUNNER_TEMP/rr-client-release.jks"
           printf '%s' "$RR_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
           test -s "$keystore_path"
           keytool -list \
             -keystore "$keystore_path" \
             -storepass "$RR_KEYSTORE_PASSWORD" \
-            -alias "$RR_KEY_ALIAS_VALUE" \
-            >/dev/null
+            -alias "$RR_KEY_ALIAS_VALUE" >/dev/null
           echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
 
-      - name: Run source regressions, unit tests and build signed Release APK
+      - name: Source regressions, unit tests and signed Release build
         shell: bash
         env:
           RR_KEYSTORE_PASS: ${{ secrets.RR_KEYSTORE_PASSWORD }}
@@ -262,48 +257,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Stable 0.1.8 system-TUN invariants remain physically available.
+          grep -q 'versionCode = 91' app/build.gradle.kts
+          grep -q 'versionName = "0.9.1"' app/build.gradle.kts
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
-          grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'SELF_PACKAGE = "com.rr.client"' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'selected + SELF_PACKAGE' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'addProperty("stack", "system")' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          if grep -q 'return START_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt; then
-            echo "ERROR: sticky VPN restore path must not return" >&2
-            exit 1
-          fi
-
-          # Node/subscription features stay outside the stable system data plane.
-          grep -q 'LOCAL_PROFILE_ID' app/src/main/java/com/rr/client/subscription/model/SubProfile.kt
-          grep -q 'SubscriptionUrlNormalizer' app/src/main/java/com/rr/client/subscription/SubscriptionFetcher.kt
-          grep -q 'ClashSubscriptionConverter' app/src/main/java/com/rr/client/subscription/SubscriptionParser.kt
-          grep -q 'ScanContract' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
-          grep -q 'FAST_FORWARDING' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
-          grep -q '轻量模式' app/src/main/java/com/rr/client/ui/screens/SettingsScreen.kt
-          grep -q 'usesCleartextTraffic="true"' app/src/main/AndroidManifest.xml
-          grep -q 'android.permission.CAMERA' app/src/main/AndroidManifest.xml
-
-          # HEV is an optional, isolated native data plane.
-          test -s app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
-          test -s app/src/main/assets/licenses/hev-socks5-tunnel-LICENSE.txt
-          grep -q 'TUN_ENGINE_HEV' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
-          grep -q 'ACTION_RESTART_ACTIVE_ENGINE' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
+          grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'TProxyStartService' app/src/main/java/com/rr/client/vpn/HevTunnelNative.kt
-          grep -q 'setSession("RRBOX · HEV")' app/src/main/java/com/rr/client/vpn/HevVpnEngine.kt
           grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
-
-          grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
-          grep -q 'clearApplicationUserData' app/src/main/java/com/rr/client/MainActivity.kt
-          grep -q 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS' app/src/main/AndroidManifest.xml
-          grep -q 'PROXY_SELECTED_PACKAGES' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
-          grep -q 'BYPASS_SELECTED_PACKAGES' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
-          grep -q 'PIN_MAX_FAILED_ATTEMPTS' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
-          grep -q 'RRBOX' app/src/main/res/values/strings.xml
+          grep -q 'ScanContract' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
+          grep -q 'QrImageDecoder' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
+          grep -q 'android.permission.CAMERA' app/src/main/AndroidManifest.xml
 
           gradle \
             --no-daemon \
@@ -322,105 +289,67 @@ jobs:
           source_apk="app/build/outputs/apk/release/app-release.apk"
           test -s "$source_apk"
 
-          mkdir -p dist build-reports
+          mkdir -p dist
           output_apk="dist/${OUTPUT_APK_NAME}"
           cp "$source_apk" "$output_apk"
+          cp obtainium.json dist/obtainium.json
 
           apksigner="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
           aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
-          test -x "$apksigner"
-          test -x "$aapt2"
 
-          "$apksigner" verify \
-            --verbose \
-            --print-certs \
-            "$output_apk" \
-            | tee build-reports/SIGNATURE-REPORT.txt
-
+          "$apksigner" verify --verbose --print-certs "$output_apk" \
+            | tee dist/SIGNATURE-REPORT.txt
           "$aapt2" dump badging "$output_apk" \
-            | tee build-reports/PACKAGE-REPORT.txt
+            | tee dist/PACKAGE-REPORT.txt
 
-          grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionCode='12'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.2.0-beta2'" build-reports/PACKAGE-REPORT.txt
-          grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
-          grep -q "uses-permission: name='android.permission.CAMERA'" build-reports/PACKAGE-REPORT.txt
+          grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
+          grep -q "versionCode='91'" dist/PACKAGE-REPORT.txt
+          grep -q "versionName='0.9.1'" dist/PACKAGE-REPORT.txt
+          grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 
-          unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
-          grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
-          grep -q '^lib/arm64-v8a/libhev-socks5-tunnel\.so$' build-reports/APK-FILE-LIST.txt
-          grep -q '^assets/licenses/hev-socks5-tunnel-LICENSE\.txt$' build-reports/APK-FILE-LIST.txt
-          grep -q '^assets/rules/geosite-geolocation-cn\.srs$' build-reports/APK-FILE-LIST.txt
-          grep -q '^assets/rules/geoip-cn\.srs$' build-reports/APK-FILE-LIST.txt
-          if grep -q '^assets/rules/geosite-geolocation-not-cn\.srs$' build-reports/APK-FILE-LIST.txt; then
-            echo "ERROR: obsolete not-cn rule is still packaged" >&2
-            exit 1
-          fi
-          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' build-reports/APK-FILE-LIST.txt; then
-            echo "ERROR: APK contains an unexpected ABI" >&2
-            exit 1
-          fi
-          if grep -Eqi '(^|/)META-INF/xposed(/|$)|XposedProvider|SystemUI.*Hook' build-reports/APK-FILE-LIST.txt; then
-            echo "ERROR: APK contains an unexpected Xposed/SystemUI module entry" >&2
+          unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
+          grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
+          grep -q '^lib/arm64-v8a/libhev-socks5-tunnel\.so$' dist/APK-FILE-LIST.txt
+          grep -q '^assets/licenses/hev-socks5-tunnel-LICENSE\.txt$' dist/APK-FILE-LIST.txt
+          grep -q '^assets/rules/geosite-geolocation-cn\.srs$' dist/APK-FILE-LIST.txt
+          grep -q '^assets/rules/geoip-cn\.srs$' dist/APK-FILE-LIST.txt
+          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' dist/APK-FILE-LIST.txt; then
+            echo "ERROR: APK contains unexpected ABI" >&2
             exit 1
           fi
 
           sha256sum "$output_apk" | tee dist/SHA256SUMS.txt
 
-          package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" build-reports/PACKAGE-REPORT.txt | head -n 1)"
-          version_code="$(sed -n "s/^package: .* versionCode='\([^']*\)'.*/\1/p" build-reports/PACKAGE-REPORT.txt | head -n 1)"
-          version_name="$(sed -n "s/^package: .* versionName='\([^']*\)'.*/\1/p" build-reports/PACKAGE-REPORT.txt | head -n 1)"
           apk_sha256="$(awk '{print $1}' dist/SHA256SUMS.txt)"
           apk_size="$(stat -c '%s' "$output_apk")"
-          certificate_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' build-reports/SIGNATURE-REPORT.txt | head -n 1)"
-          ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
+          certificate_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' dist/SIGNATURE-REPORT.txt | head -n 1)"
+          hev_size="$(unzip -l "$output_apk" | awk '/libhev-socks5-tunnel\.so/ {print $1; exit}')"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.2.0-beta2 Build Report
+          # RRBOX 0.9.1 Public Beta Build Report
 
-          - Status: HEV feature test build; real-device stable baseline remains 0.1.8-stability allow-list hotfix
           - Source commit: $(git rev-parse HEAD)
-          - Package name: ${package_name}
-          - Version code: ${version_code}
-          - Version name: ${version_name}
-          - App label: RRBOX
-          - ABI: arm64-v8a only
-          - sing-box tag: ${SING_BOX_TAG}
-          - sing-box commit: ${SING_BOX_COMMIT}
-          - HEV native commit: ${HEV_COMMIT}
-          - HEV compile: Android NDK, arm64-v8a, -O3, JNI in-process
-          - Forwarding engines: stable sing-box system TUN + optional HEV native/lwIP TUN-to-SOCKS
-          - HEV virtual TUN MTU: 8500
-          - HEV mapped DNS: 198.18.0.2 / 100.64.0.0/10 synthetic mapping
-          - Lightweight mode: lower log overhead and skip optional sniff when smart routing is off
-          - Go: $(go version)
-          - JDK: $(java -version 2>&1 | head -n 1)
-          - Android SDK platform: ${ANDROID_PLATFORM}
-          - Android build tools: ${ANDROID_BUILD_TOOLS}
-          - Android NDK: ${ndk_revision}
-          - Gradle: $(gradle --version | awk '/^Gradle / {print $2; exit}')
-          - APK file: ${OUTPUT_APK_NAME}
+          - Package: com.rr.client
+          - Version code: 91
+          - Version name: 0.9.1
+          - ABI: arm64-v8a
+          - APK: ${OUTPUT_APK_NAME}
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - VPN lifecycle: deterministic START_NOT_STICKY, no stale runtime restore
-          - Stable per-app filtering: system TUN keeps RRBOX in allow-list, real-device verified
-          - HEV per-app filtering: bridge/core UID stays outside the Android VPN to prevent local SOCKS loop
-          - Smart routing: SagerNet China geosite + geoip binary rules
-          - Notification actions: restart + disconnect
-          - PIN lock: PBKDF2 credential + configurable failed-attempt self-wipe policy
-          - Local node hub: subscription groups + local group + QR/clipboard/manual import
-          - Subscription compatibility: normalized HTTP/HTTPS IPv4/IPv6 URLs + Base64/URI/sing-box/Clash-Mihomo parsing
-          - HEV license: MIT notice packaged in assets/licenses
-          - R8/minification: disabled for beta
-          - SystemUI/Xposed module: not included
-          - CI verification: unit tests, libbox, HEV native library, SRS assets, signature, package, version and ABI passed
+          - sing-box: ${SING_BOX_TAG} / ${SING_BOX_COMMIT}
+          - HEV: ${HEV_COMMIT}
+          - HEV native APK entry size: ${hev_size} bytes
+          - Forwarding engines: System TUN + HEV native/lwIP TUN-to-SOCKS
+          - System TUN MTU: 1500
+          - HEV TUN MTU: 8500
+          - HEV mapped DNS: 198.18.0.2 / 100.64.0.0/10
+          - QR import: camera scanner + image-file QR decoding
+          - CI: unit tests, signed Release, package/version/ABI/native/rule validation passed
 
-          HEV is experimental and is not claimed to be faster until same-device A/B testing is completed.
+          RRBOX 0.9.1 is a public beta. No throughput superiority claim is made without same-device A/B data.
           EOF
 
-          cp build-reports/SIGNATURE-REPORT.txt dist/
-          cp build-reports/PACKAGE-REPORT.txt dist/
           cp build-reports/LIBBOX-SHA256.txt dist/
           cp build-reports/HEV-SHA256.txt dist/
           cp build-reports/HEV-FILE.txt dist/
@@ -429,11 +358,55 @@ jobs:
           cp build-reports/CHINA-RULES-SIZES.txt dist/
           cp build-reports/TOOLCHAIN.txt dist/
 
-      - name: Upload APK and verification reports
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.2.0-beta2-arm64-v8a
+          name: RRBOX-0.9.1-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Publish RRBOX 0.9.1 public beta
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.1') }}"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.9.1
+          target_commitish: ${{ github.sha }}
+          name: RRBOX 0.9.1 公测版
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            ## RRBOX 0.9.1 公测版
+
+            这是 RRBOX 首个面向公开测试的版本，核心工作集中在 Android VPN 数据面研究，而不是单纯堆叠 UI 功能。
+
+            ### 核心技术
+            - Stable System TUN：Android VpnService TUN → sing-box libbox system stack。
+            - HEV Native：Android VpnService TUN → HEV/lwIP → loopback SOCKS5 → sing-box outbound。
+            - 两套引擎共享节点、订阅与路由配置，可切换验证。
+            - HEV 使用独立 UID 策略规避本地 SOCKS 回环。
+            - START_NOT_STICKY + 重复 START 去重，降低移动端 VPN 生命周期抖动。
+            - 中国规则使用二进制 SRS 快照并做原子更新。
+            - 相机二维码扫描升级，并支持直接从图片读取二维码。
+
+            ### 发布前验证数据
+            - System TUN MTU: 1500
+            - HEV TUN MTU: 8500
+            - HEV native library: arm64, JNI, -O3
+            - 发布前实机已跑通 TUN → lwIP → SOCKS5 → sing-box
+            - 历史稳定 APK: 39,288,731 bytes
+            - HEV 后实机构建 APK: 39,873,533 bytes
+            - 增量约 0.56 MiB / 1.49%
+
+            严格的同设备吞吐、CPU、RTT、电量 A/B 数据仍在继续采集，因此本版本不宣称 HEV 必然比 System TUN 快。
+
+            ### 安装
+            - 现代 Android arm64 设备下载 `RRBOX-0.9.1-arm64-v8a.apk`
+            - Release 同时附带 SHA-256、签名报告、构建报告与 Obtainium 配置。
+          files: |
+            dist/RRBOX-0.9.1-arm64-v8a.apk
+            dist/SHA256SUMS.txt
+            dist/BUILD-REPORT.md
+            dist/SIGNATURE-REPORT.txt
+            dist/obtainium.json

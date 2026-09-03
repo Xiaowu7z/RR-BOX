@@ -1,0 +1,10 @@
+{
+  "id": "com.rr.client",
+  "url": "https://github.com/Xiaowu7z/RR-Android",
+  "author": "Xiaowu7z",
+  "name": "RRBOX",
+  "preferredApkIndex": 0,
+  "additionalSettings": "{\"includePrereleases\":true,\"fallbackToOlderReleases\":true,\"apkFilterRegEx\":\"RRBOX-0\\\\.9\\\\.1-arm64-v8a\\\\.apk$\",\"autoApkFilterByArch\":true}",
+  "overrideSource": "GitHub",
+  "allowIdChange": false
+}
