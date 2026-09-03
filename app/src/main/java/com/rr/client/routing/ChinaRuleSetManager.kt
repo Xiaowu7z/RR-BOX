@@ -78,7 +78,9 @@ object ChinaRuleSetManager {
                 val temporary = File(directory, ".${spec.localName}.asset.tmp")
                 temporary.delete()
                 context.assets.open("rules/${spec.assetName}").use { input ->
-                    temporary.outputStream().use(input::copyTo)
+                    temporary.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
                 }
                 require(isValidSrs(temporary)) { "内置规则集损坏或版本不兼容：${spec.localName}" }
                 replaceAtomically(temporary, destination)
@@ -140,7 +142,9 @@ object ChinaRuleSetManager {
                 client.newCall(request).execute().use { response ->
                     require(response.isSuccessful) { "HTTP ${response.code}" }
                     val body = response.body ?: error("空响应")
-                    target.outputStream().use { output -> body.byteStream().use { it.copyTo(output) } }
+                    target.outputStream().use { output ->
+                        body.byteStream().use { input -> input.copyTo(output) }
+                    }
                 }
             }
             if (result.isSuccess && isValidSrs(target)) return
