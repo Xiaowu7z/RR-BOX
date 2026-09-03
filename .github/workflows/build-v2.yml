@@ -15,12 +15,13 @@ concurrency:
 env:
   SING_BOX_TAG: v1.14.0
   SING_BOX_COMMIT: 0b8995879f29a9b98ee027bc17b75e101445b238
+  HEV_COMMIT: 64cc609f945253b0e9ebc56317d544268f3c68c1
   GO_VERSION: 1.26.7
   NDK_VERSION: r28
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RRBOX-0.2.0-beta1-arm64-v8a.apk
+  OUTPUT_APK_NAME: RRBOX-0.2.0-beta2-arm64-v8a.apk
 
 jobs:
   build:
@@ -187,6 +188,46 @@ jobs:
           fi
           sha256sum app/libs/libbox.aar | tee build-reports/LIBBOX-SHA256.txt
 
+      - name: Build pinned HEV native TUN engine
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          rm -rf hev-socks5-tunnel "$RUNNER_TEMP/rr-hev"
+          rm -rf app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$RUNNER_TEMP/rr-hev/libs" "$RUNNER_TEMP/rr-hev/obj" \
+            app/src/main/jniLibs/arm64-v8a build-reports
+
+          git clone https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
+          git -C hev-socks5-tunnel checkout --detach "$HEV_COMMIT"
+          git -C hev-socks5-tunnel submodule update --init --recursive
+
+          actual_hev_commit="$(git -C hev-socks5-tunnel rev-parse HEAD)"
+          echo "hev-socks5-tunnel commit: ${actual_hev_commit}" | tee build-reports/HEV.txt
+          test "$actual_hev_commit" = "$HEV_COMMIT"
+
+          pushd hev-socks5-tunnel
+          "$ANDROID_NDK_HOME/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=Android.mk \
+            APP_ABI=arm64-v8a \
+            APP_PLATFORM=android-26 \
+            NDK_LIBS_OUT="$RUNNER_TEMP/rr-hev/libs" \
+            NDK_OUT="$RUNNER_TEMP/rr-hev/obj" \
+            "APP_CFLAGS=-O3 -DNDEBUG -DPKGNAME=com/rr/client/vpn -DCLSNAME=HevTunnelNative" \
+            "APP_LDFLAGS=-Wl,--build-id=none -Wl,--hash-style=gnu"
+          popd
+
+          hev_so="$RUNNER_TEMP/rr-hev/libs/arm64-v8a/libhev-socks5-tunnel.so"
+          test -s "$hev_so"
+          cp -v "$hev_so" app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
+
+          file app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so | tee build-reports/HEV-FILE.txt
+          grep -q 'ARM aarch64' build-reports/HEV-FILE.txt
+          sha256sum app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so \
+            | tee build-reports/HEV-SHA256.txt
+
       - name: Validate signing secrets and restore keystore
         shell: bash
         env:
@@ -221,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Stable 0.1.8 network invariants.
+          # Stable 0.1.8 system-TUN invariants remain physically available.
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
@@ -230,19 +271,31 @@ jobs:
           grep -q 'selected + SELF_PACKAGE' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'addProperty("stack", "system")' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          if grep -q 'START_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt; then
+          if grep -q 'return START_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt; then
             echo "ERROR: sticky VPN restore path must not return" >&2
             exit 1
           fi
 
-          # New node/subscription features must stay outside the stable VPN core.
+          # Node/subscription features stay outside the stable system data plane.
           grep -q 'LOCAL_PROFILE_ID' app/src/main/java/com/rr/client/subscription/model/SubProfile.kt
           grep -q 'SubscriptionUrlNormalizer' app/src/main/java/com/rr/client/subscription/SubscriptionFetcher.kt
           grep -q 'ClashSubscriptionConverter' app/src/main/java/com/rr/client/subscription/SubscriptionParser.kt
           grep -q 'ScanContract' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
           grep -q 'FAST_FORWARDING' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q '轻量模式' app/src/main/java/com/rr/client/ui/screens/SettingsScreen.kt
           grep -q 'usesCleartextTraffic="true"' app/src/main/AndroidManifest.xml
           grep -q 'android.permission.CAMERA' app/src/main/AndroidManifest.xml
+
+          # HEV is an optional, isolated native data plane.
+          test -s app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
+          test -s app/src/main/assets/licenses/hev-socks5-tunnel-LICENSE.txt
+          grep -q 'TUN_ENGINE_HEV' app/src/main/java/com/rr/client/storage/PreferencesManager.kt
+          grep -q 'ACTION_RESTART_ACTIVE_ENGINE' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
+          grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
+          grep -q 'TProxyStartService' app/src/main/java/com/rr/client/vpn/HevTunnelNative.kt
+          grep -q 'setSession("RRBOX · HEV")' app/src/main/java/com/rr/client/vpn/HevVpnEngine.kt
+          grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
+
           grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'POST_NOTIFICATIONS' app/src/main/java/com/rr/client/MainActivity.kt
           grep -q 'clearApplicationUserData' app/src/main/java/com/rr/client/MainActivity.kt
@@ -288,13 +341,15 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionCode='11'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.2.0-beta1'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionCode='12'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.2.0-beta2'" build-reports/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
           grep -q "uses-permission: name='android.permission.CAMERA'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' build-reports/APK-FILE-LIST.txt
+          grep -q '^lib/arm64-v8a/libhev-socks5-tunnel\.so$' build-reports/APK-FILE-LIST.txt
+          grep -q '^assets/licenses/hev-socks5-tunnel-LICENSE\.txt$' build-reports/APK-FILE-LIST.txt
           grep -q '^assets/rules/geosite-geolocation-cn\.srs$' build-reports/APK-FILE-LIST.txt
           grep -q '^assets/rules/geoip-cn\.srs$' build-reports/APK-FILE-LIST.txt
           if grep -q '^assets/rules/geosite-geolocation-not-cn\.srs$' build-reports/APK-FILE-LIST.txt; then
@@ -321,9 +376,9 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.2.0-beta1 Build Report
+          # RRBOX 0.2.0-beta2 Build Report
 
-          - Status: feature test build; real-device stable baseline remains 0.1.8-stability allow-list hotfix
+          - Status: HEV feature test build; real-device stable baseline remains 0.1.8-stability allow-list hotfix
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
           - Version code: ${version_code}
@@ -332,6 +387,12 @@ jobs:
           - ABI: arm64-v8a only
           - sing-box tag: ${SING_BOX_TAG}
           - sing-box commit: ${SING_BOX_COMMIT}
+          - HEV native commit: ${HEV_COMMIT}
+          - HEV compile: Android NDK, arm64-v8a, -O3, JNI in-process
+          - Forwarding engines: stable sing-box system TUN + optional HEV native/lwIP TUN-to-SOCKS
+          - HEV virtual TUN MTU: 8500
+          - HEV mapped DNS: 198.18.0.2 / 100.64.0.0/10 synthetic mapping
+          - Lightweight mode: lower log overhead and skip optional sniff when smart routing is off
           - Go: $(go version)
           - JDK: $(java -version 2>&1 | head -n 1)
           - Android SDK platform: ${ANDROID_PLATFORM}
@@ -342,24 +403,28 @@ jobs:
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - Stable VPN invariants: system TUN, START_NOT_STICKY, selected proxy + direct topology
-          - Allow-list invariant: selected applications + com.rr.client inside VPN UID set
-          - Node UI: expandable subscription groups + separate local-node group
-          - Local import: QR, clipboard, pasted share/Base64/native sing-box JSON/Clash YAML, manual basic protocols
-          - Subscription URL input: HTTP/HTTPS, IPv4, bracket IPv6, port and scheme-less HTTPS→HTTP fallback
-          - Protocol strategy: native sing-box raw outbound passthrough where possible; libbox checkConfig is authoritative
-          - Experimental fast forwarding: system TUN preserved; warn logging and optional sniff removal when smart routing is off
+          - VPN lifecycle: deterministic START_NOT_STICKY, no stale runtime restore
+          - Stable per-app filtering: system TUN keeps RRBOX in allow-list, real-device verified
+          - HEV per-app filtering: bridge/core UID stays outside the Android VPN to prevent local SOCKS loop
           - Smart routing: SagerNet China geosite + geoip binary rules
           - Notification actions: restart + disconnect
           - PIN lock: PBKDF2 credential + configurable failed-attempt self-wipe policy
+          - Local node hub: subscription groups + local group + QR/clipboard/manual import
+          - Subscription compatibility: normalized HTTP/HTTPS IPv4/IPv6 URLs + Base64/URI/sing-box/Clash-Mihomo parsing
+          - HEV license: MIT notice packaged in assets/licenses
+          - R8/minification: disabled for beta
           - SystemUI/Xposed module: not included
+          - CI verification: unit tests, libbox, HEV native library, SRS assets, signature, package, version and ABI passed
 
-          0.2.0-beta1 requires real-device regression tests before it can replace the 0.1.8 stable baseline.
+          HEV is experimental and is not claimed to be faster until same-device A/B testing is completed.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
           cp build-reports/PACKAGE-REPORT.txt dist/
           cp build-reports/LIBBOX-SHA256.txt dist/
+          cp build-reports/HEV-SHA256.txt dist/
+          cp build-reports/HEV-FILE.txt dist/
+          cp build-reports/HEV.txt dist/
           cp build-reports/CHINA-RULES-SHA256.txt dist/
           cp build-reports/CHINA-RULES-SIZES.txt dist/
           cp build-reports/TOOLCHAIN.txt dist/
@@ -367,7 +432,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.2.0-beta1-arm64-v8a
+          name: RRBOX-0.2.0-beta2-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
