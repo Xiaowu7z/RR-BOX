@@ -20,8 +20,13 @@ class PreferencesManager(private val context: Context) {
     companion object {
         val SELECTED_NODE_ID = stringPreferencesKey("selected_node_id")
         val SMART_ROUTING = booleanPreferencesKey("smart_routing")
+        // Kept for migration/compatibility. User-facing name is now "轻量模式".
         val FAST_FORWARDING = booleanPreferencesKey("fast_forwarding")
+        val TUN_ENGINE = stringPreferencesKey("tun_engine")
         val PER_APP_PROXY_MODE = stringPreferencesKey("per_app_proxy_mode")
+
+        const val TUN_ENGINE_SYSTEM = "SYSTEM"
+        const val TUN_ENGINE_HEV = "HEV"
 
         // Legacy 0.1.6/0.1.7 shared selection. Keep only as a migration seed.
         val PER_APP_SELECTED_PACKAGES = stringSetPreferencesKey("per_app_selected_packages")
@@ -49,6 +54,12 @@ class PreferencesManager(private val context: Context) {
     val selectedNodeId: Flow<String?> = context.dataStore.data.map { it[SELECTED_NODE_ID] }
     val smartRouting: Flow<Boolean> = context.dataStore.data.map { it[SMART_ROUTING] ?: true }
     val fastForwarding: Flow<Boolean> = context.dataStore.data.map { it[FAST_FORWARDING] ?: false }
+    val tunEngine: Flow<String> = context.dataStore.data.map { preferences ->
+        when (preferences[TUN_ENGINE]) {
+            TUN_ENGINE_HEV -> TUN_ENGINE_HEV
+            else -> TUN_ENGINE_SYSTEM
+        }
+    }
     val perAppMode: Flow<String> = context.dataStore.data.map { it[PER_APP_PROXY_MODE] ?: "ALL" }
 
     val proxySelectedAppPackages: Flow<Set<String>> = context.dataStore.data.map { preferences ->
@@ -95,6 +106,14 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setFastForwarding(enabled: Boolean) {
         context.dataStore.edit { it[FAST_FORWARDING] = enabled }
+    }
+
+    suspend fun setTunEngine(engine: String) {
+        val normalized = when (engine) {
+            TUN_ENGINE_HEV -> TUN_ENGINE_HEV
+            else -> TUN_ENGINE_SYSTEM
+        }
+        context.dataStore.edit { it[TUN_ENGINE] = normalized }
     }
 
     suspend fun setPerAppMode(mode: String) {
