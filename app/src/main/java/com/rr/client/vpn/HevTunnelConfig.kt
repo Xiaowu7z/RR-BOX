@@ -1,0 +1,55 @@
+package com.rr.client.vpn
+
+/**
+ * HEV native data-plane profile.
+ *
+ * HEV upstream ships an 8500-byte virtual TUN MTU in its reference config. Compared with the
+ * common 1500-byte Android VPN MTU this reduces user-space TUN packet/syscall churn for TCP-heavy
+ * traffic. This engine is experimental and can always be switched back to the stable system TUN.
+ */
+object HevTunnelConfig {
+    const val MTU = 8500
+    const val IPV4_CLIENT = "198.18.0.1"
+    const val IPV4_PREFIX = 30
+    const val IPV6_CLIENT = "fdfe:dcba:9876::1"
+    const val IPV6_PREFIX = 126
+    const val MAPPED_DNS = "198.18.0.2"
+    const val SOCKS_HOST = "127.0.0.1"
+
+    fun build(socksPort: Int): String = buildString {
+        appendLine("tunnel:")
+        appendLine("  mtu: $MTU")
+        appendLine("  ipv4: $IPV4_CLIENT")
+        appendLine("  ipv6: '$IPV6_CLIENT'")
+        appendLine("  icmp: 'off'")
+        appendLine()
+
+        appendLine("socks5:")
+        appendLine("  port: $socksPort")
+        appendLine("  address: $SOCKS_HOST")
+        appendLine("  udp: 'udp'")
+        appendLine()
+
+        // HEV mapped DNS replies with synthetic A records and converts those destinations back
+        // to domain-form SOCKS5 requests. That preserves sing-box domain routing without an
+        // extra DNS round trip in the TUN -> SOCKS bridge.
+        appendLine("mapdns:")
+        appendLine("  address: $MAPPED_DNS")
+        appendLine("  port: 53")
+        appendLine("  network: 100.64.0.0")
+        appendLine("  netmask: 255.192.0.0")
+        appendLine("  cache-size: 16384")
+        appendLine()
+
+        appendLine("misc:")
+        appendLine("  task-stack-size: 86016")
+        appendLine("  tcp-buffer-size: 131072")
+        appendLine("  udp-recv-buffer-size: 1048576")
+        appendLine("  udp-copy-buffer-nums: 32")
+        appendLine("  max-session-count: 0")
+        appendLine("  connect-timeout: 10000")
+        appendLine("  tcp-read-write-timeout: 300000")
+        appendLine("  udp-read-write-timeout: 60000")
+        appendLine("  log-level: error")
+    }
+}
