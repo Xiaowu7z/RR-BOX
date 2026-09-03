@@ -5,6 +5,7 @@ enum class ProtocolType {
     VLESS_TLS,
     VMESS_WS_ARGO,
     VMESS_TLS,
+    HYSTERIA1,
     HYSTERIA2,
     TUIC_V5,
     ANYTLS,
@@ -12,6 +13,13 @@ enum class ProtocolType {
     NAIVE_H3,
     TROJAN,
     SHADOWSOCKS,
+    SOCKS,
+    HTTP,
+    SSH,
+    WIREGUARD,
+    SHADOWTLS,
+    SNELL,
+    TOR,
     CUSTOM
 }
 
@@ -21,10 +29,18 @@ fun ProtocolType.friendlyLabel(): String = when (this) {
     ProtocolType.VLESS_TLS -> "VLESS-TLS"
     ProtocolType.VMESS_WS_ARGO -> "VMess-WS"
     ProtocolType.VMESS_TLS -> "VMess"
+    ProtocolType.HYSTERIA1 -> "HY1"
     ProtocolType.HYSTERIA2 -> "HY2"
     ProtocolType.TUIC_V5 -> "TUIC"
     ProtocolType.TROJAN -> "Trojan"
     ProtocolType.SHADOWSOCKS -> "SS"
+    ProtocolType.SOCKS -> "SOCKS"
+    ProtocolType.HTTP -> "HTTP"
+    ProtocolType.SSH -> "SSH"
+    ProtocolType.WIREGUARD -> "WG"
+    ProtocolType.SHADOWTLS -> "ShadowTLS"
+    ProtocolType.SNELL -> "Snell"
+    ProtocolType.TOR -> "Tor"
     ProtocolType.ANYTLS -> "AnyTLS"
     ProtocolType.NAIVE_H2, ProtocolType.NAIVE_H3 -> "Naive"
     ProtocolType.CUSTOM -> "自定义"
@@ -59,10 +75,10 @@ data class ProxyNode(
     val hoppingPorts: String = "",
     /** TUIC v5: 若服务端需要 uuid+password 双认证时单独存 password */
     val extraPassword: String = "",
-    /** 所属订阅组 id/名称（多订阅聚合时填充） */
+    /** 所属订阅组 id/名称；本地手动节点使用固定本地组。 */
     val profileId: String = "",
     val profileName: String = "",
-    /** RRVPS sing-box JSON 订阅节点原文，配置生成时优先透传 */
+    /** 完整 sing-box outbound 原文。存在时运行配置优先透传，避免丢失新协议字段。 */
     val rawJson: String = ""
 )
 
