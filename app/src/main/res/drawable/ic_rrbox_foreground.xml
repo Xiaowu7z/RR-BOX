@@ -3,19 +3,23 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Rounded gateway frame -->
     <path
-        android:fillColor="#00161B22"
+        android:fillColor="#00000000"
         android:strokeColor="#FF00E5FF"
         android:strokeWidth="5.5"
+        android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M54,18 L82,34 L82,70 L54,88 L26,70 L26,34 Z" />
+        android:pathData="M34,20 H74 C82,20 88,26 88,34 V74 C88,82 82,88 74,88 H34 C26,88 20,82 20,74 V34 C20,26 26,20 34,20 Z" />
+
+    <!-- Fast outbound arrow -->
     <path
         android:fillColor="#FFF0F6FC"
-        android:pathData="M38,40 L54,31 L70,40 L54,49 Z" />
-    <path
-        android:fillColor="#FF8B949E"
-        android:pathData="M38,50 L54,59 L70,50 L70,58 L54,67 L38,58 Z" />
+        android:pathData="M31,39 H65 L57,31 H69 L82,44 L69,57 H57 L65,49 H31 Z" />
+
+    <!-- Fast return arrow -->
     <path
         android:fillColor="#FF00E5FF"
-        android:pathData="M38,63 L54,72 L70,63 L70,71 L54,80 L38,71 Z" />
+        android:pathData="M77,59 H43 L51,51 H39 L26,64 L39,77 H51 L43,69 H77 Z" />
 </vector>
