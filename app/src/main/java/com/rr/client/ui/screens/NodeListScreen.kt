@@ -2,7 +2,9 @@ package com.rr.client.ui.screens
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -51,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +67,7 @@ import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.friendlyLabel
+import com.rr.client.qr.QrImageDecoder
 import com.rr.client.qr.QrScanActivity
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
@@ -73,6 +77,9 @@ import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.DarkSurfaceVariant
 import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class NodeGroupUi(
     val id: String,
@@ -98,6 +105,7 @@ fun NodeListScreen(
     onGoToSubscription: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
     var showImportMethods by remember { mutableStateOf(false) }
     var showTextImport by remember { mutableStateOf(false) }
@@ -105,6 +113,19 @@ fun NodeListScreen(
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.trim()?.takeIf(String::isNotEmpty)?.let(onImportText)
+    }
+    val qrImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val content = withContext(Dispatchers.IO) {
+                runCatching { QrImageDecoder.decode(context, uri) }.getOrNull()
+            }
+            if (content.isNullOrBlank()) {
+                Toast.makeText(context, "没有识别到二维码，请选择更清晰的原图", Toast.LENGTH_LONG).show()
+            } else {
+                onImportText(content)
+            }
+        }
     }
 
     LaunchedEffect(groups.map { it.id }) {
@@ -214,6 +235,10 @@ fun NodeListScreen(
                         .setBeepEnabled(false)
                         .setOrientationLocked(false)
                 )
+            },
+            onQrImage = {
+                showImportMethods = false
+                qrImageLauncher.launch(arrayOf("image/*"))
             },
             onClipboard = {
                 showImportMethods = false
@@ -397,6 +422,7 @@ private fun NodeCard(
 private fun NodeImportMethodDialog(
     onDismiss: () -> Unit,
     onQr: () -> Unit,
+    onQrImage: () -> Unit,
     onClipboard: () -> Unit,
     onText: () -> Unit,
     onManual: () -> Unit
@@ -409,7 +435,10 @@ private fun NodeImportMethodDialog(
                 Button(onClick = onQr, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.QrCodeScanner, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("二维码：扫描 / 图片读取")
+                    Text("扫描二维码")
+                }
+                OutlinedButton(onClick = onQrImage, modifier = Modifier.fillMaxWidth()) {
+                    Text("从图片文件读取二维码")
                 }
                 OutlinedButton(onClick = onClipboard, modifier = Modifier.fillMaxWidth()) { Text("从剪贴板导入") }
                 OutlinedButton(onClick = onText, modifier = Modifier.fillMaxWidth()) { Text("粘贴 / 输入链接或 JSON") }
