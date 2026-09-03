@@ -44,12 +44,14 @@ fun SettingsScreen(
     ruleSetLastUpdated: Long,
     ruleSetUpdating: Boolean,
     pinEnabled: Boolean,
+    checkingAppUpdate: Boolean,
     onSmartRoutingChanged: (Boolean) -> Unit,
     onRequestBackgroundProtection: () -> Unit,
     onUpdateRuleSets: () -> Unit,
     onEnablePin: () -> Unit,
     onDisablePin: () -> Unit,
-    onChangePin: () -> Unit
+    onChangePin: () -> Unit,
+    onCheckAppUpdate: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -182,6 +184,30 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        SettingsCard {
+            Text(text = "软件更新", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "开源后通过 GitHub Releases 检查正式版本；发现新 APK 后跳转到对应发布页/下载地址。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = onCheckAppUpdate,
+                enabled = !checkingAppUpdate,
+                colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+            ) {
+                Text(
+                    if (checkingAppUpdate) "正在检查…" else "检查软件更新",
+                    color = DarkBackground,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
