@@ -13,8 +13,8 @@ android {
         applicationId = "com.rr.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1-runtimefix"
+        versionCode = 3
+        versionName = "0.1.2-connectivity"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
