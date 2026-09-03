@@ -42,6 +42,7 @@ import java.util.Date
 @Composable
 fun SettingsScreen(
     smartRouting: Boolean,
+    fastForwarding: Boolean,
     backgroundProtected: Boolean,
     ruleSetLastUpdated: Long,
     ruleSetUpdating: Boolean,
@@ -49,6 +50,7 @@ fun SettingsScreen(
     pinMaxFailedAttempts: Int,
     checkingAppUpdate: Boolean,
     onSmartRoutingChanged: (Boolean) -> Unit,
+    onFastForwardingChanged: (Boolean) -> Unit,
     onRequestBackgroundProtection: () -> Unit,
     onUpdateRuleSets: () -> Unit,
     onEnablePin: () -> Unit,
@@ -89,10 +91,7 @@ fun SettingsScreen(
                 Switch(
                     checked = smartRouting,
                     onCheckedChange = onSmartRoutingChanged,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = DarkBackground,
-                        checkedTrackColor = CyanPrimary
-                    )
+                    colors = SwitchDefaults.colors(checkedThumbColor = DarkBackground, checkedTrackColor = CyanPrimary)
                 )
             }
             Spacer(Modifier.height(10.dp))
@@ -117,6 +116,36 @@ fun SettingsScreen(
                     fontWeight = FontWeight.Bold
                 )
             }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        SettingsCard(borderHighlighted = fastForwarding) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = "极速转发（实验）", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                    Text(
+                        text = "保持已验证的 system TUN 与协议核心不变；降低运行日志，并在关闭智能分流时跳过全局流量嗅探，以减少额外 CPU 开销。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+                Switch(
+                    checked = fastForwarding,
+                    onCheckedChange = onFastForwardingChanged,
+                    colors = SwitchDefaults.colors(checkedThumbColor = DarkBackground, checkedTrackColor = CyanPrimary)
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "不承诺固定百分比提升；建议在同一节点、同一网络下与标准模式 / v2rayNG 做实机 A/B。切换时已连接的 VPN 会自动重建。",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -170,10 +199,7 @@ fun SettingsScreen(
                 Switch(
                     checked = pinEnabled,
                     onCheckedChange = { enabled -> if (enabled) onEnablePin() else onDisablePin() },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = DarkBackground,
-                        checkedTrackColor = CyanPrimary
-                    )
+                    colors = SwitchDefaults.colors(checkedThumbColor = DarkBackground, checkedTrackColor = CyanPrimary)
                 )
             }
 
@@ -196,11 +222,7 @@ fun SettingsScreen(
                         enabled = pinMaxFailedAttempts > PreferencesManager.MIN_PIN_MAX_FAILED_ATTEMPTS,
                         onClick = { onPinMaxFailedAttemptsChanged(pinMaxFailedAttempts - 1) }
                     ) { Text("−") }
-                    Text(
-                        "$pinMaxFailedAttempts 次",
-                        color = CyanPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Text("$pinMaxFailedAttempts 次", color = CyanPrimary, fontWeight = FontWeight.Bold)
                     TextButton(
                         enabled = pinMaxFailedAttempts < PreferencesManager.MAX_PIN_MAX_FAILED_ATTEMPTS,
                         onClick = { onPinMaxFailedAttemptsChanged(pinMaxFailedAttempts + 1) }
@@ -226,11 +248,7 @@ fun SettingsScreen(
         SettingsCard {
             Text(text = "软件更新", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                "通过 GitHub Releases 检查正式版本。",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary
-            )
+            Text("通过 GitHub Releases 检查正式版本。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = onCheckAppUpdate,
