@@ -20,7 +20,7 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  OUTPUT_APK_NAME: RRBOX-0.1.8-stability-arm64-v8a.apk
+  OUTPUT_APK_NAME: RRBOX-0.1.9-arm64-v8a.apk
 
 jobs:
   build:
@@ -147,7 +147,6 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
-
           export PATH="$PATH:$(go env GOPATH)/bin"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -162,13 +161,11 @@ jobs:
             sing-box-src
 
           cd sing-box-src
-
           actual_commit="$(git rev-parse HEAD)"
           echo "sing-box commit: ${actual_commit}" | tee ../build-reports/SING-BOX.txt
           test "$actual_commit" = "$SING_BOX_COMMIT"
 
           make lib_install
-
           grep -q 'with_gvisor' cmd/internal/build_libbox/main.go
           grep -q 'with_tailscale' cmd/internal/build_libbox/main.go
           grep -q 'with_naive_outbound' cmd/internal/build_libbox/main.go
@@ -184,14 +181,11 @@ jobs:
           test -s app/libs/libbox.aar
           unzip -Z1 app/libs/libbox.aar | tee build-reports/LIBBOX-AAR-FILES.txt
           grep -q '^jni/arm64-v8a/libbox\.so$' build-reports/LIBBOX-AAR-FILES.txt
-
           if grep -Eq '^jni/(armeabi-v7a|x86|x86_64)/' build-reports/LIBBOX-AAR-FILES.txt; then
             echo "ERROR: libbox.aar contains an unexpected ABI" >&2
             exit 1
           fi
-
           sha256sum app/libs/libbox.aar | tee build-reports/LIBBOX-SHA256.txt
-          ls -lh app/libs/libbox.aar
 
       - name: Validate signing secrets and restore keystore
         shell: bash
@@ -203,7 +197,6 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-
           : "${RR_KEYSTORE_BASE64:?Missing GitHub Secret: RR_KEYSTORE_BASE64}"
           : "${RR_KEYSTORE_PASSWORD:?Missing GitHub Secret: RR_KEYSTORE_PASSWORD}"
           : "${RR_KEY_ALIAS_VALUE:?Missing GitHub Secret: RR_KEY_ALIAS}"
@@ -212,13 +205,11 @@ jobs:
           keystore_path="$RUNNER_TEMP/rr-client-release.jks"
           printf '%s' "$RR_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
           test -s "$keystore_path"
-
           keytool -list \
             -keystore "$keystore_path" \
             -storepass "$RR_KEYSTORE_PASSWORD" \
             -alias "$RR_KEY_ALIAS_VALUE" \
             >/dev/null
-
           echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
 
       - name: Run regression tests and build signed Release APK
@@ -229,11 +220,11 @@ jobs:
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
           grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'buildInterfaceFlags' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
           grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
+          grep -q 'selfPackage' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
           grep -q 'ACTION_RESTART_VPN' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           if grep -q 'START_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt; then
@@ -263,7 +254,6 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
-
           source_apk="app/build/outputs/apk/release/app-release.apk"
           test -s "$source_apk"
 
@@ -286,7 +276,7 @@ jobs:
             | tee build-reports/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" build-reports/PACKAGE-REPORT.txt
-          grep -q "versionName='0.1.8-stability'" build-reports/PACKAGE-REPORT.txt
+          grep -q "versionName='0.1.9'" build-reports/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" build-reports/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee build-reports/APK-FILE-LIST.txt
@@ -297,12 +287,10 @@ jobs:
             echo "ERROR: obsolete not-cn rule is still packaged" >&2
             exit 1
           fi
-
           if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' build-reports/APK-FILE-LIST.txt; then
             echo "ERROR: APK contains an unexpected ABI" >&2
             exit 1
           fi
-
           if grep -Eqi '(^|/)META-INF/xposed(/|$)|XposedProvider|SystemUI.*Hook' build-reports/APK-FILE-LIST.txt; then
             echo "ERROR: APK contains an unexpected Xposed/SystemUI module entry" >&2
             exit 1
@@ -319,7 +307,7 @@ jobs:
           ndk_revision="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "${ANDROID_NDK_HOME}/source.properties" | head -n 1)"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.1.8-stability Build Report
+          # RRBOX 0.1.9 Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package name: ${package_name}
@@ -340,7 +328,8 @@ jobs:
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
           - VPN lifecycle: deterministic START_NOT_STICKY, no stale runtime restore
-          - Per-app filtering: authoritative sing-box TUN include/exclude package fields
+          - Per-app filtering: sing-box TUN include/exclude package fields
+          - Allow-list fix: RRBOX itself stays inside the allowed VPN UID set, matching official SFA behavior
           - Proxy-only and bypass app lists: persisted independently
           - Smart routing: SagerNet China geosite + geoip binary rules
           - Rule updater: atomic runtime replacement with sing-box 1.14 version validation
@@ -350,7 +339,7 @@ jobs:
           - SystemUI/Xposed module: not included
           - CI verification: unit tests, SRS assets, signature, app label, package, version and ABI passed
 
-          Real-device validation remains required for node connectivity, per-app behavior, UI stability and throughput.
+          Allow-list networking was additionally validated on a real Android device with Termux HTTP/HTTPS traffic.
           EOF
 
           cp build-reports/SIGNATURE-REPORT.txt dist/
@@ -363,7 +352,7 @@ jobs:
       - name: Upload APK and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.1.8-stability-arm64-v8a
+          name: RRBOX-0.1.9-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
