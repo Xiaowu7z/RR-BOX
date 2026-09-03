@@ -24,7 +24,9 @@ object ConfigBuilder {
         allNodes: List<ProxyNode>,
         appRoutes: List<AppRouteConfig>,
         smartRouting: Boolean = true,
-        enableDnsRules: Boolean = true
+        enableDnsRules: Boolean = true,
+        perAppMode: String = "ALL",
+        selectedPackages: Set<String> = emptySet()
     ): String {
         val proxy = buildSelectedOutbound(selectedNode)
             ?: throw IllegalArgumentException("节点「${selectedNode.tag}」缺少 sing-box 1.14 可用参数")
@@ -38,7 +40,7 @@ object ConfigBuilder {
                 addProperty("timestamp", true)
             })
 
-            add("dns", buildDnsConfig(selectedNode))
+            add("dns", buildDnsConfig(selectedNode, smartRouting))
 
             add("inbounds", JsonArray().apply {
                 add(JsonObject().apply {
@@ -49,6 +51,7 @@ object ConfigBuilder {
                     addProperty("auto_route", true)
                     addProperty("strict_route", true)
                     addProperty("stack", "system")
+                    applyPerAppMode(this, perAppMode, selectedPackages)
                 })
             })
 
@@ -61,8 +64,6 @@ object ConfigBuilder {
                 })
             })
 
-            // Advanced CN/per-app rules are deliberately deferred until the
-            // minimal real-device tunnel is confirmed working.
             add("route", JsonObject().apply {
                 add("rules", JsonArray().apply {
                     add(JsonObject().apply { addProperty("action", "sniff") })
@@ -72,10 +73,16 @@ object ConfigBuilder {
                             addProperty("action", "hijack-dns")
                         })
                     }
-                    add(JsonObject().apply {
-                        addProperty("ip_is_private", true)
-                        addProperty("outbound", TAG_DIRECT)
-                    })
+                    if (smartRouting) {
+                        add(JsonObject().apply {
+                            addProperty("ip_is_private", true)
+                            addProperty("outbound", TAG_DIRECT)
+                        })
+                        add(JsonObject().apply {
+                            add("domain_suffix", JsonArray().apply { add("cn") })
+                            addProperty("outbound", TAG_DIRECT)
+                        })
+                    }
                 })
                 addProperty("final", TAG_PROXY)
                 addProperty("default_domain_resolver", DNS_DIRECT)
@@ -86,7 +93,30 @@ object ConfigBuilder {
         })
     }
 
-    private fun buildDnsConfig(selectedNode: ProxyNode): JsonObject = JsonObject().apply {
+    private fun applyPerAppMode(tun: JsonObject, mode: String, packages: Set<String>) {
+        val selected = packages.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+            .sorted()
+            .toList()
+
+        when (mode) {
+            "ALL" -> Unit
+            "ALLOW_LIST" -> {
+                require(selected.isNotEmpty()) { "仅选中代理模式至少需要选择 1 个应用" }
+                tun.add("include_package", JsonArray().apply { selected.forEach(::add) })
+            }
+            "DISALLOW_LIST" -> {
+                if (selected.isNotEmpty()) {
+                    tun.add("exclude_package", JsonArray().apply { selected.forEach(::add) })
+                }
+            }
+            else -> throw IllegalArgumentException("未知分应用模式：$mode")
+        }
+    }
+
+    private fun buildDnsConfig(selectedNode: ProxyNode, smartRouting: Boolean): JsonObject = JsonObject().apply {
         add("servers", JsonArray().apply {
             add(JsonObject().apply {
                 addProperty("type", "udp")
@@ -112,6 +142,13 @@ object ConfigBuilder {
             if (!isIpLiteral(selectedNode.server)) {
                 add(JsonObject().apply {
                     add("domain", JsonArray().apply { add(selectedNode.server) })
+                    addProperty("action", "route")
+                    addProperty("server", DNS_DIRECT)
+                })
+            }
+            if (smartRouting) {
+                add(JsonObject().apply {
+                    add("domain_suffix", JsonArray().apply { add("cn") })
                     addProperty("action", "route")
                     addProperty("server", DNS_DIRECT)
                 })
