@@ -1,22 +1,27 @@
 package com.rr.client.traffic
 
 import android.os.SystemClock
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.max
 
 /**
- * TrafficSampler guarantees:
- * 1. Monotonic clock (SystemClock.elapsedRealtime()) for rate calculations.
- * 2. Strict Outbound Proxy sampling, explicitly excluding Direct and Bypass traffic.
- * 3. Anomaly and reset protection (no negative deltas, no multi-GB/s single-frame spikes).
- * 4. Periodic batch DB flush (every 5-10 seconds) without locking the main thread.
+ * Samples cumulative byte counters with a monotonic clock.
+ *
+ * The production VPN service currently receives counters directly from
+ * libbox's CommandStatus stream. This class remains available for components
+ * that need a polling adapter, but it must use the same TrafficSpeed model.
  */
 class TrafficSampler(
     private val scope: CoroutineScope,
-    private val queryProxyStats: () -> Pair<Long, Long>, // returns Pair(cumulativeDown, cumulativeUp) for "proxy" outbound
+    private val queryProxyStats: () -> Pair<Long, Long>,
     private val onBatchFlush: (SessionTraffic) -> Unit
 ) {
     private val _currentSpeed = MutableStateFlow(TrafficSpeed())
@@ -26,13 +31,14 @@ class TrafficSampler(
     val sessionTraffic: StateFlow<SessionTraffic> = _sessionTraffic.asStateFlow()
 
     private var sampleJob: Job? = null
-    private var lastSampleTimeMs: Long = 0L
-    private var lastProxyDown: Long = -1L
-    private var lastProxyUp: Long = -1L
-    private var sessionStartTimeMs: Long = 0L
-    private var lastFlushTimeMs: Long = 0L
+    private var lastSampleTimeMs = 0L
+    private var lastProxyDown = -1L
+    private var lastProxyUp = -1L
+    private var sessionStartTimeMs = 0L
+    private var lastFlushTimeMs = 0L
 
     fun start() {
+        stop(flush = false)
         reset()
         lastSampleTimeMs = SystemClock.elapsedRealtime()
         sessionStartTimeMs = lastSampleTimeMs
@@ -41,15 +47,17 @@ class TrafficSampler(
         sampleJob = scope.launch(Dispatchers.Default) {
             while (isActive) {
                 sample()
-                delay(1000L) // Fixed 1-second cadence
+                delay(1000L)
             }
         }
     }
 
-    fun stop() {
+    fun stop() = stop(flush = true)
+
+    private fun stop(flush: Boolean) {
         sampleJob?.cancel()
         sampleJob = null
-        onBatchFlush(_sessionTraffic.value)
+        if (flush) onBatchFlush(_sessionTraffic.value)
     }
 
     fun reset() {
@@ -66,66 +74,71 @@ class TrafficSampler(
         val (cumDown, cumUp) = queryProxyStats()
 
         if (lastProxyDown < 0L || lastProxyUp < 0L) {
-            // First baseline sample
-            lastProxyDown = cumDown
-            lastProxyUp = cumUp
+            lastProxyDown = cumDown.coerceAtLeast(0L)
+            lastProxyUp = cumUp.coerceAtLeast(0L)
             lastSampleTimeMs = now
             return
         }
 
-        // Compute deltas with counter-reset protection
         val deltaDown = if (cumDown >= lastProxyDown) cumDown - lastProxyDown else 0L
         val deltaUp = if (cumUp >= lastProxyUp) cumUp - lastProxyUp else 0L
 
-        // Protection against impossible single-frame anomalies (> 2GB/s)
         val safeDeltaDown = if (deltaDown > 2_000_000_000L) 0L else deltaDown
         val safeDeltaUp = if (deltaUp > 2_000_000_000L) 0L else deltaUp
 
-        val downSpeed = (safeDeltaDown * 1000L) / deltaMs
-        val upSpeed = (safeDeltaUp * 1000L) / deltaMs
+        val downSpeed = safeRate(safeDeltaDown, deltaMs)
+        val upSpeed = safeRate(safeDeltaUp, deltaMs)
 
-        lastProxyDown = cumDown
-        lastProxyUp = cumUp
+        lastProxyDown = cumDown.coerceAtLeast(0L)
+        lastProxyUp = cumUp.coerceAtLeast(0L)
         lastSampleTimeMs = now
 
         _currentSpeed.value = TrafficSpeed(
             uploadBytesPerSec = upSpeed,
-            downloadBytesPerSec = downSpeed,
-            formattedDownSpeed = formatSpeed(downSpeed),
-            formattedUpSpeed = formatSpeed(upSpeed)
+            downloadBytesPerSec = downSpeed
         )
 
-        val currentSession = _sessionTraffic.value
-        val updatedSession = currentSession.copy(
-            proxyDownloadTotal = currentSession.proxyDownloadTotal + safeDeltaDown,
-            proxyUploadTotal = currentSession.proxyUploadTotal + safeDeltaUp,
-            durationSeconds = (now - sessionStartTimeMs) / 1000L
+        val updatedSession = _sessionTraffic.value.copy(
+            proxyDownloadTotal = _sessionTraffic.value.proxyDownloadTotal + safeDeltaDown,
+            proxyUploadTotal = _sessionTraffic.value.proxyUploadTotal + safeDeltaUp,
+            durationSeconds = (now - sessionStartTimeMs).coerceAtLeast(0L) / 1000L
         )
         _sessionTraffic.value = updatedSession
 
-        // Periodic batch persistence every 5 seconds
         if (now - lastFlushTimeMs >= 5000L) {
             lastFlushTimeMs = now
             onBatchFlush(updatedSession)
         }
     }
 
-    companion object {
-        fun formatSpeed(bytesPerSec: Long): String {
-            return when {
-                bytesPerSec >= 1024 * 1024 * 1024 -> String.format("%.2f GB/s", bytesPerSec / (1024.0 * 1024.0 * 1024.0))
-                bytesPerSec >= 1024 * 1024 -> String.format("%.2f MB/s", bytesPerSec / (1024.0 * 1024.0))
-                bytesPerSec >= 1024 -> String.format("%.1f KB/s", bytesPerSec / 1024.0)
-                else -> "$bytesPerSec B/s"
+    private fun safeRate(bytes: Long, elapsedMs: Long): Long {
+        if (bytes <= 0L || elapsedMs <= 0L) return 0L
+        return runCatching { Math.multiplyExact(bytes, 1000L) / elapsedMs }
+            .getOrElse {
+                (bytes.toDouble() * 1000.0 / elapsedMs.toDouble())
+                    .coerceAtMost(Long.MAX_VALUE.toDouble())
+                    .toLong()
             }
-        }
+    }
+
+    companion object {
+        fun formatSpeed(bytesPerSec: Long): String = TrafficSpeed(
+            downloadBytesPerSec = bytesPerSec.coerceAtLeast(0L)
+        ).formattedDownSpeed
 
         fun formatBytes(bytes: Long): String {
+            val safeBytes = bytes.coerceAtLeast(0L)
             return when {
-                bytes >= 1024L * 1024L * 1024L -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
-                bytes >= 1024L * 1024L -> String.format("%.2f MB", bytes / (1024.0 * 1024.0))
-                bytes >= 1024L -> String.format("%.1f KB", bytes / 1024.0)
-                else -> "$bytes B"
+                safeBytes >= 1024L * 1024L * 1024L -> String.format(
+                    "%.2f GB",
+                    safeBytes / (1024.0 * 1024.0 * 1024.0)
+                )
+                safeBytes >= 1024L * 1024L -> String.format(
+                    "%.2f MB",
+                    safeBytes / (1024.0 * 1024.0)
+                )
+                safeBytes >= 1024L -> String.format("%.1f KB", safeBytes / 1024.0)
+                else -> "$safeBytes B"
             }
         }
     }
