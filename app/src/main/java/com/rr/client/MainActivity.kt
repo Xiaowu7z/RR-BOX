@@ -52,7 +52,6 @@ import com.rr.client.security.PinSecurity
 import com.rr.client.subscription.SubscriptionFetcher
 import com.rr.client.subscription.model.SubProfile
 import com.rr.client.ui.components.NodeEditDialog
-import com.rr.client.ui.components.PinLockUiKt
 import com.rr.client.ui.components.PinSetupDialog
 import com.rr.client.ui.components.PinUnlockScreen
 import com.rr.client.ui.screens.AppRoutingScreen
@@ -63,6 +62,7 @@ import com.rr.client.ui.screens.SubscriptionScreen
 import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.RRClientTheme
+import com.rr.client.update.AppUpdateChecker
 import com.rr.client.vpn.RRNotificationManager
 import com.rr.client.vpn.RRVpnService
 import io.nekohasekai.libbox.Libbox
@@ -172,8 +172,8 @@ class MainActivity : ComponentActivity() {
                     verifying = verifying,
                     errorMessage = unlockError,
                     onUnlock = { pin ->
-                        if (verifying) return@PinUnlockScreen
                         lifecycleScope.launch {
+                            if (verifying) return@launch
                             verifying = true
                             val salt = runCatching { prefs.pinSalt.first() }.getOrNull()
                             val hash = runCatching { prefs.pinHash.first() }.getOrNull()
@@ -225,6 +225,7 @@ class MainActivity : ComponentActivity() {
         var applyingRouting by remember { mutableStateOf(false) }
         var pendingReconnectAfterSelection by remember { mutableStateOf(false) }
         var updatingRuleSets by remember { mutableStateOf(false) }
+        var checkingAppUpdate by remember { mutableStateOf(false) }
         var showPinSetup by remember { mutableStateOf(false) }
 
         val baseNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
@@ -259,8 +260,6 @@ class MainActivity : ComponentActivity() {
             val appMgr = AppManager(this@MainActivity)
             apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
 
-            // Copy the signed build-time snapshot into private storage. Failure
-            // falls back to the lightweight .cn rule instead of blocking VPN.
             withContext(Dispatchers.IO) {
                 ChinaRuleSetManager.ensureBundled(this@MainActivity)
             }
@@ -554,6 +553,7 @@ class MainActivity : ComponentActivity() {
                         ruleSetLastUpdated = ruleSetLastUpdated,
                         ruleSetUpdating = updatingRuleSets,
                         pinEnabled = pinEnabled,
+                        checkingAppUpdate = checkingAppUpdate,
                         onSmartRoutingChanged = { enabled ->
                             smartRouting = enabled
                             lifecycleScope.launch { prefs.setSmartRouting(enabled) }
@@ -561,17 +561,18 @@ class MainActivity : ComponentActivity() {
                         },
                         onRequestBackgroundProtection = { requestBackgroundProtection() },
                         onUpdateRuleSets = {
-                            if (updatingRuleSets) return@SettingsScreen
-                            updatingRuleSets = true
-                            lifecycleScope.launch {
-                                val result = ChinaRuleSetManager.update(this@MainActivity)
-                                updatingRuleSets = false
-                                result.onSuccess { update ->
-                                    prefs.setChinaRuleSetLastUpdated(update.updatedAtMillis)
-                                    toast("中国规则更新成功，共 ${update.totalBytes / 1024} KB")
-                                    scheduleRoutingApply(perAppMode, selectedAppPackages, smartRouting)
-                                }.onFailure { error ->
-                                    toast("规则更新失败，已保留旧规则：${error.message ?: "网络错误"}")
+                            if (!updatingRuleSets) {
+                                updatingRuleSets = true
+                                lifecycleScope.launch {
+                                    val result = ChinaRuleSetManager.update(this@MainActivity)
+                                    updatingRuleSets = false
+                                    result.onSuccess { update ->
+                                        prefs.setChinaRuleSetLastUpdated(update.updatedAtMillis)
+                                        toast("中国规则更新成功，共 ${update.totalBytes / 1024} KB")
+                                        scheduleRoutingApply(perAppMode, selectedAppPackages, smartRouting)
+                                    }.onFailure { error ->
+                                        toast("规则更新失败，已保留旧规则：${error.message ?: "网络错误"}")
+                                    }
                                 }
                             }
                         },
@@ -584,7 +585,36 @@ class MainActivity : ComponentActivity() {
                                 toast("软件 PIN 锁已关闭")
                             }
                         },
-                        onChangePin = { showPinSetup = true }
+                        onChangePin = { showPinSetup = true },
+                        onCheckAppUpdate = {
+                            if (!checkingAppUpdate) {
+                                checkingAppUpdate = true
+                                lifecycleScope.launch {
+                                    val result = AppUpdateChecker.check(BuildConfig.VERSION_NAME)
+                                    checkingAppUpdate = false
+                                    result.onSuccess { update ->
+                                        if (update.updateAvailable) {
+                                            AlertDialog.Builder(this@MainActivity)
+                                                .setTitle("发现 RRBOX 新版本 ${update.latestVersion}")
+                                                .setMessage(update.releaseName)
+                                                .setPositiveButton("下载更新") { _, _ ->
+                                                    runCatching {
+                                                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
+                                                    }.onFailure { error ->
+                                                        toast("无法打开下载地址：${error.message ?: "未知错误"}")
+                                                    }
+                                                }
+                                                .setNegativeButton("稍后", null)
+                                                .show()
+                                        } else {
+                                            toast("当前已是最新版：${BuildConfig.VERSION_NAME}")
+                                        }
+                                    }.onFailure { error ->
+                                        toast("检查更新失败：${error.message ?: "网络错误"}")
+                                    }
+                                }
+                            }
+                        }
                     )
                 }
             }
