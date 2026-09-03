@@ -75,9 +75,7 @@ class RRVpnService : VpnService() {
         fun getService(): RRVpnService = this@RRVpnService
     }
 
-    override fun onBind(intent: Intent): IBinder {
-        return super.onBind(intent) ?: binder
-    }
+    override fun onBind(intent: Intent): IBinder = super.onBind(intent) ?: binder
 
     override fun onCreate() {
         super.onCreate()
@@ -99,10 +97,21 @@ class RRVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
+        // Every startForegroundService() path must enter foreground first.
+        // Do not let missing/invalid extras recreate ForegroundServiceDidNotStartInTimeException.
+        activeNodeTag = intent?.getStringExtra(EXTRA_NODE_TAG) ?: "RRVPS-Node"
+        val initialNotification = notificationMgr.buildNotification(
+            "$activeNodeTag · 正在启动",
+            TrafficSpeed(),
+            0L
+        )
+        startForeground(RRNotificationManager.NOTIFICATION_ID, initialNotification)
+
         val configJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
         if (configJson.isNullOrBlank()) {
             _lastError.value = "没有收到可运行的 sing-box 配置"
             Log.e(TAG, _lastError.value.orEmpty())
+            stopForeground(Service.STOP_FOREGROUND_REMOVE)
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -112,22 +121,12 @@ class RRVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        activeNodeTag = intent.getStringExtra(EXTRA_NODE_TAG) ?: "RRVPS-Node"
         activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
         resetTrafficState()
         stopping = false
         sessionPersisted = false
         _lastError.value = null
         _isStarting.value = true
-
-        // Must happen immediately after startForegroundService(). Native config
-        // validation and libbox startup only run after the foreground state exists.
-        val initialNotification = notificationMgr.buildNotification(
-            "$activeNodeTag · 正在启动",
-            TrafficSpeed(),
-            0L
-        )
-        startForeground(RRNotificationManager.NOTIFICATION_ID, initialNotification)
 
         startJob = serviceScope.launch {
             val started = withContext(Dispatchers.IO) {
