@@ -8,14 +8,14 @@ class PerAppPolicyTest {
     private val self = "com.rr.client"
 
     @Test
-    fun allModeExcludesOnlySelf() {
+    fun allModeHasNoApplicationFilter() {
         val result = PerAppPolicyResolver.resolve(
             PerAppPolicyResolver.MODE_ALL,
             setOf("org.telegram.messenger"),
             self
         )
         assertTrue(result.allowedPackages.isEmpty())
-        assertEquals(listOf(self), result.disallowedPackages)
+        assertTrue(result.disallowedPackages.isEmpty())
     }
 
     @Test
@@ -42,13 +42,13 @@ class PerAppPolicyTest {
     }
 
     @Test
-    fun bypassModeExcludesSelectedAppsAndSelf() {
+    fun bypassModeExcludesOnlySelectedApps() {
         val result = PerAppPolicyResolver.resolve(
             PerAppPolicyResolver.MODE_DISALLOW_LIST,
-            setOf("com.example.direct"),
+            setOf("com.example.direct", self),
             self
         )
         assertTrue(result.allowedPackages.isEmpty())
-        assertEquals(setOf("com.example.direct", self), result.disallowedPackages.toSet())
+        assertEquals(listOf("com.example.direct"), result.disallowedPackages)
     }
 }
