@@ -14,9 +14,10 @@ import com.rr.client.traffic.TrafficSpeed
 
 class RRNotificationManager(private val context: Context) {
     companion object {
-        const val CHANNEL_ID = "rr_client_status_channel"
+        const val CHANNEL_ID = "rrbox_status_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP_VPN = "com.rr.client.ACTION_STOP_VPN"
+        const val ACTION_RESTART_VPN = "com.rr.client.ACTION_RESTART_VPN"
     }
 
     private val notificationManager =
@@ -58,12 +59,22 @@ class RRNotificationManager(private val context: Context) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val restartIntent = Intent(context, RRVpnService::class.java).apply {
+            action = ACTION_RESTART_VPN
+        }
+        val pendingRestart = PendingIntent.getService(
+            context,
+            1,
+            restartIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         val stopIntent = Intent(context, RRVpnService::class.java).apply {
             action = ACTION_STOP_VPN
         }
         val pendingStop = PendingIntent.getService(
             context,
-            1,
+            2,
             stopIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -85,6 +96,7 @@ class RRNotificationManager(private val context: Context) {
             .setContentIntent(pendingOpenApp)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .addAction(0, context.getString(R.string.action_restart), pendingRestart)
             .addAction(0, context.getString(R.string.action_stop), pendingStop)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
