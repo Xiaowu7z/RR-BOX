@@ -22,12 +22,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rr.client.BuildConfig
+import com.rr.client.storage.PreferencesManager
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
 import com.rr.client.ui.theme.DarkBackground
@@ -44,6 +46,7 @@ fun SettingsScreen(
     ruleSetLastUpdated: Long,
     ruleSetUpdating: Boolean,
     pinEnabled: Boolean,
+    pinMaxFailedAttempts: Int,
     checkingAppUpdate: Boolean,
     onSmartRoutingChanged: (Boolean) -> Unit,
     onRequestBackgroundProtection: () -> Unit,
@@ -51,6 +54,7 @@ fun SettingsScreen(
     onEnablePin: () -> Unit,
     onDisablePin: () -> Unit,
     onChangePin: () -> Unit,
+    onPinMaxFailedAttemptsChanged: (Int) -> Unit,
     onCheckAppUpdate: () -> Unit
 ) {
     Column(
@@ -77,7 +81,7 @@ fun SettingsScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(text = "中国大陆智能分流", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                     Text(
-                        text = "使用 SagerNet 二进制规则集识别中国大陆域名与 IP；局域网也保持直连。",
+                        text = "使用维护中的 SagerNet 中国域名与 IP 二进制规则集；局域网地址保持直连。",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -96,7 +100,7 @@ fun SettingsScreen(
                 text = if (ruleSetLastUpdated > 0L) {
                     "本地规则更新时间：${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(ruleSetLastUpdated))}"
                 } else {
-                    "使用 APK 内置规则快照；首次运行会初始化。"
+                    "使用 APK 内置规则快照；可手动更新。"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
@@ -122,21 +126,24 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = if (backgroundProtected) {
-                    "已允许 RRBOX 不受 Android 电池优化限制，适合长期保持 VPN。"
+                    "已允许 RRBOX 不受 Android 电池优化限制。"
                 } else {
-                    "当前可能受系统电池优化影响。建议允许 RRBOX 不受电池优化限制，减少息屏或后台时被系统停止。"
+                    "建议允许 RRBOX 不受电池优化限制，减少息屏或后台时被系统停止。"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
-            if (!backgroundProtected) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Button(
-                    onClick = onRequestBackgroundProtection,
-                    colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
-                ) {
-                    Text("去授权", color = DarkBackground, fontWeight = FontWeight.Bold)
-                }
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = onRequestBackgroundProtection,
+                enabled = !backgroundProtected,
+                colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+            ) {
+                Text(
+                    if (backgroundProtected) "已授权" else "去授权",
+                    color = DarkBackground,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
 
@@ -152,9 +159,9 @@ fun SettingsScreen(
                     Text(text = "软件 PIN 锁", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                     Text(
                         text = if (pinEnabled) {
-                            "已开启。RRBOX 界面重新进入前台时需要 PIN；已运行的 VPN 不会被锁屏停止。"
+                            "重新进入 RRBOX 前先显示锁屏，不会先闪出内部界面。"
                         } else {
-                            "可选的 4-8 位数字 PIN。凭据使用 PBKDF2 加盐校验，不保存明文 PIN。"
+                            "可选 4-8 位数字 PIN；只保存 PBKDF2 加盐校验值。"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
@@ -169,21 +176,49 @@ fun SettingsScreen(
                     )
                 )
             }
-            if (pinEnabled) {
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = onChangePin,
-                    colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
-                ) {
-                    Text("修改 PIN", color = DarkBackground, fontWeight = FontWeight.Bold)
+
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("错误次数保护", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "连续输错达到设定次数后，自动清除 RRBOX 自身内部数据并恢复首次安装状态。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        enabled = pinMaxFailedAttempts > PreferencesManager.MIN_PIN_MAX_FAILED_ATTEMPTS,
+                        onClick = { onPinMaxFailedAttemptsChanged(pinMaxFailedAttempts - 1) }
+                    ) { Text("−") }
+                    Text(
+                        "$pinMaxFailedAttempts 次",
+                        color = CyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        enabled = pinMaxFailedAttempts < PreferencesManager.MAX_PIN_MAX_FAILED_ATTEMPTS,
+                        onClick = { onPinMaxFailedAttemptsChanged(pinMaxFailedAttempts + 1) }
+                    ) { Text("+") }
                 }
             }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "忘记 PIN 时只能清除 RRBOX 应用数据重新配置。",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary
-            )
+
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = if (pinEnabled) onChangePin else onEnablePin,
+                colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+            ) {
+                Text(
+                    if (pinEnabled) "修改 PIN" else "设置 PIN",
+                    color = DarkBackground,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -192,7 +227,7 @@ fun SettingsScreen(
             Text(text = "软件更新", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "开源后通过 GitHub Releases 检查正式版本；发现新 APK 后跳转到对应发布页/下载地址。",
+                "通过 GitHub Releases 检查正式版本。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
