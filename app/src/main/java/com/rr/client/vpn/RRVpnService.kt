@@ -112,6 +112,8 @@ class RRVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand startId=$startId action=${intent?.action ?: "START"}")
+
         when (intent?.action) {
             RRNotificationManager.ACTION_STOP_VPN -> {
                 stopVpn(persistTraffic = true)
@@ -155,11 +157,33 @@ class RRVpnService : VpnService() {
         }
 
         val configJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
-        activeNodeTag = intent?.getStringExtra(EXTRA_NODE_TAG)?.takeIf(String::isNotBlank)
-            ?: activeNodeTag.ifBlank { "RRBOX-Node" }
-        if (intent?.hasExtra(EXTRA_NODE_ID) == true) {
-            activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
+        val requestedNodeTag = intent?.getStringExtra(EXTRA_NODE_TAG)?.takeIf(String::isNotBlank)
+        val requestedNodeId = if (intent?.hasExtra(EXTRA_NODE_ID) == true) {
+            intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
+        } else {
+            null
         }
+
+        val hasLiveDataPlane = _isRunning.value || _isStarting.value ||
+            boxCore?.isCoreRunning() == true || hevEngine?.isRunning == true
+        val duplicateEquivalentStart = hasLiveDataPlane &&
+            !configJson.isNullOrBlank() &&
+            configJson == activeConfigJson
+
+        requestedNodeTag?.let { activeNodeTag = it }
+        requestedNodeId?.let { activeNodeId = it }
+
+        if (duplicateEquivalentStart) {
+            val stateLabel = if (_isRunning.value) "已连接" else "正在启动"
+            ensureForeground("$activeNodeTag · $stateLabel")
+            Log.d(
+                TAG,
+                "Ignoring duplicate equivalent VPN start request: node=$activeNodeTag id=$activeNodeId"
+            )
+            return START_NOT_STICKY
+        }
+
+        activeNodeTag = requestedNodeTag ?: activeNodeTag.ifBlank { "RRBOX-Node" }
 
         ensureForeground("$activeNodeTag · 正在启动")
 
