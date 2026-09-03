@@ -32,6 +32,7 @@ object ConfigBuilder {
         enableDnsRules: Boolean = true,
         perAppMode: String = PerAppPolicyResolver.MODE_ALL,
         selectedPackages: Set<String> = emptySet(),
+        fastForwarding: Boolean = false,
         ruleSets: ChinaRuleSetManager.Paths? = null
     ): String {
         val proxy = buildSelectedOutbound(selectedNode)
@@ -42,7 +43,9 @@ object ConfigBuilder {
 
         return gson.toJson(JsonObject().apply {
             add("log", JsonObject().apply {
-                addProperty("level", "info")
+                // Fast mode never changes the TUN engine/outbound path. It only cuts
+                // optional observability work so the known-good data plane is preserved.
+                addProperty("level", if (fastForwarding) "warn" else "info")
                 addProperty("timestamp", true)
             })
 
@@ -61,7 +64,7 @@ object ConfigBuilder {
                 })
             })
 
-            // Preserve the known-good 0.1.4/0.1.6 topology: selected proxy + direct only.
+            // Preserve the known-good 0.1.8 topology: selected proxy + direct only.
             add("outbounds", JsonArray().apply {
                 add(proxy)
                 add(JsonObject().apply {
@@ -72,7 +75,11 @@ object ConfigBuilder {
 
             add("route", JsonObject().apply {
                 add("rules", JsonArray().apply {
-                    add(JsonObject().apply { addProperty("action", "sniff") })
+                    // Domain sniffing is still mandatory when smart domain routing is on.
+                    // With smart routing off, fast mode can skip this per-flow inspection.
+                    if (!fastForwarding || smartRouting) {
+                        add(JsonObject().apply { addProperty("action", "sniff") })
+                    }
                     if (enableDnsRules) {
                         add(JsonObject().apply {
                             addProperty("protocol", "dns")
@@ -131,9 +138,8 @@ object ConfigBuilder {
             PerAppPolicyResolver.MODE_ALL -> Unit
             PerAppPolicyResolver.MODE_ALLOW_LIST -> {
                 require(selected.isNotEmpty()) { "仅选中代理模式至少需要选择 1 个应用" }
-                // Match the official SFA behavior: in include mode the VPN app itself
-                // must stay inside the VPN UID set. Its outbound sockets are then
-                // released to the physical network with VpnService.protect(fd).
+                // Real-device verified: include mode must keep RRBOX itself in the VPN
+                // UID set; RRBOX outbound sockets are then released with protect(fd).
                 val allowed = (selected + SELF_PACKAGE).distinct().sorted()
                 tun.add("include_package", JsonArray().apply { allowed.forEach(::add) })
             }
@@ -208,21 +214,29 @@ object ConfigBuilder {
     }
 
     /**
-     * RRVPS JSON is already protocol-complete, so preserve it after sanitizing
-     * version-specific fields. URI-derived nodes have no raw JSON and use the
-     * explicit fallback builders below.
+     * Native sing-box JSON is protocol-complete, so preserve it after sanitizing
+     * version-specific fields. Share-link nodes that can be represented directly
+     * keep raw JSON as well; older basic links still use fallback builders.
      */
     private fun buildSelectedOutbound(node: ProxyNode): JsonObject? {
         if (node.rawJson.isNotBlank()) {
             val expectedType = when (node.type) {
                 ProtocolType.VLESS_REALITY, ProtocolType.VLESS_TLS -> "vless"
                 ProtocolType.VMESS_WS_ARGO, ProtocolType.VMESS_TLS -> "vmess"
+                ProtocolType.HYSTERIA1 -> "hysteria"
                 ProtocolType.HYSTERIA2 -> "hysteria2"
                 ProtocolType.TUIC_V5 -> "tuic"
                 ProtocolType.ANYTLS -> "anytls"
                 ProtocolType.NAIVE_H2, ProtocolType.NAIVE_H3 -> "naive"
                 ProtocolType.TROJAN -> "trojan"
                 ProtocolType.SHADOWSOCKS -> "shadowsocks"
+                ProtocolType.SOCKS -> "socks"
+                ProtocolType.HTTP -> "http"
+                ProtocolType.SSH -> "ssh"
+                ProtocolType.WIREGUARD -> "wireguard"
+                ProtocolType.SHADOWTLS -> "shadowtls"
+                ProtocolType.SNELL -> "snell"
+                ProtocolType.TOR -> "tor"
                 ProtocolType.CUSTOM -> null
             }
             val raw = buildRawOutbound(node, expectedType)
@@ -236,9 +250,17 @@ object ConfigBuilder {
             ProtocolType.VMESS_TLS, ProtocolType.VMESS_WS_ARGO -> buildVmess(node)
             ProtocolType.TROJAN -> buildTrojan(node)
             ProtocolType.SHADOWSOCKS -> buildShadowsocks(node)
+            ProtocolType.HYSTERIA1,
             ProtocolType.ANYTLS,
             ProtocolType.NAIVE_H2,
             ProtocolType.NAIVE_H3,
+            ProtocolType.SOCKS,
+            ProtocolType.HTTP,
+            ProtocolType.SSH,
+            ProtocolType.WIREGUARD,
+            ProtocolType.SHADOWTLS,
+            ProtocolType.SNELL,
+            ProtocolType.TOR,
             ProtocolType.CUSTOM -> null
         }
     }
@@ -509,7 +531,7 @@ object ConfigBuilder {
         return parts.size == 4 && parts.all { it.toIntOrNull()?.let { n -> n in 0..255 } == true }
     }
 
-    private val INTERNAL_OUTBOUND_TYPES = setOf(
-        "direct", "block", "dns", "selector", "urltest", "http", "socks", "wireguard", "ssh"
-    )
+    /** Only true control/system outbounds are rejected. Valid proxy outbounds such
+     * as HTTP/SOCKS/SSH/WireGuard are allowed when they come from native raw JSON. */
+    private val INTERNAL_OUTBOUND_TYPES = setOf("direct", "block", "dns", "selector", "urltest")
 }
