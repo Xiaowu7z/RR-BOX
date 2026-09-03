@@ -1,5 +1,6 @@
 package com.rr.client.ui.screens
 
+import android.content.Intent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -19,16 +20,23 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.rr.client.BuildConfig
+import com.rr.client.RRApplication
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
@@ -36,6 +44,9 @@ import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
+import com.rr.client.vpn.HevTunnelConfig
+import com.rr.client.vpn.RRVpnService
+import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 
@@ -59,6 +70,26 @@ fun SettingsScreen(
     onPinMaxFailedAttemptsChanged: (Int) -> Unit,
     onCheckAppUpdate: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val preferences = RRApplication.instance.preferencesManager
+    val tunEngine by preferences.tunEngine.collectAsState(initial = PreferencesManager.TUN_ENGINE_SYSTEM)
+
+    fun switchTunEngine(engine: String) {
+        if (engine == tunEngine) return
+        scope.launch {
+            preferences.setTunEngine(engine)
+            if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, RRVpnService::class.java).apply {
+                        action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
+                    }
+                )
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -127,9 +158,9 @@ fun SettingsScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "极速转发（实验）", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                    Text(text = "轻量模式", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                     Text(
-                        text = "保持已验证的 system TUN 与协议核心不变；降低运行日志，并在关闭智能分流时跳过全局流量嗅探，以减少额外 CPU 开销。",
+                        text = "不改变 TUN 引擎与节点协议；降低运行日志，并在关闭智能分流时跳过全局流量嗅探，减少额外 CPU 开销。",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -142,7 +173,60 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "不承诺固定百分比提升；建议在同一节点、同一网络下与标准模式 / v2rayNG 做实机 A/B。切换时已连接的 VPN 会自动重建。",
+                "它是低开销模式，不等同于下面的 HEV 底层极速引擎；两者可以同时开启。",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        SettingsCard(borderHighlighted = tunEngine == PreferencesManager.TUN_ENGINE_HEV) {
+            Text(text = "转发引擎", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = if (tunEngine == PreferencesManager.TUN_ENGINE_HEV) {
+                    "当前：HEV 极速引擎。Android TUN 交给 native C/lwIP，再通过本机 SOCKS5 进入 sing-box。"
+                } else {
+                    "当前：稳定引擎。使用已实机验证的 sing-box system TUN 数据面。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (tunEngine == PreferencesManager.TUN_ENGINE_SYSTEM) {
+                    Button(
+                        onClick = {},
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                    ) { Text("稳定模式", color = DarkBackground, fontWeight = FontWeight.Bold) }
+                } else {
+                    OutlinedButton(
+                        onClick = { switchTunEngine(PreferencesManager.TUN_ENGINE_SYSTEM) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("稳定模式") }
+                }
+
+                if (tunEngine == PreferencesManager.TUN_ENGINE_HEV) {
+                    Button(
+                        onClick = {},
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                    ) { Text("HEV 极速", color = DarkBackground, fontWeight = FontWeight.Bold) }
+                } else {
+                    OutlinedButton(
+                        onClick = { switchTunEngine(PreferencesManager.TUN_ENGINE_HEV) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("HEV 极速") }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "HEV 模式使用 ${HevTunnelConfig.MTU} MTU、mapped DNS 与加大的 native 缓冲区来降低 TUN 数据面的包处理开销。属于实验引擎；切换会自动重建当前 VPN，稳定模式始终保留。",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
@@ -270,6 +354,7 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(4.dp))
             Text(text = "版本: ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "sing-box 内核: v1.14.0", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            Text(text = "转发引擎: system TUN / HEV native", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "运行方式: Android 标准 VpnService", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "最低系统: Android 8.0 (API 26)", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "当前构建架构: arm64-v8a", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
