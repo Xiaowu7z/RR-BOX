@@ -111,12 +111,14 @@ fun NodeListScreen(
         result.contents?.trim()?.takeIf(String::isNotEmpty)?.let(onImportText)
     }
 
-    LaunchedEffect(groups.map { it.id }, selectedNodeId) {
-        groups.forEachIndexed { index, group ->
-            if (!expanded.containsKey(group.id)) {
-                expanded[group.id] = group.nodes.any { it.id == selectedNodeId } ||
-                    group.isLocal || (selectedNodeId == null && index == 0)
-            }
+    // Keep the node page visually calm: every newly seen group starts collapsed.
+    // User expansion is preserved while the screen is alive; refreshing a subscription
+    // does not force the selected/local group open again.
+    LaunchedEffect(groups.map { it.id }) {
+        val liveIds = groups.mapTo(linkedSetOf()) { it.id }
+        expanded.keys.toList().filterNot(liveIds::contains).forEach(expanded::remove)
+        groups.forEach { group ->
+            if (!expanded.containsKey(group.id)) expanded[group.id] = false
         }
     }
 
