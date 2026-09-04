@@ -19,23 +19,23 @@ class LabModelsTest {
     }
 
     @Test
-    fun summarizeBenchmarkHistory_usesOnlyV27VerifiedRecords() {
+    fun summarizeBenchmarkHistory_usesOnlyV28CandidateRecords() {
         val system = verifiedSample("SYSTEM")
         val hev = verifiedSample("HEV")
-        val v27a = EngineBenchmarkReport(
-            benchmarkVersion = 9,
+        val v28a = EngineBenchmarkReport(
+            benchmarkVersion = 10,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "SYSTEM",
-            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting",
+            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting · HEV candidate=SOCKS5 pipeline + client TFO",
             executionOrder = "HEV → SYSTEM",
             system = system,
             hev = hev
         )
-        val v27b = v27a.copy(executionOrder = "SYSTEM → HEV")
-        val oldV26 = v27a.copy(benchmarkVersion = 8)
+        val v28b = v28a.copy(executionOrder = "SYSTEM → HEV")
+        val oldV27 = v28a.copy(benchmarkVersion = 9)
 
-        val summary = summarizeBenchmarkHistory(listOf(oldV26, v27a, v27b))
+        val summary = summarizeBenchmarkHistory(listOf(oldV27, v28a, v28b))
         assertNotNull(summary)
         assertEquals(2, summary!!.runs)
         assertEquals(1, summary.systemFirstRuns)
@@ -60,11 +60,11 @@ class LabModelsTest {
             }
         )
         val report = EngineBenchmarkReport(
-            benchmarkVersion = 9,
+            benchmarkVersion = 10,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "HEV",
-            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting",
+            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting · HEV candidate=SOCKS5 pipeline + client TFO",
             executionOrder = "SYSTEM → HEV",
             system = system,
             hev = hev
@@ -92,7 +92,7 @@ class LabModelsTest {
     }
 
     @Test
-    fun v27TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
+    fun v28TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
         val sample = verifiedSample("SYSTEM")
         assertNull(sample.httpsDnsMedianMillis)
         assertEquals(6L, sample.httpsTcpMedianMillis)
