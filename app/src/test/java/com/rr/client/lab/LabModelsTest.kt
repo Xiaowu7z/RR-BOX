@@ -19,31 +19,35 @@ class LabModelsTest {
     }
 
     @Test
-    fun summarizeBenchmarkHistory_usesOnlyV26VerifiedRecords() {
+    fun summarizeBenchmarkHistory_usesOnlyV27VerifiedRecords() {
         val system = verifiedSample("SYSTEM")
         val hev = verifiedSample("HEV")
-        val v26 = EngineBenchmarkReport(
-            benchmarkVersion = 8,
+        val v27a = EngineBenchmarkReport(
+            benchmarkVersion = 9,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "SYSTEM",
-            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + settled accounting",
+            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting",
             executionOrder = "HEV → SYSTEM",
             system = system,
             hev = hev
         )
-        val oldV25 = v26.copy(benchmarkVersion = 7)
+        val v27b = v27a.copy(executionOrder = "SYSTEM → HEV")
+        val oldV26 = v27a.copy(benchmarkVersion = 8)
 
-        val summary = summarizeBenchmarkHistory(listOf(oldV25, v26))
+        val summary = summarizeBenchmarkHistory(listOf(oldV26, v27a, v27b))
         assertNotNull(summary)
-        assertEquals(1, summary!!.runs)
-        assertEquals(3, summary.system.httpsSuccessRounds)
-        assertEquals(3, summary.system.proxyVerifiedRounds)
-        assertEquals(3, summary.hev.nativeVerifiedRounds)
+        assertEquals(2, summary!!.runs)
+        assertEquals(1, summary.systemFirstRuns)
+        assertEquals(1, summary.hevFirstRuns)
+        assertEquals(6, summary.system.httpsSuccessRounds)
+        assertEquals(6, summary.system.proxyVerifiedRounds)
+        assertEquals(6, summary.hev.nativeVerifiedRounds)
         assertEquals(210.0, summary.system.tlsMillis!!.median, 0.001)
         assertEquals(50.0, summary.system.cpuMillis!!.median, 0.001)
         assertEquals(190_000.0, summary.system.pssKb!!.median, 0.001)
         assertEquals(10_000.0, summary.system.pssDeltaKb!!.median, 0.001)
+        assertEquals(1_300.0, summary.system.accountingWaitMillis!!.median, 0.001)
     }
 
     @Test
@@ -56,11 +60,11 @@ class LabModelsTest {
             }
         )
         val report = EngineBenchmarkReport(
-            benchmarkVersion = 8,
+            benchmarkVersion = 9,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "HEV",
-            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + settled accounting",
+            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting",
             executionOrder = "SYSTEM → HEV",
             system = system,
             hev = hev
@@ -88,7 +92,7 @@ class LabModelsTest {
     }
 
     @Test
-    fun v26TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
+    fun v27TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
         val sample = verifiedSample("SYSTEM")
         assertNull(sample.httpsDnsMedianMillis)
         assertEquals(6L, sample.httpsTcpMedianMillis)
@@ -123,7 +127,7 @@ class LabModelsTest {
             nativeAccountedDownloadBytes = if (hev) 2L * 1024L * 1024L else 0L,
             nativePathVerified = hev,
             proxyPathVerified = true,
-            accountingSettleMillis = 1_600L,
+            accountingSettleMillis = 1_300L,
             protocol = "VPN-UID[tun0#123]/fixed=104.16.1.1/http/1.1"
         )
 
