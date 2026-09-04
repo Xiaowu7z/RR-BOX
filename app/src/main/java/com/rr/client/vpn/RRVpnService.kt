@@ -10,11 +10,13 @@ import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.core.HevConfigAdapter
+import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.storage.TrafficHistoryEntity
 import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSpeed
 import io.nekohasekai.libbox.Libbox
+import java.lang.ref.WeakReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -76,6 +78,8 @@ class RRVpnService : VpnService() {
         val engineRestartMeasurement: StateFlow<EngineRestartMeasurement> =
             _engineRestartMeasurement.asStateFlow()
 
+        private var serviceRef: WeakReference<RRVpnService>? = null
+
         const val EXTRA_CONFIG_JSON = "EXTRA_CONFIG_JSON"
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
@@ -83,12 +87,17 @@ class RRVpnService : VpnService() {
 
         /** Restart the current canonical config after a forwarding-engine preference change. */
         const val ACTION_RESTART_ACTIVE_ENGINE = "com.rr.client.action.RESTART_ACTIVE_ENGINE"
+        /** Lab-only controlled failure: stop the local data plane but keep desired-running state. */
+        const val ACTION_LAB_DROP_DATA_PLANE = "com.rr.client.action.LAB_DROP_DATA_PLANE"
 
         private const val TAG = "RRVpnService"
 
         fun clearLastError() {
             _lastError.value = null
         }
+
+        /** Real local data-plane status, not just the UI StateFlow flag. */
+        fun isDataPlaneHealthy(): Boolean = serviceRef?.get()?.isDataPlaneHealthyInternal() == true
     }
 
     inner class LocalBinder : Binder() {
@@ -99,6 +108,7 @@ class RRVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceRef = WeakReference(this)
         notificationMgr = RRNotificationManager(this)
         boxCore = BoxServiceWrapper(
             workingDir = filesDir,
@@ -121,7 +131,13 @@ class RRVpnService : VpnService() {
 
         when (intent?.action) {
             RRNotificationManager.ACTION_STOP_VPN -> {
+                VpnConnectionIntentStore.setDesiredRunning(this, false)
                 stopVpn(persistTraffic = true)
+                return START_NOT_STICKY
+            }
+
+            ACTION_LAB_DROP_DATA_PLANE -> {
+                dropDataPlaneForLab()
                 return START_NOT_STICKY
             }
 
@@ -132,6 +148,7 @@ class RRVpnService : VpnService() {
                     Log.e(TAG, _lastError.value.orEmpty())
                     return START_NOT_STICKY
                 }
+                VpnConnectionIntentStore.setDesiredRunning(this, true)
                 val benchmarkSelf = intent.getBooleanExtra(
                     EXTRA_HEV_BENCHMARK_SELF_TRAFFIC,
                     false
@@ -165,6 +182,7 @@ class RRVpnService : VpnService() {
                     return START_NOT_STICKY
                 }
 
+                VpnConnectionIntentStore.setDesiredRunning(this, true)
                 ensureForeground("$activeNodeTag · 正在重启")
                 launchCore(config, restarting = true)
                 return START_NOT_STICKY
@@ -189,6 +207,7 @@ class RRVpnService : VpnService() {
         requestedNodeId?.let { activeNodeId = it }
 
         if (duplicateEquivalentStart) {
+            VpnConnectionIntentStore.setDesiredRunning(this, true)
             val stateLabel = if (_isRunning.value) "已连接" else "正在启动"
             ensureForeground("$activeNodeTag · $stateLabel")
             Log.d(
@@ -203,6 +222,7 @@ class RRVpnService : VpnService() {
         ensureForeground("$activeNodeTag · 正在启动")
 
         if (configJson.isNullOrBlank()) {
+            VpnConnectionIntentStore.setDesiredRunning(this, false)
             _lastError.value = "没有收到可运行的 sing-box 配置"
             Log.e(TAG, _lastError.value.orEmpty())
             stopForeground(Service.STOP_FOREGROUND_REMOVE)
@@ -210,6 +230,7 @@ class RRVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
+        VpnConnectionIntentStore.setDesiredRunning(this, true)
         activeConfigJson = configJson
         val restarting = _isRunning.value || _isStarting.value ||
             boxCore?.isCoreRunning() == true || hevEngine?.isRunning == true
@@ -295,12 +316,16 @@ class RRVpnService : VpnService() {
                 resetTrafficState()
                 _isStarting.value = false
                 _isRunning.value = true
+                VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, true)
                 notificationMgr.updateNotification(displayNodeTag(), TrafficSpeed(), 0L)
                 publishRestartMeasurement(
                     measurementStartedAt = measurementStartedAt,
                     success = true,
                     engine = activeEngine
                 )
+                serviceScope.launch(Dispatchers.IO) {
+                    refreshRuntimeCache(stableConfigJson)
+                }
                 Log.i(
                     TAG,
                     "VPN tunnel started: $activeNodeTag · engine=$activeEngine" +
@@ -337,9 +362,35 @@ class RRVpnService : VpnService() {
                     ensureForeground("$activeNodeTag · A/B 失败，正在恢复")
                     Log.w(TAG, "HEV benchmark restart failed; canonical config preserved for recovery")
                 } else {
+                    VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, false)
                     stopVpn(persistTraffic = false)
                 }
             }
+        }
+    }
+
+    private suspend fun refreshRuntimeCache(stableConfigJson: String) {
+        runCatching {
+            val prefs = RRApplication.instance.preferencesManager
+            val perAppMode = prefs.perAppMode.first()
+            val selectedPackages = when (perAppMode) {
+                PerAppPolicyResolver.MODE_ALLOW_LIST -> prefs.proxySelectedAppPackages.first()
+                PerAppPolicyResolver.MODE_DISALLOW_LIST -> prefs.bypassSelectedAppPackages.first()
+                else -> emptySet()
+            }
+            VpnRuntimeStateStore(this).save(
+                VpnRuntimeState(
+                    configJson = stableConfigJson,
+                    nodeTag = activeNodeTag,
+                    nodeId = activeNodeId,
+                    perAppMode = perAppMode,
+                    selectedPackages = selectedPackages,
+                    smartRouting = prefs.smartRouting.first(),
+                    fastForwarding = prefs.fastForwarding.first()
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to refresh validated runtime cache", error)
         }
     }
 
@@ -362,6 +413,33 @@ class RRVpnService : VpnService() {
         boxCore?.stopService()
     }
 
+    private fun isDataPlaneHealthyInternal(): Boolean = when (activeEngine) {
+        PreferencesManager.TUN_ENGINE_HEV ->
+            boxCore?.isCoreRunning() == true && hevEngine?.isRunning == true
+        else -> boxCore?.isCoreRunning() == true
+    }
+
+    private fun dropDataPlaneForLab() {
+        if (!VpnConnectionIntentStore.isDesiredRunning(this) || activeConfigJson.isNullOrBlank()) {
+            Log.w(TAG, "Ignoring lab data-plane drop: no desired active runtime")
+            return
+        }
+        val generation = ++requestGeneration
+        startJob?.cancel()
+        startJob = null
+        serviceScope.launch {
+            withContext(Dispatchers.IO) {
+                coreMutex.withLock { stopDataPlane() }
+            }
+            if (generation != requestGeneration) return@launch
+            _isStarting.value = false
+            _isRunning.value = false
+            _currentSpeed.value = TrafficSpeed()
+            ensureForeground("$activeNodeTag · 恢复演练")
+            Log.w(TAG, "LAB: local data plane intentionally stopped; desired-running state preserved")
+        }
+    }
+
     private fun displayNodeTag(): String = if (activeEngine == PreferencesManager.TUN_ENGINE_HEV) {
         "$activeNodeTag · HEV"
     } else {
@@ -369,6 +447,7 @@ class RRVpnService : VpnService() {
     }
 
     override fun onRevoke() {
+        VpnConnectionIntentStore.setDesiredRunning(this, false)
         _lastError.value = "Android 已撤销 VPN 权限"
         Log.w(TAG, _lastError.value.orEmpty())
         stopVpn(persistTraffic = true)
@@ -518,6 +597,7 @@ class RRVpnService : VpnService() {
         runCatching { boxCore?.stopService() }
         _isStarting.value = false
         _isRunning.value = false
+        if (serviceRef?.get() === this) serviceRef = null
         serviceScope.cancel()
         super.onDestroy()
     }
