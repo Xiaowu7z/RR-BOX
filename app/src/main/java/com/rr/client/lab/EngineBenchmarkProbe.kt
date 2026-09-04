@@ -87,7 +87,8 @@ internal object EngineBenchmarkProbe {
                 protocol = response.protocol.toString()
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
 
-                response.body.byteStream().use { input ->
+                val body = response.body ?: throw IOException("HTTPS 响应正文为空")
+                body.byteStream().use { input ->
                     val buffer = ByteArray(64 * 1024)
                     while (true) {
                         val read = input.read(buffer)
