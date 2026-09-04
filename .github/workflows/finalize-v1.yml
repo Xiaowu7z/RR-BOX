@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   finalize:
-    if: "${{ github.event.head_commit.message == 'chore: run RRBOX 1.0.0 finalizer' }}"
+    if: "${{ github.event.head_commit.message == 'chore: run RRBOX 1.0.0 release cleanup' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -17,13 +17,13 @@ jobs:
           ref: dev
           fetch-depth: 0
 
-      - name: Apply 1.0.0 product closure
-        run: python3 scripts/finalize_v1.py
+      - name: Apply final repository cleanup
+        run: python3 scripts/finalize_v1_release.py
 
-      - name: Commit prepared 1.0 tree
+      - name: Commit clean 1.0 repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "chore: prepare RRBOX 1.0.0 tree"
+          git commit -m "chore: finalize RRBOX 1.0.0 repository"
           git push origin HEAD:dev
