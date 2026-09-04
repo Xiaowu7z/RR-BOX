@@ -4,27 +4,27 @@
 
 ![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
 ![ABI](https://img.shields.io/badge/ABI-arm64--v8a-00E5FF)
-![Release](https://img.shields.io/badge/Stable-0.9.3-2EA44F)
+![Release](https://img.shields.io/badge/Stable-0.9.4-2EA44F)
 ![Core](https://img.shields.io/badge/Core-sing--box%20libbox-161B22)
 ![Build](https://img.shields.io/badge/Build-Reproducible-6f42c1)
 
-## RRBOX 0.9.3 正式版
+## RRBOX 0.9.4 正式版
 
-0.9.3 是 RRBOX 的首个正式稳定发布线版本。它保留已经验证的 System TUN 稳定数据面，同时继续提供 HEV native/lwIP 实验数据面，并把日常使用链路补齐。
+0.9.4 是 0.9.3 稳定线的维护更新，重点把 **通知视觉、App 内更新、Obtainium 更新链路**统一到公开仓库 `Xiaowu7z/RR-BOX`。
 
-### 0.9.3 新增 / 完成
+### 0.9.4 新增 / 修复
 
-- **Android 快速设置磁贴**：下拉控制中心可直接连接 / 断开 RRBOX。
-- 快速磁贴直接读取当前选中节点、智能分流、分应用模式和轻量模式，不需要先打开主界面。
-- 首次尚未授权 VPN 时，从磁贴进入系统授权流程，授权后自动连接。
-- **通知栏状态图标更新为 RRBOX 专用单色 R 标识**，与快速设置磁贴统一。
-- 桌面启动图标保持 RRBOX 最终版。
-- App 内更新检查正式切换到 `Xiaowu7z/RR-BOX`。
-- Obtainium 默认跟踪 **正式版本**，不再把公测 / prerelease 当成稳定更新。
+- **通知卡片 Logo 与 App 桌面图标统一**：通知卡片使用当前 RRBOX 正式 App 图标，不再出现旧的双向箭头视觉。
+- Android 状态栏 small icon 继续使用符合系统规范的 RRBOX 单色图标。
+- Android 快速设置磁贴继续复用 RRBOX 单色状态图标，并可直接连接 / 断开。
+- **App 内“检查更新”固定读取 `RR-BOX` 最新正式 Release**。
+- App 内更新只接受 `RRBOX-x.x.x-arm64-v8a.apk` 正式资产，避免误选其他 APK。
+- **Obtainium 继续跟踪正式 Release**；0.9.3 用户可以正常识别并升级到 0.9.4。
+- CI 在发布后反查 GitHub `releases/latest` 与 0.9.4 APK 资产，验证 App 内更新和 Obtainium 的共同更新源。
 
 ## 安装
 
-- **GitHub Releases**：下载 `RRBOX-0.9.3-arm64-v8a.apk`
+- **GitHub Releases**：下载 `RRBOX-0.9.4-arm64-v8a.apk`
 - **Obtainium 一键添加**：
 
 <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.rr.client%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FXiaowu7z%2FRR-BOX%22%2C%22author%22%3A%22Xiaowu7z%22%2C%22name%22%3A%22RRBOX%22%2C%22preferredApkIndex%22%3A0%2C%22additionalSettings%22%3A%22%7B%5C%22includePrereleases%5C%22%3Afalse%2C%5C%22fallbackToOlderReleases%5C%22%3Atrue%2C%5C%22apkFilterRegEx%5C%22%3A%5C%22RRBOX-%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B-arm64-v8a%5C%5C%5C%5C.apk%24%5C%22%2C%5C%22autoApkFilterByArch%5C%22%3Atrue%7D%22%2C%22overrideSource%22%3A%22GitHub%22%2C%22allowIdChange%22%3Afalse%7D"><img alt="Add to Obtainium" src="https://img.shields.io/badge/Add_to_Obtainium-6750A3?style=for-the-badge"></a>
@@ -88,7 +88,8 @@ HEV 数据面用于研究 Android 上 **native TUN → userspace TCP/IP → sing
 - **智能中国大陆分流**：SagerNet 二进制 SRS 规则，本地原子更新。
 - **System / HEV 双引擎**：共享节点、订阅和路由配置。
 - **Quick Settings Tile**：系统级快速开关复用当前用户配置。
-- **可复现 Release 构建**：固定 sing-box、HEV、Go、NDK 与 Gradle 版本，并校验 ABI、签名、包名和规则资产。
+- **App / Obtainium 双更新通道**：共同跟踪公开正式 Release。
+- **可复现 Release 构建**：固定 sing-box、HEV、Go、NDK 与 Gradle 版本，并校验 ABI、签名、包名、规则资产和更新资产。
 - **无 Root 依赖**：使用 Android 标准 VpnService。
 
 ---
@@ -108,7 +109,8 @@ HEV 数据面用于研究 Android 上 **native TUN → userspace TCP/IP → sing
 - 分应用代理 / 绕过
 - System TUN / HEV native 两套转发引擎
 - 通知栏实时速率、连接时长、重启、断开
-- **Android 下拉快速开关**
+- Android 下拉快速开关
+- App 内检查更新 + Obtainium 更新
 - 可选 PIN 锁：PBKDF2-HMAC-SHA256 + 随机盐
 
 AnyTLS、NaiveProxy 等路径仍按独立实机回归结果决定是否标记为“稳定验证”。
@@ -137,7 +139,7 @@ AnyTLS、NaiveProxy 等路径仍按独立实机回归结果决定是否标记为
 
 ---
 
-## 0.9.3 构建链
+## 0.9.4 构建链
 
 Release CI 固定：
 
@@ -148,7 +150,7 @@ Release CI 固定：
 - Gradle `8.10.2`
 - Android API 35 / Build Tools 35.0.0
 
-CI 会编译 arm64 `libbox.aar` 与 HEV JNI，执行 Release 单元测试，构建签名 APK，并验证 package、version、ABI、native libs、SRS assets 和签名。
+CI 会编译 arm64 `libbox.aar` 与 HEV JNI，执行 Release 单元测试，构建签名 APK，并验证 package、version、ABI、native libs、SRS assets、签名与更新通道。
 
 ## 项目定位
 
@@ -156,4 +158,4 @@ RRBOX 的优先级始终是：
 
 **数据面正确性 > 移动网络稳定性 > 可测量性能 > 功能数量。**
 
-0.9.3 从公测线进入正式发布线，但实验性的 HEV 数据面仍会明确标注，不会把未经同机 A/B 验证的性能推断当作结论。
+0.9.4 继续沿用正式稳定发布线；实验性的 HEV 数据面仍会明确标注，不会把未经同机 A/B 验证的性能推断当作结论。

@@ -19,6 +19,10 @@ object AppUpdateChecker {
     private const val OWNER = "Xiaowu7z"
     private const val REPOSITORY = "RR-BOX"
     private const val API_URL = "https://api.github.com/repos/$OWNER/$REPOSITORY/releases/latest"
+    private val releaseApkPattern = Regex(
+        "^RRBOX-\\d+\\.\\d+\\.\\d+-arm64-v8a\\.apk$",
+        RegexOption.IGNORE_CASE
+    )
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -45,38 +49,33 @@ object AppUpdateChecker {
                 val root = JsonParser.parseString(body).asJsonObject
                 val tag = root.get("tag_name")?.asString.orEmpty()
                 val name = root.get("name")?.asString.orEmpty().ifBlank { tag }
-                val releaseUrl = root.get("html_url")?.asString.orEmpty()
-                require(tag.isNotBlank() && releaseUrl.isNotBlank()) { "Release 信息不完整" }
+                require(tag.isNotBlank()) { "Release 信息不完整" }
 
                 val apkUrl = root.getAsJsonArray("assets")
                     ?.mapNotNull { element ->
                         val asset = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                         val assetName = asset.get("name")?.asString.orEmpty()
                         val url = asset.get("browser_download_url")?.asString.orEmpty()
-                        if (assetName.endsWith(".apk", ignoreCase = true) && url.isNotBlank()) {
-                            assetName to url
-                        } else null
-                    }
-                    ?.sortedByDescending { (assetName, _) ->
-                        when {
-                            assetName.contains("arm64", ignoreCase = true) -> 2
-                            assetName.contains("RRBOX", ignoreCase = true) -> 1
-                            else -> 0
-                        }
+                        if (isSupportedApkAsset(assetName) && url.isNotBlank()) url else null
                     }
                     ?.firstOrNull()
-                    ?.second
+
+                require(!apkUrl.isNullOrBlank()) {
+                    "正式版 Release 未包含 RRBOX arm64-v8a APK"
+                }
 
                 AppUpdateResult(
                     currentVersion = currentVersion,
                     latestVersion = tag,
                     releaseName = name,
-                    downloadUrl = apkUrl ?: releaseUrl,
+                    downloadUrl = apkUrl,
                     updateAvailable = compareVersions(tag, currentVersion) > 0
                 )
             }
         }
     }
+
+    internal fun isSupportedApkAsset(name: String): Boolean = releaseApkPattern.matches(name)
 
     internal fun compareVersions(left: String, right: String): Int {
         val a = numericVersion(left)

@@ -1,4 +1,4 @@
-name: RRBOX 0.9.3 Build & Release (arm64-v8a)
+name: RRBOX 0.9.4 Build & Release (arm64-v8a)
 
 on:
   push:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "93"
-  VERSION_NAME: "0.9.3"
-  OUTPUT_APK_NAME: RRBOX-0.9.3-arm64-v8a.apk
+  VERSION_CODE: "94"
+  VERSION_NAME: "0.9.4"
+  OUTPUT_APK_NAME: RRBOX-0.9.4-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RRBOX 0.9.3
+    name: Build signed RRBOX 0.9.4
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -257,8 +257,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          grep -q 'versionCode = 93' app/build.gradle.kts
-          grep -q 'versionName = "0.9.3"' app/build.gradle.kts
+          grep -q 'versionCode = 94' app/build.gradle.kts
+          grep -q 'versionName = "0.9.4"' app/build.gradle.kts
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
@@ -268,7 +268,12 @@ jobs:
           grep -q 'android.permission.BIND_QUICK_SETTINGS_TILE' app/src/main/AndroidManifest.xml
           grep -q 'android.service.quicksettings.action.QS_TILE' app/src/main/AndroidManifest.xml
           grep -q 'R.drawable.ic_notification' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'setLargeIcon(appNotificationIcon)' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'R.drawable.ic_rrbox_launcher' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'REPOSITORY = "RR-BOX"' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
+          grep -q 'releases/latest' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
+          grep -q 'isSupportedApkAsset' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
+          grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' obtainium.json
           grep -q 'QrImageDecoder' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
 
           gradle \
@@ -300,8 +305,8 @@ jobs:
             | tee dist/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-          grep -q "versionCode='93'" dist/PACKAGE-REPORT.txt
-          grep -q "versionName='0.9.3'" dist/PACKAGE-REPORT.txt
+          grep -q "versionCode='94'" dist/PACKAGE-REPORT.txt
+          grep -q "versionName='0.9.4'" dist/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
@@ -324,12 +329,12 @@ jobs:
           hev_size="$(unzip -l "$output_apk" | awk '/libhev-socks5-tunnel\.so/ {print $1; exit}')"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.9.3 Stable Build Report
+          # RRBOX 0.9.4 Stable Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package: com.rr.client
-          - Version code: 93
-          - Version name: 0.9.3
+          - Version code: 94
+          - Version name: 0.9.4
           - ABI: arm64-v8a
           - APK: ${OUTPUT_APK_NAME}
           - APK size: ${apk_size} bytes
@@ -340,11 +345,14 @@ jobs:
           - HEV native APK entry size: ${hev_size} bytes
           - Forwarding engines: System TUN + HEV native/lwIP TUN-to-SOCKS
           - Quick Settings: RRBOX toggle tile registered
-          - Notification icon: RRBOX monochrome R
+          - Status bar icon: RRBOX monochrome icon
+          - Notification card logo: current RRBOX launcher artwork
+          - App update source: GitHub releases/latest, official arm64 APK only
+          - Obtainium source: Xiaowu7z/RR-BOX stable releases
           - QR import: camera scanner + image-file QR decoding
-          - CI: unit tests, signed Release, package/version/ABI/native/rule validation passed
+          - CI: unit tests, signed Release, package/version/ABI/native/rule/update-channel validation passed
 
-          RRBOX 0.9.3 is a stable release. HEV remains an optional experimental data plane; System TUN is the stable baseline.
+          RRBOX 0.9.4 is a stable maintenance release. HEV remains an optional experimental data plane; System TUN is the stable baseline.
           EOF
 
           cp build-reports/LIBBOX-SHA256.txt dist/
@@ -358,48 +366,82 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.9.3-arm64-v8a
+          name: RRBOX-0.9.4-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
-      - name: Publish RRBOX 0.9.3 stable release
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.3') }}"
+      - name: Publish RRBOX 0.9.4 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.4') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.3
+          tag_name: v0.9.4
           target_commitish: ${{ github.sha }}
-          name: RRBOX 0.9.3 正式版
+          name: RRBOX 0.9.4 正式版
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body: |
-            ## RRBOX 0.9.3 正式版
+            ## RRBOX 0.9.4 正式版
 
-            RRBOX 从 0.9.1 公测线进入正式发布线。
+            0.9.4 是 0.9.3 稳定线的维护更新，重点统一通知视觉与更新链路。
 
             ### 本版重点
-            - 新增 Android **快速设置磁贴**：下拉控制中心直接连接 / 断开。
-            - 磁贴复用当前选中节点、智能分流、分应用与轻量模式配置。
-            - 首次 VPN 未授权时进入系统授权流程，授权完成后自动连接。
-            - 通知栏 small icon 更新为 RRBOX 专用单色 R 标识，快速磁贴同步使用同一视觉。
-            - App 内更新检查切换到公开仓库 `Xiaowu7z/RR-BOX`。
-            - Obtainium 改为默认跟踪正式 Release。
-            - System TUN 继续作为稳定基线；HEV native/lwIP 作为可选实验数据面保留。
+            - 通知卡片 Logo 改为当前 RRBOX 正式 App 图标，与桌面图标保持一致。
+            - 状态栏 small icon 继续使用 Android 规范要求的 RRBOX 单色图标。
+            - Android 快速设置磁贴继续可直接连接 / 断开。
+            - App 内“检查更新”固定读取 `Xiaowu7z/RR-BOX` 最新正式 Release。
+            - App 内更新只接受 RRBOX arm64-v8a 正式 APK，避免误选其他资产。
+            - Obtainium 继续跟踪正式 Release，0.9.3 可正常识别 0.9.4 更新。
+            - 发布完成后 CI 反查 `releases/latest` 和 0.9.4 APK 资产，验证两个更新通道共同可用。
 
             ### 核心技术
             - Stable System TUN：Android VpnService TUN → sing-box libbox system stack。
             - HEV Native：Android VpnService TUN → HEV/lwIP → loopback SOCKS5 → sing-box outbound。
             - START_NOT_STICKY + 重复 START 去重。
             - 分应用路由与中国二进制 SRS 规则。
-            - arm64 可复现构建、签名与 ABI/native/rule 校验。
+            - arm64 可复现构建、签名与 ABI/native/rule/update-channel 校验。
 
             ### 安装
-            下载 `RRBOX-0.9.3-arm64-v8a.apk`。Release 同时附带 SHA-256、签名报告、构建报告与 Obtainium 配置。
+            下载 `RRBOX-0.9.4-arm64-v8a.apk`。Release 同时附带 SHA-256、签名报告、构建报告与 Obtainium 配置。
           files: |
-            dist/RRBOX-0.9.3-arm64-v8a.apk
+            dist/RRBOX-0.9.4-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
             dist/obtainium.json
+
+      - name: Verify App and Obtainium update channels
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.4') }}"
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          expected_tag="v0.9.4"
+          expected_apk="RRBOX-0.9.4-arm64-v8a.apk"
+          latest_tag=""
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+            if [ "$latest_tag" = "$expected_tag" ]; then
+              break
+            fi
+            sleep 3
+          done
+
+          test "$latest_tag" = "$expected_tag"
+
+          asset_url="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${expected_tag}" \
+            --jq ".assets[] | select(.name == \"${expected_apk}\") | .browser_download_url" \
+            | head -n 1)"
+          test -n "$asset_url"
+
+          grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' dist/obtainium.json
+          grep -q '"includePrereleases\\":false' dist/obtainium.json
+
+          echo "App update latest tag: $latest_tag"
+          echo "Official APK asset: $asset_url"
+          echo "Obtainium stable source verified"
