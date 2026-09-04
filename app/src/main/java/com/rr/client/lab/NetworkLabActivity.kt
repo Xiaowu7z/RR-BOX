@@ -65,9 +65,7 @@ class NetworkLabActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            RRClientTheme {
-                NetworkLabRoot(onBack = ::finish)
-            }
+            RRClientTheme { NetworkLabRoot(onBack = ::finish) }
         }
     }
 
@@ -129,8 +127,9 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
         scope.launch {
             diagnostics = runCatching {
                 NetworkDiagnostics.collect(context, selectedNode, engine, isRunning)
-            }.onFailure { RRLogStore.record("DIAG", "诊断失败: ${it.message ?: it.javaClass.simpleName}") }
-                .getOrNull()
+            }.onFailure {
+                RRLogStore.record("DIAG", "诊断失败: ${it.message ?: it.javaClass.simpleName}")
+            }.getOrNull()
             diagnosticBusy = false
         }
     }
@@ -223,7 +222,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                             benchmarkBusy = true
                             benchmark = null
                             benchmarkError = null
-                            benchmarkProgress = "准备 A/B v2.1"
+                            benchmarkProgress = "准备 A/B v2.2"
                             scope.launch {
                                 runCatching {
                                     EngineBenchmarkRunner(
@@ -243,7 +242,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                                     )
                                 }.onFailure { error ->
                                     benchmarkError = error.message ?: error.javaClass.simpleName
-                                    RRLogStore.record("BENCH", "A/B v2.1 失败: ${benchmarkError.orEmpty()}")
+                                    RRLogStore.record("BENCH", "A/B v2.2 失败: ${benchmarkError.orEmpty()}")
                                 }
                                 benchmarkBusy = false
                                 benchmarkProgress = null
@@ -277,9 +276,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
             onDismiss = { showRawDialog = false },
             onValidate = { raw ->
                 scope.launch {
-                    rawValidation = withContext(Dispatchers.Default) {
-                        validateRawOutbound(raw)
-                    }
+                    rawValidation = withContext(Dispatchers.Default) { validateRawOutbound(raw) }
                 }
             }
         )
@@ -327,7 +324,10 @@ private fun LabDashboard(
             StatusRow("节点", selectedNode?.tag ?: "未选择")
             StatusRow("实时下载", currentSpeed.formattedDownSpeed)
             StatusRow("实时上传", currentSpeed.formattedUpSpeed)
-            StatusRow("本次流量", "↓ ${TrafficSampler.formatBytes(sessionTraffic.proxyDownloadTotal)}  ↑ ${TrafficSampler.formatBytes(sessionTraffic.proxyUploadTotal)}")
+            StatusRow(
+                "本次流量",
+                "↓ ${TrafficSampler.formatBytes(sessionTraffic.proxyDownloadTotal)}  ↑ ${TrafficSampler.formatBytes(sessionTraffic.proxyUploadTotal)}"
+            )
             StatusRow("连接时长", formatDuration(sessionTraffic.durationSeconds))
         }
 
@@ -363,9 +363,9 @@ private fun LabDashboard(
             }
         }
 
-        LabCard(title = "System vs HEV A/B v2.1", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
+        LabCard(title = "System vs HEV A/B v2.2", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
             Text(
-                "每套引擎先做 64 KiB HTTPS 代理路径预检，只有 sessionTraffic 确认流量进入代理数据面后，才继续 3 轮固定 2 MiB HTTPS 和 3 次 UDP STUN。HEV 仅在本次实验重建期间临时让 RRBOX 自身进入 TUN，并把 127/8 排除在 VPN 外防止本地 SOCKS 回环；测试结束或取消后强制恢复正常引擎模式。原始 ICMP 已从 A/B 成绩移除。",
+                "两套引擎都由 Android DownloadProvider 的独立 UID 发起同一批固定 HTTPS 下载。每套先做 64 KiB 路径预检，通过后再做 3×2 MiB。System 要求 sing-box sessionTraffic 计数通过；HEV 还必须同时通过 native TUN RX 字节验证。正常 HEV 仍保持 RRBOX 自身绕过，不再使用 v2.1 的临时 self-route。UDP/DNS/TCP/TLS 暂停进入 A/B，避免不同路径产生伪对比。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
@@ -375,19 +375,31 @@ private fun LabDashboard(
                 enabled = isRunning && !isStarting && selectedNode != null && !benchmarkBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {
-                Text(if (benchmarkBusy) "A/B v2.1 测试中…" else "开始一键 A/B v2.1", color = DarkBackground, fontWeight = FontWeight.Bold)
+                Text(
+                    if (benchmarkBusy) "A/B v2.2 测试中…" else "开始一键 A/B v2.2",
+                    color = DarkBackground,
+                    fontWeight = FontWeight.Bold
+                )
             }
             benchmarkProgress?.let {
                 Spacer(Modifier.height(6.dp))
                 Text(it, color = CyanPrimary, style = MaterialTheme.typography.labelMedium)
             }
-            if (!isRunning) {
+            if (!isRunning && !benchmarkBusy) {
                 Text("请先在主界面连接一个节点再运行 A/B。", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
             }
-            benchmarkError?.let { Text("失败：$it", color = MaterialTheme.colorScheme.error) }
+            benchmarkError?.let {
+                Text("失败：$it", color = MaterialTheme.colorScheme.error)
+                Text(
+                    "实验失败会自动尝试恢复原始引擎，不应再把正常 VPN 配置清掉。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
 
             benchmark?.let { report ->
                 Spacer(Modifier.height(12.dp))
+                Text("helper · ${report.helperPackage}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 BenchmarkSampleCard(report.system)
                 Spacer(Modifier.height(8.dp))
                 BenchmarkSampleCard(report.hev)
@@ -400,7 +412,7 @@ private fun LabDashboard(
 
             historyStats?.takeIf { it.runs >= 2 }?.let { stats ->
                 Spacer(Modifier.height(12.dp))
-                Text("A/B v2.1 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("A/B v2.2 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
                 HistoryStatsCard("SYSTEM", stats.system)
                 Spacer(Modifier.height(6.dp))
@@ -410,17 +422,16 @@ private fun LabDashboard(
             if (benchmarkHistory.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text("历史记录 ${benchmarkHistory.size} 条", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                benchmarkHistory.take(3).forEach { item ->
+                benchmarkHistory.take(4).forEach { item ->
                     val summary = when {
-                        item.benchmarkVersion >= 3 -> {
-                            "${item.nodeTag}: v2.1 · System ${item.system.httpsFirstByteMedianMillis ?: -1}ms / HEV ${item.hev.httpsFirstByteMedianMillis ?: -1}ms TTFB"
-                        }
-                        item.benchmarkVersion >= 2 -> {
-                            "${item.nodeTag}: v2 旧路径记录 · 不进入正式统计"
-                        }
-                        else -> {
-                            "${item.nodeTag}: v1 旧版 · System ${item.system.restartMillis}ms / HEV ${item.hev.restartMillis}ms"
-                        }
+                        item.benchmarkVersion >= 4 ->
+                            "${item.nodeTag}: v2.2 · System ${item.system.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"} / HEV ${item.hev.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"}"
+                        item.benchmarkVersion >= 3 ->
+                            "${item.nodeTag}: v2.1 旧实验 · 不进入 v2.2 统计"
+                        item.benchmarkVersion >= 2 ->
+                            "${item.nodeTag}: v2 旧实验 · 不进入 v2.2 统计"
+                        else ->
+                            "${item.nodeTag}: v1 旧版 · 仅保留历史"
                     }
                     Text(summary, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                 }
@@ -438,7 +449,7 @@ private fun LabDashboard(
 
         LabCard(title = "Raw sing-box Outbound", icon = { Icon(Icons.Default.Description, null, tint = CyanPrimary) }) {
             Text(
-                "RRBOX 的节点导入器已经原生支持单个 outbound JSON、outbound 数组和完整 sing-box config。这里提供高级预校验；验证通过后可在「节点 → + → 粘贴 / JSON」用同一导入链保存，不改稳定 ConfigBuilder 路径。",
+                "RRBOX 的节点导入器支持单个 outbound JSON、outbound 数组和完整 sing-box config。这里提供高级预校验；验证通过后可在节点页用同一导入链保存，不改稳定 ConfigBuilder 路径。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
@@ -460,7 +471,11 @@ private fun LogCenter(
 ) {
     Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
         Text("日志中心", style = MaterialTheme.typography.titleLarge, color = TextPrimary, fontWeight = FontWeight.Bold)
-        Text("仅在 Network Lab 页面打开期间采集 RRBOX 自身进程日志，并自动隐藏 UUID、token、password、private_key 等敏感字段。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+        Text(
+            "仅在 Network Lab 页面打开期间采集 RRBOX 自身进程日志，并自动隐藏 UUID、token、password、private_key 等敏感字段。",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary
+        )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onCopy, enabled = entries.isNotEmpty()) {
@@ -556,29 +571,25 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
     Surface(shape = RoundedCornerShape(10.dp), color = DarkSurfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(10.dp)) {
             Text(sample.engine, color = CyanPrimary, fontWeight = FontWeight.Bold)
-            StatusRow("路径预检", "PASS · 64 KiB")
+            StatusRow("路径预检", "PASS · 64 KiB helper")
             StatusRow("重建耗时", "${sample.restartMillis} ms")
-            StatusRow("HTTPS 成功", "${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
+            StatusRow("HTTPS helper", "${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
             StatusRow("有效代理轮次", "${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
-            StatusRow("DNS 中位", sample.httpsDnsMedianMillis?.let { "$it ms" } ?: "缓存/未触发")
-            StatusRow("客户端 TCP", sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--")
-            StatusRow("TLS 中位", sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--")
-            StatusRow("HTTPS 首字节", sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--")
+            StatusRow("首包观察", sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--")
             StatusRow("2 MiB 下载中位", sample.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--")
-            StatusRow("代理计数验证", "${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
-            StatusRow(
-                "UDP STUN",
-                "${sample.udpSuccessCount}/${sample.udpAttemptCount}" +
-                    (sample.udpMedianRttMillis?.let { " · ${it} ms" } ?: "") +
-                    " · 路径已验证"
-            )
-            StatusRow("进程 CPU", "${sample.processCpuMillis} ms")
+            StatusRow("sing-box 计数", "${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
+            if (sample.engine.equals("HEV", ignoreCase = true)) {
+                StatusRow("HEV native RX", "${sample.nativePathVerifiedCount}/${sample.httpsSuccessCount}")
+            }
+            StatusRow("RRBOX 进程 CPU", "${sample.processCpuMillis} ms")
             StatusRow("PSS", String.format("%.1f MB", sample.processPssKb / 1024.0))
 
-            if (sample.proxyPathVerifiedCount < 2) {
+            if (sample.proxyPathVerifiedCount < 2 ||
+                (sample.engine.equals("HEV", ignoreCase = true) && sample.nativePathVerifiedCount < 2)
+            ) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "有效代理轮次不足，当前样本不会进入 v2.1 正式历史统计。",
+                    "路径验证不足，当前样本不会进入 v2.2 正式历史统计。",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelSmall
                 )
@@ -593,7 +604,7 @@ private fun HistoryStatsCard(label: String, stats: EngineHistoryStats) {
         Column(Modifier.fillMaxWidth().padding(10.dp)) {
             Text(label, color = CyanPrimary, fontWeight = FontWeight.Bold)
             stats.restart?.let { StatusRow("重建", metricMillis(it)) }
-            stats.httpsFirstByte?.let { StatusRow("HTTPS 首字节", metricMillis(it)) }
+            stats.httpsFirstByte?.let { StatusRow("首包观察", metricMillis(it)) }
             stats.downloadBps?.let { StatusRow("下载", metricSpeed(it)) }
             stats.pssKb?.let {
                 StatusRow(
@@ -601,8 +612,10 @@ private fun HistoryStatsCard(label: String, stats: EngineHistoryStats) {
                     "中位 ${String.format("%.1f", it.median / 1024.0)} MB · P95 ${String.format("%.1f", it.p95 / 1024.0)} MB"
                 )
             }
-            StatusRow("UDP 成功率", "${stats.udpSuccesses}/${stats.udpAttempts}")
             StatusRow("代理计数验证", "${stats.proxyVerifiedRounds}/${stats.httpsSuccessRounds}")
+            if (label == "HEV") {
+                StatusRow("native RX 验证", "${stats.nativeVerifiedRounds}/${stats.httpsSuccessRounds}")
+            }
         }
     }
 }
@@ -639,7 +652,9 @@ private fun RawOutboundDialog(
                 }
             }
         },
-        confirmButton = { Button(onClick = { onValidate(raw) }, enabled = raw.isNotBlank()) { Text("校验") } },
+        confirmButton = {
+            Button(onClick = { onValidate(raw) }, enabled = raw.isNotBlank()) { Text("校验") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
     )
 }

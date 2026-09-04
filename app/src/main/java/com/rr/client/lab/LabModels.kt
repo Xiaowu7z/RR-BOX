@@ -58,6 +58,8 @@ data class HttpsProbeRound(
     val bytesReceived: Long = 0L,
     val downloadBps: Long? = null,
     val proxyAccountedDownloadBytes: Long = 0L,
+    val nativeAccountedDownloadBytes: Long = 0L,
+    val nativePathVerified: Boolean = false,
     val proxyPathVerified: Boolean = false,
     val httpCode: Int? = null,
     val protocol: String? = null,
@@ -94,6 +96,9 @@ data class EngineBenchmarkSample(
     val proxyPathVerifiedCount: Int
         get() = validHttpsRounds.size
 
+    val nativePathVerifiedCount: Int
+        get() = httpsRounds.orEmpty().count { it.success && it.nativePathVerified }
+
     val httpsDnsMedianMillis: Long?
         get() = medianLong(validHttpsRounds.mapNotNull { it.dnsMillis })
 
@@ -120,13 +125,14 @@ data class EngineBenchmarkSample(
 }
 
 data class EngineBenchmarkReport(
-    val benchmarkVersion: Int = 3,
+    val benchmarkVersion: Int = 4,
     val timestamp: Long = System.currentTimeMillis(),
     val nodeTag: String,
     val nodeServerMasked: String,
     val originalEngine: String,
     val probeTarget: String = "speed.cloudflare.com",
-    val udpTarget: String = "stun.l.google.com:19302",
+    val helperPackage: String = "",
+    val udpTarget: String = "",
     val system: EngineBenchmarkSample,
     val hev: EngineBenchmarkSample
 )
@@ -154,6 +160,7 @@ data class EngineHistoryStats(
     val udpSuccesses: Int,
     val udpAttempts: Int,
     val proxyVerifiedRounds: Int,
+    val nativeVerifiedRounds: Int,
     val httpsSuccessRounds: Int
 )
 
@@ -187,12 +194,13 @@ fun calculateMetricStats(values: List<Long>): MetricStats? {
 }
 
 fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHistoryStats? {
-    // v2.0 could produce apparently successful HEV rounds that actually bypassed the HEV TUN.
-    // Only v2.1/schema-v3 reports with at least two verified rounds per engine are eligible.
+    // v2.0 used RRBOX's own UID and v2.1 attempted transient self-routing. Only v2.2 uses the
+    // independent DownloadProvider UID for both engines, so older reports are never mixed in.
     val reports = history.filter { report ->
-        report.benchmarkVersion >= 3 &&
+        report.benchmarkVersion >= 4 &&
             report.system.proxyPathVerifiedCount >= 2 &&
-            report.hev.proxyPathVerifiedCount >= 2
+            report.hev.proxyPathVerifiedCount >= 2 &&
+            report.hev.nativePathVerifiedCount >= 2
     }
     if (reports.isEmpty()) return null
 
@@ -210,6 +218,7 @@ fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHi
             udpSuccesses = udp.count { it.success },
             udpAttempts = udp.size,
             proxyVerifiedRounds = https.size,
+            nativeVerifiedRounds = https.count { it.nativePathVerified },
             httpsSuccessRounds = https.size
         )
     }
@@ -244,80 +253,71 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         return@buildString
     }
 
-    val v21 = benchmarkVersion >= 3
-    appendLine(
-        if (v21) {
-            "RRBOX System vs HEV A/B v2.1 实测报告"
-        } else {
-            "RRBOX System vs HEV A/B v2 实测报告（旧路径校验规则）"
-        }
-    )
+    if (benchmarkVersion < 4) {
+        appendLine(
+            if (benchmarkVersion >= 3) {
+                "RRBOX System vs HEV A/B v2.1 旧实验报告（不纳入 v2.2 统计）"
+            } else {
+                "RRBOX System vs HEV A/B v2 旧实验报告（不纳入 v2.2 统计）"
+            }
+        )
+        appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
+        appendLine("节点: $nodeTag ($nodeServerMasked)")
+        appendLine("System 重建: ${system.restartMillis} ms")
+        appendLine("HEV 重建: ${hev.restartMillis} ms")
+        appendLine("说明: 旧实验的两套引擎并非由同一独立 UID 产生测试流量，因此仅保留查看。")
+        return@buildString
+    }
+
+    appendLine("RRBOX System vs HEV A/B v2.2 实测报告")
     appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
     appendLine("节点: $nodeTag ($nodeServerMasked)")
     appendLine("原始引擎: $originalEngine")
-    if (v21) {
-        appendLine("代理路径预检: PASS（每个引擎先做 64 KiB HTTPS；未通过不会生成本报告）")
-    }
+    appendLine("测速 helper: ${helperPackage.ifBlank { "Android DownloadProvider" }}（独立 UID）")
+    appendLine("代理路径预检: PASS（每个引擎先做 64 KiB；未通过不会生成本报告）")
     appendLine("HTTPS 固定下载: $probeTarget / 每轮 ${formatBytesForReport(system.downloadBytesPerRound)} × 3")
-    appendLine("UDP STUN: $udpTarget / 3 次")
+    appendLine("UDP/DNS/TCP/TLS: v2.2 暂不纳入 A/B，避免不同 UID/不同路径产生伪对比")
     appendLine()
 
     listOf(system, hev).forEach { sample ->
         appendLine("[${sample.engine}]")
         appendLine("重建耗时: ${sample.restartMillis} ms")
-        if (!v21) {
-            appendLine("原始 ICMP 参考: ${sample.rawIcmpMillis?.let { "$it ms" } ?: "超时/不可用"}（不参与引擎结论）")
-        }
-        appendLine("HTTPS 成功: ${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
+        appendLine("HTTPS helper 成功: ${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
         appendLine("有效代理轮次: ${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
-        appendLine("DNS 中位数: ${sample.httpsDnsMedianMillis?.let { "$it ms" } ?: "缓存/未触发"}")
-        appendLine("客户端 TCP connect 中位数: ${sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--"}")
-        appendLine("TLS 中位数: ${sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--"}")
-        appendLine("HTTPS 首字节中位数: ${sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--"}")
+        appendLine("首包观察中位数: ${sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--"}（DownloadManager 轮询近似值）")
         appendLine("固定下载中位数: ${sample.httpsDownloadMedianBps?.let(::formatRateForReport) ?: "--"}")
-        appendLine("代理流量计数验证: ${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
-        appendLine(
-            "UDP STUN: ${sample.udpSuccessCount}/${sample.udpAttemptCount}，中位 RTT " +
-                "${sample.udpMedianRttMillis?.let { "$it ms" } ?: "--"}" +
-                if (v21) "（共享已验证的 RRBOX UID VPN 路径）" else ""
-        )
-        appendLine("进程 CPU: ${sample.processCpuMillis} ms / PSS ${String.format("%.1f", sample.processPssKb / 1024.0)} MB")
+        appendLine("sing-box 流量计数验证: ${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
+        if (sample.engine.equals("HEV", ignoreCase = true)) {
+            appendLine("HEV native TUN RX 验证: ${sample.nativePathVerifiedCount}/${sample.httpsSuccessCount}")
+        }
+        appendLine("RRBOX 进程 CPU: ${sample.processCpuMillis} ms / PSS ${String.format("%.1f", sample.processPssKb / 1024.0)} MB")
 
         sample.httpsRounds.orEmpty().forEach { round ->
             if (round.success) {
                 appendLine(
-                    "  HTTPS #${round.attempt}: TTFB=${round.firstByteMillis ?: -1}ms " +
+                    "  HTTPS #${round.attempt}: first=${round.firstByteMillis ?: -1}ms " +
                         "rate=${round.downloadBps?.let(::formatRateForReport) ?: "--"} " +
                         "proxyCount=${formatBytesForReport(round.proxyAccountedDownloadBytes)} " +
+                        if (sample.engine.equals("HEV", ignoreCase = true)) {
+                            "nativeRx=${formatBytesForReport(round.nativeAccountedDownloadBytes)} " +
+                                "nativeVerified=${if (round.nativePathVerified) "yes" else "no"} "
+                        } else {
+                            ""
+                        } +
                         "verified=${if (round.proxyPathVerified) "yes" else "no"}"
                 )
             } else {
                 appendLine("  HTTPS #${round.attempt}: FAIL ${round.error.orEmpty()}")
             }
         }
-        sample.udpRounds.orEmpty().forEach { round ->
-            if (round.success) {
-                appendLine("  UDP #${round.attempt}: ${round.rttMillis ?: -1}ms ${round.address.orEmpty()}")
-            } else {
-                appendLine("  UDP #${round.attempt}: FAIL ${round.error.orEmpty()}")
-            }
-        }
         appendLine()
     }
 
-    if (v21) {
-        appendLine(
-            "说明: A/B v2.1 在每个引擎正式测试前先用 64 KiB HTTPS 与 sessionTraffic 做硬性路径校验。" +
-                "HEV 仅在实验室测试重建期间临时把 RRBOX 自身 UID 纳入 TUN，并显式排除 127/8，" +
-                "从而测到 TUN → lwIP → SOCKS5 → sing-box；正常 HEV 模式仍保持 RRBOX 自身绕过，测试结束或取消后会强制按正常模式恢复原始引擎。" +
-                "原始 ICMP 已从 v2.1 引擎成绩移除。"
-        )
-    } else {
-        appendLine(
-            "说明: A/B v2 旧记录的 HEV 自身 UID 可能绕过 HEV TUN，因此仅保留历史查看；" +
-                "v2.1 历史统计不会纳入这些旧记录。"
-        )
-    }
+    appendLine(
+        "说明: A/B v2.2 不再让 RRBOX 自身 UID 进入 HEV TUN。两套引擎均由 Android DownloadProvider 的独立 UID 发起同一固定下载；" +
+            "System 使用 sing-box sessionTraffic 验证路径，HEV 同时要求 sessionTraffic 与 hev-socks5-tunnel native RX 字节双重通过。" +
+            "测速期间若存在分应用规则，只对内存中的临时配置加入 helper，持久配置和正常 HEV self-bypass 均不修改；结束或失败后强制恢复原始引擎。"
+    )
 }
 
 private fun medianLong(values: List<Long>): Long? = calculateMetricStats(values)?.median?.roundToLong()

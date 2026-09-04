@@ -19,84 +19,96 @@ class LabModelsTest {
     }
 
     @Test
-    fun summarizeBenchmarkHistory_usesOnlyV21VerifiedRecords() {
-        val sample = verifiedSample("SYSTEM")
-        val v21 = EngineBenchmarkReport(
-            benchmarkVersion = 3,
+    fun summarizeBenchmarkHistory_usesOnlyV22VerifiedRecords() {
+        val system = verifiedSample("SYSTEM")
+        val hev = verifiedSample("HEV")
+        val v22 = EngineBenchmarkReport(
+            benchmarkVersion = 4,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "SYSTEM",
-            system = sample,
-            hev = sample.copy(engine = "HEV")
+            helperPackage = "com.android.providers.downloads",
+            system = system,
+            hev = hev
         )
-        val oldV2 = v21.copy(benchmarkVersion = 2)
+        val oldV21 = v22.copy(benchmarkVersion = 3)
 
-        val summary = summarizeBenchmarkHistory(listOf(oldV2, v21))
+        val summary = summarizeBenchmarkHistory(listOf(oldV21, v22))
         assertNotNull(summary)
         assertEquals(1, summary!!.runs)
         assertEquals(3, summary.system.httpsSuccessRounds)
         assertEquals(3, summary.system.proxyVerifiedRounds)
+        assertEquals(3, summary.hev.nativeVerifiedRounds)
     }
 
     @Test
-    fun summarizeBenchmarkHistory_rejectsUnverifiedV21Pair() {
-        val verified = verifiedSample("SYSTEM")
-        val unverified = verified.copy(
-            engine = "HEV",
-            httpsRounds = verified.httpsRounds.orEmpty().map { it.copy(proxyPathVerified = false) }
+    fun summarizeBenchmarkHistory_rejectsHevWithoutNativeTunValidation() {
+        val system = verifiedSample("SYSTEM")
+        val hev = verifiedSample("HEV").copy(
+            httpsRounds = verifiedSample("HEV").httpsRounds.orEmpty().map {
+                it.copy(nativePathVerified = false)
+            }
         )
         val report = EngineBenchmarkReport(
-            benchmarkVersion = 3,
+            benchmarkVersion = 4,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "HEV",
-            system = verified,
-            hev = unverified
+            helperPackage = "com.android.providers.downloads",
+            system = system,
+            hev = hev
         )
 
         assertNull(summarizeBenchmarkHistory(listOf(report)))
     }
 
-    private fun verifiedSample(engine: String): EngineBenchmarkSample = EngineBenchmarkSample(
-        engine = engine,
-        restartMillis = 100L,
-        rawIcmpMillis = null,
-        httpsRounds = listOf(
+    @Test
+    fun sampleStatistics_ignoreUnverifiedRounds() {
+        val sample = verifiedSample("SYSTEM").copy(
+            httpsRounds = verifiedSample("SYSTEM").httpsRounds.orEmpty() +
+                HttpsProbeRound(
+                    attempt = 4,
+                    success = true,
+                    firstByteMillis = 9_999L,
+                    downloadBps = 1L,
+                    proxyPathVerified = false
+                )
+        )
+
+        assertEquals(3, sample.proxyPathVerifiedCount)
+        assertEquals(85L, sample.httpsFirstByteMedianMillis)
+        assertEquals(4L * 1024L * 1024L, sample.httpsDownloadMedianBps)
+    }
+
+    private fun verifiedSample(engine: String): EngineBenchmarkSample {
+        val hev = engine == "HEV"
+        fun round(attempt: Int, first: Long, rate: Long): HttpsProbeRound =
             HttpsProbeRound(
-                attempt = 1,
+                attempt = attempt,
                 success = true,
-                firstByteMillis = 80L,
+                firstByteMillis = first,
                 bytesReceived = 2L * 1024L * 1024L,
-                downloadBps = 4L * 1024L * 1024L,
+                downloadBps = rate,
                 proxyAccountedDownloadBytes = 2L * 1024L * 1024L,
-                proxyPathVerified = true
-            ),
-            HttpsProbeRound(
-                attempt = 2,
-                success = true,
-                firstByteMillis = 90L,
-                bytesReceived = 2L * 1024L * 1024L,
-                downloadBps = 3L * 1024L * 1024L,
-                proxyAccountedDownloadBytes = 2L * 1024L * 1024L,
-                proxyPathVerified = true
-            ),
-            HttpsProbeRound(
-                attempt = 3,
-                success = true,
-                firstByteMillis = 85L,
-                bytesReceived = 2L * 1024L * 1024L,
-                downloadBps = 5L * 1024L * 1024L,
-                proxyAccountedDownloadBytes = 2L * 1024L * 1024L,
-                proxyPathVerified = true
+                nativeAccountedDownloadBytes = if (hev) 2L * 1024L * 1024L else 0L,
+                nativePathVerified = hev,
+                proxyPathVerified = true,
+                protocol = "DownloadManager"
             )
-        ),
-        udpRounds = listOf(
-            UdpProbeRound(attempt = 1, success = true, rttMillis = 90L),
-            UdpProbeRound(attempt = 2, success = true, rttMillis = 92L),
-            UdpProbeRound(attempt = 3, success = false, error = "timeout")
-        ),
-        processCpuMillis = 50L,
-        processPssKb = 200_000,
-        downloadBytesPerRound = 2L * 1024L * 1024L
-    )
+
+        return EngineBenchmarkSample(
+            engine = engine,
+            restartMillis = 100L,
+            rawIcmpMillis = null,
+            httpsRounds = listOf(
+                round(1, 80L, 4L * 1024L * 1024L),
+                round(2, 90L, 3L * 1024L * 1024L),
+                round(3, 85L, 5L * 1024L * 1024L)
+            ),
+            udpRounds = emptyList(),
+            processCpuMillis = 50L,
+            processPssKb = 200_000,
+            downloadBytesPerRound = 2L * 1024L * 1024L
+        )
+    }
 }
