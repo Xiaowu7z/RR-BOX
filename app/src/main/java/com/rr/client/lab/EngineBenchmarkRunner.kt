@@ -30,29 +30,34 @@ class EngineBenchmarkRunner(
             "请先让 RRBOX 正常连接，再开始 System / HEV A/B"
         }
         val originalEngine = preferences.tunEngine.first()
-        RRLogStore.record(
-            "BENCH",
-            "开始 A/B v2.3: node=${node.tag}, original=$originalEngine, transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}"
-        )
 
         return try {
-            val system = sampleEngine(PreferencesManager.TUN_ENGINE_SYSTEM)
-            val hev = sampleEngine(PreferencesManager.TUN_ENGINE_HEV)
+            onProgress("正在固定测速 IPv4 目标")
+            val target = EngineBenchmarkProbe.resolveTarget(appContext)
+            RRLogStore.record(
+                "BENCH",
+                "开始 A/B v2.4: node=${node.tag}, original=$originalEngine, " +
+                    "transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}, target=${target.label}"
+            )
+
+            val system = sampleEngine(PreferencesManager.TUN_ENGINE_SYSTEM, target)
+            val hev = sampleEngine(PreferencesManager.TUN_ENGINE_HEV, target)
             EngineBenchmarkReport(
-                benchmarkVersion = 5,
+                benchmarkVersion = 6,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
                 probeTarget = EngineBenchmarkProbe.HTTPS_HOST,
-                helperPackage = EngineBenchmarkProbe.PROBE_TRANSPORT,
-                udpTarget = "disabled-v2.3",
+                helperPackage = "${EngineBenchmarkProbe.PROBE_TRANSPORT} · ${target.label}",
+                udpTarget = "disabled-v2.4",
                 system = system,
                 hev = hev
             ).also {
                 BenchmarkHistoryStore.save(appContext, it)
                 RRLogStore.record(
                     "BENCH",
-                    "A/B v2.3 完成: System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
+                    "A/B v2.4 完成: target=${target.addressText} " +
+                        "System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
                         "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
                 )
             }
@@ -63,20 +68,24 @@ class EngineBenchmarkRunner(
                     .onFailure {
                         RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}")
                     }
-                onProgress("A/B v2.3 已结束")
+                onProgress("A/B v2.4 已结束")
             }
         }
     }
 
-    private suspend fun sampleEngine(engine: String): EngineBenchmarkSample {
+    private suspend fun sampleEngine(
+        engine: String,
+        target: EngineBenchmarkProbe.ProbeTarget
+    ): EngineBenchmarkSample {
         onProgress("$engine · 正在按正常模式重建引擎")
         val restartMillis = restartInto(engine)
         delay(900L)
 
-        onProgress("$engine · 64 KiB VPN Network 路径预检")
+        onProgress("$engine · 64 KiB 固定 IPv4 VPN 路径预检")
         val preflight = EngineBenchmarkProbe.httpsRound(
             context = appContext,
             engine = engine,
+            target = target,
             attempt = 0,
             downloadBytes = EngineBenchmarkProbe.PREFLIGHT_BYTES
         )
@@ -88,11 +97,11 @@ class EngineBenchmarkRunner(
                 "nativeVerified=${preflight.nativePathVerified} verified=${preflight.proxyPathVerified}"
         )
         check(preflight.success) {
-            "$engine VPN Network 预检失败：${preflight.error ?: "HTTPS 未成功"}"
+            "$engine 固定 IPv4 VPN Network 预检失败：${preflight.error ?: "HTTPS 未成功"}"
         }
         check(preflight.proxyPathVerified) {
             buildString {
-                append("$engine VPN Network 流量未通过代理路径校验：")
+                append("$engine 固定 IPv4 VPN Network 流量未通过代理路径校验：")
                 append("下载 ${preflight.bytesReceived} B，sing-box 计入 ")
                 append("${preflight.proxyAccountedDownloadBytes} B")
                 if (engine == PreferencesManager.TUN_ENGINE_HEV) {
@@ -107,19 +116,20 @@ class EngineBenchmarkRunner(
         val httpsRounds = buildList {
             repeat(EngineBenchmarkProbe.HTTPS_ATTEMPTS) { index ->
                 val attempt = index + 1
-                onProgress("$engine · VPN socket HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB")
+                onProgress("$engine · 固定 IPv4 VPN HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB")
                 val result = EngineBenchmarkProbe.httpsRound(
                     context = appContext,
                     engine = engine,
+                    target = target,
                     attempt = attempt
                 )
                 add(result)
                 RRLogStore.record(
                     "BENCH",
                     "$engine HTTPS#$attempt success=${result.success} protocol=${result.protocol.orEmpty()} " +
-                        "dns=${result.dnsMillis ?: -1} tcp=${result.tcpConnectMillis ?: -1} " +
-                        "tls=${result.tlsMillis ?: -1} ttfb=${result.firstByteMillis ?: -1} " +
-                        "rate=${result.downloadBps ?: -1} proxy=${result.proxyAccountedDownloadBytes} " +
+                        "tcp=${result.tcpConnectMillis ?: -1} tls=${result.tlsMillis ?: -1} " +
+                        "ttfb=${result.firstByteMillis ?: -1} rate=${result.downloadBps ?: -1} " +
+                        "proxy=${result.proxyAccountedDownloadBytes} " +
                         "nativeRx=${result.nativeAccountedDownloadBytes} verified=${result.proxyPathVerified}"
                 )
                 if (result.success && !result.proxyPathVerified) {
@@ -154,7 +164,7 @@ class EngineBenchmarkRunner(
 
         RRLogStore.record(
             "BENCH",
-            "$engine v2.3 sample: restart=${sample.restartMillis}ms " +
+            "$engine v2.4 sample: restart=${sample.restartMillis}ms " +
                 "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
                 "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
                 "verified=${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount} " +

@@ -125,7 +125,7 @@ data class EngineBenchmarkSample(
 }
 
 data class EngineBenchmarkReport(
-    val benchmarkVersion: Int = 5,
+    val benchmarkVersion: Int = 6,
     val timestamp: Long = System.currentTimeMillis(),
     val nodeTag: String,
     val nodeServerMasked: String,
@@ -194,10 +194,10 @@ fun calculateMetricStats(values: List<Long>): MetricStats? {
 }
 
 fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHistoryStats? {
-    // v2.0-v2.2 used different traffic-origin experiments. v2.3 is the first schema where both
-    // engines use the same RRBOX socket explicitly bound to Android's VPN Network.
+    // v2.0-v2.3 all had different traffic-origin/DNS experiments. v2.4 is the first schema where
+    // both engines reuse one fixed bootstrap IPv4 and bind only the measured socket to the VPN.
     val reports = history.filter { report ->
-        report.benchmarkVersion >= 5 &&
+        report.benchmarkVersion >= 6 &&
             report.system.proxyPathVerifiedCount >= 2 &&
             report.hev.proxyPathVerifiedCount >= 2 &&
             report.hev.nativePathVerifiedCount >= 2
@@ -253,29 +253,31 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         return@buildString
     }
 
-    if (benchmarkVersion < 5) {
+    if (benchmarkVersion < 6) {
         val label = when {
+            benchmarkVersion >= 5 -> "v2.3"
             benchmarkVersion >= 4 -> "v2.2"
             benchmarkVersion >= 3 -> "v2.1"
             else -> "v2"
         }
-        appendLine("RRBOX System vs HEV A/B $label 旧实验报告（不纳入 v2.3 统计）")
+        appendLine("RRBOX System vs HEV A/B $label 旧实验报告（不纳入 v2.4 统计）")
         appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
         appendLine("节点: $nodeTag ($nodeServerMasked)")
         appendLine("System 重建: ${system.restartMillis} ms")
         appendLine("HEV 重建: ${hev.restartMillis} ms")
-        appendLine("说明: 旧实验的测试流量来源/路由方式与 v2.3 不同，仅保留查看。")
+        appendLine("说明: 旧实验的测试流量来源/DNS/路由方式与 v2.4 不同，仅保留查看。")
         return@buildString
     }
 
-    appendLine("RRBOX System vs HEV A/B v2.3 实测报告")
+    appendLine("RRBOX System vs HEV A/B v2.4 实测报告")
     appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
     appendLine("节点: $nodeTag ($nodeServerMasked)")
     appendLine("原始引擎: $originalEngine")
-    appendLine("测速绑定: ${helperPackage.ifBlank { "Android VPN Network.socketFactory" }}")
+    appendLine("测速绑定: ${helperPackage.ifBlank { "Android VPN Network.socketFactory + fixed IPv4 bootstrap" }}")
+    appendLine("DNS: 启动前固定解析一次 IPv4，两套引擎复用同一目标；DNS 不参与 A/B 成绩")
     appendLine("代理路径预检: PASS（每个引擎先做 64 KiB；未通过不会生成本报告）")
     appendLine("HTTPS 固定下载: $probeTarget / 每轮 ${formatBytesForReport(system.downloadBytesPerRound)} × 3")
-    appendLine("UDP: v2.3 暂不纳入 A/B")
+    appendLine("UDP: v2.4 暂不纳入 A/B")
     appendLine()
 
     listOf(system, hev).forEach { sample ->
@@ -283,7 +285,6 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         appendLine("重建耗时: ${sample.restartMillis} ms")
         appendLine("HTTPS 成功: ${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
         appendLine("有效代理轮次: ${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
-        appendLine("DNS 中位数: ${sample.httpsDnsMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("客户端 TCP connect 中位数: ${sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("TLS 中位数: ${sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("HTTPS 首字节中位数: ${sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--"}")
@@ -298,8 +299,8 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
             if (round.success) {
                 appendLine(
                     "  HTTPS #${round.attempt}: network=${round.protocol.orEmpty()} " +
-                        "DNS=${round.dnsMillis ?: -1}ms TCP=${round.tcpConnectMillis ?: -1}ms " +
-                        "TLS=${round.tlsMillis ?: -1}ms TTFB=${round.firstByteMillis ?: -1}ms " +
+                        "TCP=${round.tcpConnectMillis ?: -1}ms TLS=${round.tlsMillis ?: -1}ms " +
+                        "TTFB=${round.firstByteMillis ?: -1}ms " +
                         "rate=${round.downloadBps?.let(::formatRateForReport) ?: "--"} " +
                         "proxyCount=${formatBytesForReport(round.proxyAccountedDownloadBytes)} " +
                         if (sample.engine.equals("HEV", ignoreCase = true)) {
@@ -320,8 +321,8 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
     }
 
     appendLine(
-        "说明: A/B v2.3 完全恢复 RRBOX 已验证的正常 System/HEV 启动路径，不修改 UID 列表、HEV self-bypass 或 TUN 路由。" +
-            "两套引擎都由 RRBOX 的同一 OkHttp 探针发起请求，但 DNS 与 socket 都显式绑定到 Android 当前 TRANSPORT_VPN Network。" +
+        "说明: A/B v2.4 完全保持 RRBOX 正常 System/HEV 数据面不变。测速开始前只解析一次 speed.cloudflare.com 的 IPv4，" +
+            "System 与 HEV 全程复用同一固定目标；TLS SNI/HTTP Host 仍保持原域名。真正的 TCP/TLS/下载 socket 显式绑定到 Android 当前 TRANSPORT_VPN Network。" +
             "System 使用 sing-box sessionTraffic 验证路径，HEV 同时要求 sessionTraffic 与 hev-socks5-tunnel native RX 字节双重通过。"
     )
 }

@@ -19,21 +19,21 @@ class LabModelsTest {
     }
 
     @Test
-    fun summarizeBenchmarkHistory_usesOnlyV23VerifiedRecords() {
+    fun summarizeBenchmarkHistory_usesOnlyV24VerifiedRecords() {
         val system = verifiedSample("SYSTEM")
         val hev = verifiedSample("HEV")
-        val v23 = EngineBenchmarkReport(
-            benchmarkVersion = 5,
+        val v24 = EngineBenchmarkReport(
+            benchmarkVersion = 6,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "SYSTEM",
-            helperPackage = "Android VPN Network.socketFactory",
+            helperPackage = "Android VPN Network.socketFactory + fixed IPv4 bootstrap",
             system = system,
             hev = hev
         )
-        val oldV22 = v23.copy(benchmarkVersion = 4)
+        val oldV23 = v24.copy(benchmarkVersion = 5)
 
-        val summary = summarizeBenchmarkHistory(listOf(oldV22, v23))
+        val summary = summarizeBenchmarkHistory(listOf(oldV23, v24))
         assertNotNull(summary)
         assertEquals(1, summary!!.runs)
         assertEquals(3, summary.system.httpsSuccessRounds)
@@ -51,11 +51,11 @@ class LabModelsTest {
             }
         )
         val report = EngineBenchmarkReport(
-            benchmarkVersion = 5,
+            benchmarkVersion = 6,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "HEV",
-            helperPackage = "Android VPN Network.socketFactory",
+            helperPackage = "Android VPN Network.socketFactory + fixed IPv4 bootstrap",
             system = system,
             hev = hev
         )
@@ -82,9 +82,9 @@ class LabModelsTest {
     }
 
     @Test
-    fun v23TimingMetrics_useOnlyVerifiedVpnNetworkRounds() {
+    fun v24TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
         val sample = verifiedSample("SYSTEM")
-        assertEquals(4L, sample.httpsDnsMedianMillis)
+        assertNull(sample.httpsDnsMedianMillis)
         assertEquals(6L, sample.httpsTcpMedianMillis)
         assertEquals(210L, sample.httpsTlsMedianMillis)
         assertEquals(85L, sample.httpsFirstByteMedianMillis)
@@ -94,7 +94,6 @@ class LabModelsTest {
         val hev = engine == "HEV"
         fun round(
             attempt: Int,
-            dns: Long,
             tcp: Long,
             tls: Long,
             first: Long,
@@ -102,7 +101,7 @@ class LabModelsTest {
         ): HttpsProbeRound = HttpsProbeRound(
             attempt = attempt,
             success = true,
-            dnsMillis = dns,
+            dnsMillis = null,
             tcpConnectMillis = tcp,
             tlsMillis = tls,
             firstByteMillis = first,
@@ -112,7 +111,7 @@ class LabModelsTest {
             nativeAccountedDownloadBytes = if (hev) 2L * 1024L * 1024L else 0L,
             nativePathVerified = hev,
             proxyPathVerified = true,
-            protocol = "VPN-NETWORK[tun0#123]/http/1.1"
+            protocol = "VPN-NETWORK[tun0#123]/fixed=104.16.1.1/http/1.1"
         )
 
         return EngineBenchmarkSample(
@@ -120,9 +119,9 @@ class LabModelsTest {
             restartMillis = 100L,
             rawIcmpMillis = null,
             httpsRounds = listOf(
-                round(1, 3L, 5L, 200L, 80L, 4L * 1024L * 1024L),
-                round(2, 4L, 6L, 210L, 90L, 3L * 1024L * 1024L),
-                round(3, 5L, 7L, 220L, 85L, 5L * 1024L * 1024L)
+                round(1, 5L, 200L, 80L, 4L * 1024L * 1024L),
+                round(2, 6L, 210L, 90L, 3L * 1024L * 1024L),
+                round(3, 7L, 220L, 85L, 5L * 1024L * 1024L)
             ),
             udpRounds = emptyList(),
             processCpuMillis = 50L,

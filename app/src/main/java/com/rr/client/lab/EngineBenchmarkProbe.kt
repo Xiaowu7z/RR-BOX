@@ -20,19 +20,22 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import java.io.IOException
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.roundToLong
 
 /**
- * Active probes used only by Network Lab A/B v2.3.
+ * Active probes used only by Network Lab A/B v2.4.
  *
- * v2.3 keeps the already verified System/HEV data planes completely unchanged. RRBOX still stays
- * outside the HEV VPN during normal HEV operation. Only the benchmark socket is explicitly created
- * from Android's current VPN Network.socketFactory, with DNS resolved by that same Network.
+ * v2.4 keeps the already verified System/HEV data planes completely unchanged. The benchmark
+ * resolves speed.cloudflare.com once before switching engines, pins one IPv4 target for the whole
+ * A/B run, and binds only the actual TCP/TLS socket to Android's current VPN Network.socketFactory.
+ * This avoids HEV's mapped-DNS path while keeping SNI/Host as speed.cloudflare.com.
  *
  * Path validity is checked against sing-box sessionTraffic. HEV adds a second independent check
  * against hev-socks5-tunnel's native TUN RX byte counter before any measurement is accepted.
@@ -42,16 +45,70 @@ internal object EngineBenchmarkProbe {
     const val HTTPS_ATTEMPTS = 3
     const val PREFLIGHT_BYTES = 64L * 1024L
     const val DOWNLOAD_BYTES = 2L * 1024L * 1024L
-    const val PROBE_TRANSPORT = "Android VPN Network.socketFactory"
+    const val PROBE_TRANSPORT = "Android VPN Network.socketFactory + fixed IPv4 bootstrap"
 
     private const val CONNECT_TIMEOUT_SECONDS = 8L
     private const val READ_TIMEOUT_SECONDS = 15L
     private const val CALL_TIMEOUT_SECONDS = 25L
     private const val ACCOUNTING_WAIT_MILLIS = 3_500L
 
+    data class ProbeTarget(
+        val address: InetAddress,
+        val source: String
+    ) {
+        val addressText: String
+            get() = address.hostAddress ?: address.toString()
+
+        val label: String
+            get() = "$addressText via $source"
+    }
+
+    suspend fun resolveTarget(context: Context): ProbeTarget = withContext(Dispatchers.IO) {
+        val appContext = context.applicationContext
+        val connectivity = appContext.getSystemService(ConnectivityManager::class.java)
+
+        if (connectivity != null) {
+            val candidates = connectivity.allNetworks.mapNotNull { network ->
+                val caps = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return@mapNotNull null
+                val link = connectivity.getLinkProperties(network)
+                val interfaceName = link?.interfaceName.orEmpty().ifBlank { "physical" }
+                val score =
+                    (if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 4 else 0) +
+                        (if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) 2 else 0) +
+                        (if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) 1 else 0)
+                Triple(network, interfaceName, score)
+            }.sortedByDescending { it.third }
+
+            for ((network, interfaceName, _) in candidates) {
+                val ipv4 = runCatching {
+                    network.getAllByName(HTTPS_HOST)
+                        .filterIsInstance<Inet4Address>()
+                        .distinctBy { it.hostAddress }
+                        .firstOrNull()
+                }.getOrNull()
+                if (ipv4 != null) {
+                    return@withContext ProbeTarget(ipv4, "physical:$interfaceName")
+                }
+            }
+        }
+
+        val fallback = runCatching {
+            InetAddress.getAllByName(HTTPS_HOST)
+                .filterIsInstance<Inet4Address>()
+                .distinctBy { it.hostAddress }
+                .firstOrNull()
+        }.getOrNull()
+            ?: throw UnknownHostException("启动前固定解析失败：$HTTPS_HOST 未解析到 IPv4")
+
+        ProbeTarget(fallback, "system-bootstrap")
+    }
+
     suspend fun httpsRound(
         context: Context,
         engine: String,
+        target: ProbeTarget,
         attempt: Int,
         downloadBytes: Long = DOWNLOAD_BYTES
     ): HttpsProbeRound = withContext(Dispatchers.IO) {
@@ -62,7 +119,7 @@ internal object EngineBenchmarkProbe {
                 return@withContext HttpsProbeRound(
                     attempt = attempt,
                     success = false,
-                    protocol = "VPN-NETWORK",
+                    protocol = "VPN-NETWORK/fixed=${target.addressText}",
                     error = safeError(error)
                 )
             }
@@ -74,16 +131,26 @@ internal object EngineBenchmarkProbe {
             return@withContext HttpsProbeRound(
                 attempt = attempt,
                 success = false,
-                protocol = binding.label,
+                protocol = "${binding.label}/fixed=${target.addressText}",
                 error = "HEV native 统计不可用"
             )
         }
 
         val events = ProbeEventListener()
+        val pinnedDns = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                if (!hostname.equals(HTTPS_HOST, ignoreCase = true)) {
+                    throw UnknownHostException("v2.4 不允许测速重定向到其他主机: $hostname")
+                }
+                return listOf(target.address)
+            }
+        }
         val client = OkHttpClient.Builder()
             .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
             .eventListener(events)
             .retryOnConnectionFailure(false)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .writeTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -91,16 +158,13 @@ internal object EngineBenchmarkProbe {
             .protocols(listOf(Protocol.HTTP_1_1))
             .proxy(Proxy.NO_PROXY)
             .socketFactory(binding.network.socketFactory)
-            .dns(object : Dns {
-                override fun lookup(hostname: String): List<InetAddress> =
-                    binding.network.getAllByName(hostname).toList()
-            })
+            .dns(pinnedDns)
             .build()
 
         val nonce = "${SystemClock.elapsedRealtimeNanos()}-$engine-$attempt-$downloadBytes"
         val request = Request.Builder()
             .url("https://$HTTPS_HOST/__down?bytes=$downloadBytes&rrbox=$nonce")
-            .header("User-Agent", "RRBOX-Network-Lab/2.3")
+            .header("User-Agent", "RRBOX-Network-Lab/2.4")
             .header("Accept-Encoding", "identity")
             .header("Cache-Control", "no-cache")
             .header("Connection", "close")
@@ -108,7 +172,7 @@ internal object EngineBenchmarkProbe {
 
         val callStartedNs = System.nanoTime()
         var httpCode: Int? = null
-        var protocol: String? = binding.label
+        var protocol: String? = "${binding.label}/fixed=${target.addressText}"
 
         try {
             var bytesReceived = 0L
@@ -117,7 +181,7 @@ internal object EngineBenchmarkProbe {
 
             client.newCall(request).execute().use { response ->
                 httpCode = response.code
-                protocol = "${binding.label}/${response.protocol}"
+                protocol = "${binding.label}/fixed=${target.addressText}/${response.protocol}"
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
 
                 val body = response.body ?: throw IOException("HTTPS 响应正文为空")
@@ -153,7 +217,8 @@ internal object EngineBenchmarkProbe {
             HttpsProbeRound(
                 attempt = attempt,
                 success = true,
-                dnsMillis = events.dnsMillis,
+                // DNS is resolved once before the A/B run and deliberately excluded from timing.
+                dnsMillis = null,
                 tcpConnectMillis = events.tcpConnectMillis,
                 tlsMillis = events.tlsMillis,
                 firstByteMillis = nanosToMillis(firstNs - callStartedNs),
@@ -171,7 +236,7 @@ internal object EngineBenchmarkProbe {
             HttpsProbeRound(
                 attempt = attempt,
                 success = false,
-                dnsMillis = events.dnsMillis,
+                dnsMillis = null,
                 tcpConnectMillis = events.tcpConnectMillis,
                 tlsMillis = events.tlsMillis,
                 httpCode = httpCode,
@@ -274,24 +339,13 @@ internal object EngineBenchmarkProbe {
     )
 
     private class ProbeEventListener : EventListener() {
-        private var dnsStartedNs: Long? = null
         private var connectStartedNs: Long? = null
         private var tlsStartedNs: Long? = null
 
-        var dnsMillis: Long? = null
-            private set
         var tcpConnectMillis: Long? = null
             private set
         var tlsMillis: Long? = null
             private set
-
-        override fun dnsStart(call: Call, domainName: String) {
-            dnsStartedNs = System.nanoTime()
-        }
-
-        override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
-            dnsMillis = durationMillis(dnsStartedNs, System.nanoTime())
-        }
 
         override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
             connectStartedNs = System.nanoTime()
