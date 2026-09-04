@@ -72,6 +72,10 @@ class RRVpnService : VpnService() {
         private val _sessionTraffic = MutableStateFlow(SessionTraffic())
         val sessionTraffic: StateFlow<SessionTraffic> = _sessionTraffic.asStateFlow()
 
+        private val _engineRestartMeasurement = MutableStateFlow(EngineRestartMeasurement())
+        val engineRestartMeasurement: StateFlow<EngineRestartMeasurement> =
+            _engineRestartMeasurement.asStateFlow()
+
         const val EXTRA_CONFIG_JSON = "EXTRA_CONFIG_JSON"
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
@@ -133,7 +137,7 @@ class RRVpnService : VpnService() {
                     false
                 )
                 ensureForeground(
-                    if (benchmarkSelf) "$activeNodeTag · HEV A/B v2.5" else "$activeNodeTag · 正在切换引擎"
+                    if (benchmarkSelf) "$activeNodeTag · HEV A/B" else "$activeNodeTag · 正在切换引擎"
                 )
                 launchCore(
                     stableConfigJson = config,
@@ -225,6 +229,7 @@ class RRVpnService : VpnService() {
         restarting: Boolean,
         hevBenchmarkSelfTraffic: Boolean = false
     ) {
+        val measurementStartedAt = SystemClock.elapsedRealtime()
         val generation = ++requestGeneration
         stopping = false
         _lastError.value = null
@@ -291,6 +296,11 @@ class RRVpnService : VpnService() {
                 _isStarting.value = false
                 _isRunning.value = true
                 notificationMgr.updateNotification(displayNodeTag(), TrafficSpeed(), 0L)
+                publishRestartMeasurement(
+                    measurementStartedAt = measurementStartedAt,
+                    success = true,
+                    engine = activeEngine
+                )
                 Log.i(
                     TAG,
                     "VPN tunnel started: $activeNodeTag · engine=$activeEngine" +
@@ -311,6 +321,11 @@ class RRVpnService : VpnService() {
                 _lastError.value = reason
                 Log.e(TAG, reason)
                 _isStarting.value = false
+                publishRestartMeasurement(
+                    measurementStartedAt = measurementStartedAt,
+                    success = false,
+                    engine = resolvedEngine
+                )
 
                 if (hevBenchmarkSelfTraffic) {
                     withContext(Dispatchers.IO) {
@@ -326,6 +341,20 @@ class RRVpnService : VpnService() {
                 }
             }
         }
+    }
+
+    private fun publishRestartMeasurement(
+        measurementStartedAt: Long,
+        success: Boolean,
+        engine: String
+    ) {
+        val previous = _engineRestartMeasurement.value
+        _engineRestartMeasurement.value = EngineRestartMeasurement(
+            serial = previous.serial + 1L,
+            durationMillis = (SystemClock.elapsedRealtime() - measurementStartedAt).coerceAtLeast(1L),
+            success = success,
+            engine = engine
+        )
     }
 
     private fun stopDataPlane() {
