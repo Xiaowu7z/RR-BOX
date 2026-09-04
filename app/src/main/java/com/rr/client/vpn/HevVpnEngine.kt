@@ -1,5 +1,6 @@
 package com.rr.client.vpn
 
+import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -7,6 +8,7 @@ import android.util.Log
 import com.rr.client.core.HevConfigAdapter
 import com.rr.client.routing.ResolvedPerAppPolicy
 import java.io.File
+import java.net.InetAddress
 
 /**
  * Android VpnService + HEV native TUN-to-SOCKS data plane.
@@ -33,7 +35,10 @@ class HevVpnEngine(
     val isRunning: Boolean
         get() = tunPfd != null && HevTunnelNative.isRunning()
 
-    fun start(policy: ResolvedPerAppPolicy): Boolean {
+    fun start(
+        policy: ResolvedPerAppPolicy,
+        includeSelfForBenchmark: Boolean = false
+    ): Boolean {
         stop()
         lastError = null
 
@@ -46,7 +51,7 @@ class HevVpnEngine(
 
         return runCatching {
             val builder = vpnService.Builder()
-                .setSession("RRBOX · HEV")
+                .setSession(if (includeSelfForBenchmark) "RRBOX · HEV · A/B" else "RRBOX · HEV")
                 .setMtu(HevTunnelConfig.MTU)
                 .addAddress(HevTunnelConfig.IPV4_CLIENT, HevTunnelConfig.IPV4_PREFIX)
                 .addRoute("0.0.0.0", 0)
@@ -56,7 +61,18 @@ class HevVpnEngine(
                 builder.setMetered(false)
             }
 
-            applyPerAppPolicy(builder, policy)
+            if (includeSelfForBenchmark) {
+                require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    "HEV A/B v2.1 路径校验需要 Android 13 或更高版本"
+                }
+                // Benchmark-only routing: RRBOX's own UID must enter the HEV TUN so the
+                // active probes measure TUN -> lwIP -> SOCKS -> sing-box. Keep 127/8 outside
+                // the VPN so HEV's local SOCKS hop can never feed back into its own TUN.
+                builder.excludeRoute(IpPrefix(InetAddress.getByName("127.0.0.0"), 8))
+                onLog("HEV A/B v2.1：RRBOX 自身临时纳入 TUN，127/8 保持本地回环")
+            }
+
+            applyPerAppPolicy(builder, policy, includeSelfForBenchmark)
 
             val pfd = builder.establish()
                 ?: error("Android 拒绝建立 HEV VPN 接口")
@@ -98,22 +114,33 @@ class HevVpnEngine(
 
     private fun applyPerAppPolicy(
         builder: VpnService.Builder,
-        policy: ResolvedPerAppPolicy
+        policy: ResolvedPerAppPolicy,
+        includeSelfForBenchmark: Boolean
     ) {
         when {
             policy.allowedPackages.isNotEmpty() -> {
                 var added = 0
-                policy.allowedPackages
+                val allowed = if (includeSelfForBenchmark) {
+                    policy.allowedPackages + SELF_PACKAGE
+                } else {
+                    policy.allowedPackages.filterNot { it == SELF_PACKAGE }
+                }
+                allowed
                     .asSequence()
                     .map(String::trim)
                     .filter(String::isNotEmpty)
-                    .filterNot { it == SELF_PACKAGE }
                     .distinct()
                     .forEach { packageName ->
                         runCatching { builder.addAllowedApplication(packageName) }
                             .onSuccess {
                                 added++
-                                onLog("HEV 仅选中代理：$packageName")
+                                onLog(
+                                    if (packageName == SELF_PACKAGE && includeSelfForBenchmark) {
+                                        "HEV A/B v2.1 临时纳入 RRBOX 自身 UID"
+                                    } else {
+                                        "HEV 仅选中代理：$packageName"
+                                    }
+                                )
                             }
                             .onFailure { error ->
                                 Log.w(TAG, "Unable to allow package $packageName", error)
@@ -123,7 +150,12 @@ class HevVpnEngine(
             }
 
             policy.disallowedPackages.isNotEmpty() -> {
-                (policy.disallowedPackages + SELF_PACKAGE)
+                val disallowed = if (includeSelfForBenchmark) {
+                    policy.disallowedPackages.filterNot { it == SELF_PACKAGE }
+                } else {
+                    policy.disallowedPackages + SELF_PACKAGE
+                }
+                disallowed
                     .asSequence()
                     .map(String::trim)
                     .filter(String::isNotEmpty)
@@ -135,13 +167,21 @@ class HevVpnEngine(
                                 Log.w(TAG, "Unable to bypass package $packageName", error)
                             }
                     }
+                if (includeSelfForBenchmark) {
+                    onLog("HEV A/B v2.1：保留用户绕过列表，但 RRBOX 自身不再绕过")
+                }
             }
 
             else -> {
-                // HEV connects to a local SOCKS listener from RRBOX's own UID. Keep self outside
-                // the VPN to prevent the bridge/core control traffic from re-entering the TUN.
-                builder.addDisallowedApplication(SELF_PACKAGE)
-                onLog("HEV 全部代理：RRBOX 自身保持 VPN 外以避免回环")
+                if (includeSelfForBenchmark) {
+                    onLog("HEV A/B v2.1：全部代理模式下 RRBOX 自身临时进入 HEV TUN")
+                } else {
+                    // Normal HEV mode keeps RRBOX itself outside the VPN. This behavior is
+                    // intentionally unchanged; only Network Lab's transient benchmark restart
+                    // is allowed to include self, with 127/8 explicitly excluded above.
+                    builder.addDisallowedApplication(SELF_PACKAGE)
+                    onLog("HEV 全部代理：RRBOX 自身保持 VPN 外以避免回环")
+                }
             }
         }
     }

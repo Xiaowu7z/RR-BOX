@@ -223,7 +223,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                             benchmarkBusy = true
                             benchmark = null
                             benchmarkError = null
-                            benchmarkProgress = "准备 A/B v2"
+                            benchmarkProgress = "准备 A/B v2.1"
                             scope.launch {
                                 runCatching {
                                     EngineBenchmarkRunner(
@@ -243,7 +243,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                                     )
                                 }.onFailure { error ->
                                     benchmarkError = error.message ?: error.javaClass.simpleName
-                                    RRLogStore.record("BENCH", "A/B v2 失败: ${benchmarkError.orEmpty()}")
+                                    RRLogStore.record("BENCH", "A/B v2.1 失败: ${benchmarkError.orEmpty()}")
                                 }
                                 benchmarkBusy = false
                                 benchmarkProgress = null
@@ -363,9 +363,9 @@ private fun LabDashboard(
             }
         }
 
-        LabCard(title = "System vs HEV A/B v2", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
+        LabCard(title = "System vs HEV A/B v2.1", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
             Text(
-                "两套引擎各做 3 轮固定 2 MiB HTTPS 下载（总计约 12 MiB），记录 DNS/TCP/TLS/首字节/下载速率，并用 VPN 会话流量反查测试字节是否进入代理数据面；随后各做 3 次 UDP STUN。原始 ICMP 仅作参考，不参与引擎结论。测试只调用现有引擎切换入口，结束或中途退出都会恢复原始引擎。",
+                "每套引擎先做 64 KiB HTTPS 代理路径预检，只有 sessionTraffic 确认流量进入代理数据面后，才继续 3 轮固定 2 MiB HTTPS 和 3 次 UDP STUN。HEV 仅在本次实验重建期间临时让 RRBOX 自身进入 TUN，并把 127/8 排除在 VPN 外防止本地 SOCKS 回环；测试结束或取消后强制恢复正常引擎模式。原始 ICMP 已从 A/B 成绩移除。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
@@ -375,7 +375,7 @@ private fun LabDashboard(
                 enabled = isRunning && !isStarting && selectedNode != null && !benchmarkBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {
-                Text(if (benchmarkBusy) "A/B v2 测试中…" else "开始一键 A/B v2", color = DarkBackground, fontWeight = FontWeight.Bold)
+                Text(if (benchmarkBusy) "A/B v2.1 测试中…" else "开始一键 A/B v2.1", color = DarkBackground, fontWeight = FontWeight.Bold)
             }
             benchmarkProgress?.let {
                 Spacer(Modifier.height(6.dp))
@@ -400,7 +400,7 @@ private fun LabDashboard(
 
             historyStats?.takeIf { it.runs >= 2 }?.let { stats ->
                 Spacer(Modifier.height(12.dp))
-                Text("A/B v2 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("A/B v2.1 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
                 HistoryStatsCard("SYSTEM", stats.system)
                 Spacer(Modifier.height(6.dp))
@@ -411,10 +411,16 @@ private fun LabDashboard(
                 Spacer(Modifier.height(12.dp))
                 Text("历史记录 ${benchmarkHistory.size} 条", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 benchmarkHistory.take(3).forEach { item ->
-                    val summary = if (item.benchmarkVersion >= 2) {
-                        "${item.nodeTag}: System ${item.system.httpsFirstByteMedianMillis ?: -1}ms / HEV ${item.hev.httpsFirstByteMedianMillis ?: -1}ms TTFB"
-                    } else {
-                        "${item.nodeTag}: 旧版 · System ${item.system.restartMillis}ms / HEV ${item.hev.restartMillis}ms"
+                    val summary = when {
+                        item.benchmarkVersion >= 3 -> {
+                            "${item.nodeTag}: v2.1 · System ${item.system.httpsFirstByteMedianMillis ?: -1}ms / HEV ${item.hev.httpsFirstByteMedianMillis ?: -1}ms TTFB"
+                        }
+                        item.benchmarkVersion >= 2 -> {
+                            "${item.nodeTag}: v2 旧路径记录 · 不进入正式统计"
+                        }
+                        else -> {
+                            "${item.nodeTag}: v1 旧版 · System ${item.system.restartMillis}ms / HEV ${item.hev.restartMillis}ms"
+                        }
                     }
                     Text(summary, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                 }
@@ -550,11 +556,12 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
     Surface(shape = RoundedCornerShape(10.dp), color = DarkSurfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(10.dp)) {
             Text(sample.engine, color = CyanPrimary, fontWeight = FontWeight.Bold)
+            StatusRow("路径预检", "PASS · 64 KiB")
             StatusRow("重建耗时", "${sample.restartMillis} ms")
-            StatusRow("原始 ICMP 参考", sample.rawIcmpMillis?.let { "$it ms" } ?: "超时")
             StatusRow("HTTPS 成功", "${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
+            StatusRow("有效代理轮次", "${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
             StatusRow("DNS 中位", sample.httpsDnsMedianMillis?.let { "$it ms" } ?: "缓存/未触发")
-            StatusRow("TCP 中位", sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--")
+            StatusRow("客户端 TCP", sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--")
             StatusRow("TLS 中位", sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--")
             StatusRow("HTTPS 首字节", sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--")
             StatusRow("2 MiB 下载中位", sample.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--")
@@ -562,15 +569,16 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
             StatusRow(
                 "UDP STUN",
                 "${sample.udpSuccessCount}/${sample.udpAttemptCount}" +
-                    (sample.udpMedianRttMillis?.let { " · ${it} ms" } ?: "")
+                    (sample.udpMedianRttMillis?.let { " · ${it} ms" } ?: "") +
+                    " · 路径已验证"
             )
             StatusRow("进程 CPU", "${sample.processCpuMillis} ms")
             StatusRow("PSS", String.format("%.1f MB", sample.processPssKb / 1024.0))
 
-            if (sample.httpsSuccessCount > 0 && sample.proxyPathVerifiedCount < sample.httpsSuccessCount) {
+            if (sample.proxyPathVerifiedCount < 2) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "部分 HTTPS 轮次未能从会话计数确认足量代理字节；该轮吞吐可参考，但不要用于正式性能结论。",
+                    "有效代理轮次不足，当前样本不会进入 v2.1 正式历史统计。",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelSmall
                 )

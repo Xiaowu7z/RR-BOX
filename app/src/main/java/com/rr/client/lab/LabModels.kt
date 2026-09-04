@@ -82,6 +82,9 @@ data class EngineBenchmarkSample(
     val processPssKb: Int,
     val downloadBytesPerRound: Long = 0L
 ) {
+    private val validHttpsRounds: List<HttpsProbeRound>
+        get() = httpsRounds.orEmpty().filter { it.success && it.proxyPathVerified }
+
     val httpsAttemptCount: Int
         get() = httpsRounds.orEmpty().size
 
@@ -89,22 +92,22 @@ data class EngineBenchmarkSample(
         get() = httpsRounds.orEmpty().count { it.success }
 
     val proxyPathVerifiedCount: Int
-        get() = httpsRounds.orEmpty().count { it.success && it.proxyPathVerified }
+        get() = validHttpsRounds.size
 
     val httpsDnsMedianMillis: Long?
-        get() = medianLong(httpsRounds.orEmpty().mapNotNull { if (it.success) it.dnsMillis else null })
+        get() = medianLong(validHttpsRounds.mapNotNull { it.dnsMillis })
 
     val httpsTcpMedianMillis: Long?
-        get() = medianLong(httpsRounds.orEmpty().mapNotNull { if (it.success) it.tcpConnectMillis else null })
+        get() = medianLong(validHttpsRounds.mapNotNull { it.tcpConnectMillis })
 
     val httpsTlsMedianMillis: Long?
-        get() = medianLong(httpsRounds.orEmpty().mapNotNull { if (it.success) it.tlsMillis else null })
+        get() = medianLong(validHttpsRounds.mapNotNull { it.tlsMillis })
 
     val httpsFirstByteMedianMillis: Long?
-        get() = medianLong(httpsRounds.orEmpty().mapNotNull { if (it.success) it.firstByteMillis else null })
+        get() = medianLong(validHttpsRounds.mapNotNull { it.firstByteMillis })
 
     val httpsDownloadMedianBps: Long?
-        get() = medianLong(httpsRounds.orEmpty().mapNotNull { if (it.success) it.downloadBps else null })
+        get() = medianLong(validHttpsRounds.mapNotNull { it.downloadBps })
 
     val udpAttemptCount: Int
         get() = udpRounds.orEmpty().size
@@ -117,7 +120,7 @@ data class EngineBenchmarkSample(
 }
 
 data class EngineBenchmarkReport(
-    val benchmarkVersion: Int = 2,
+    val benchmarkVersion: Int = 3,
     val timestamp: Long = System.currentTimeMillis(),
     val nodeTag: String,
     val nodeServerMasked: String,
@@ -184,11 +187,19 @@ fun calculateMetricStats(values: List<Long>): MetricStats? {
 }
 
 fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHistoryStats? {
-    val reports = history.filter { it.benchmarkVersion >= 2 }
+    // v2.0 could produce apparently successful HEV rounds that actually bypassed the HEV TUN.
+    // Only v2.1/schema-v3 reports with at least two verified rounds per engine are eligible.
+    val reports = history.filter { report ->
+        report.benchmarkVersion >= 3 &&
+            report.system.proxyPathVerifiedCount >= 2 &&
+            report.hev.proxyPathVerifiedCount >= 2
+    }
     if (reports.isEmpty()) return null
 
     fun summarize(samples: List<EngineBenchmarkSample>): EngineHistoryStats {
-        val https = samples.flatMap { it.httpsRounds.orEmpty() }.filter { it.success }
+        val https = samples
+            .flatMap { it.httpsRounds.orEmpty() }
+            .filter { it.success && it.proxyPathVerified }
         val udp = samples.flatMap { it.udpRounds.orEmpty() }
         return EngineHistoryStats(
             runs = samples.size,
@@ -198,7 +209,7 @@ fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHi
             pssKb = calculateMetricStats(samples.map { it.processPssKb.toLong() }),
             udpSuccesses = udp.count { it.success },
             udpAttempts = udp.size,
-            proxyVerifiedRounds = https.count { it.proxyPathVerified },
+            proxyVerifiedRounds = https.size,
             httpsSuccessRounds = https.size
         )
     }
@@ -233,10 +244,20 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         return@buildString
     }
 
-    appendLine("RRBOX System vs HEV A/B v2 实测报告")
+    val v21 = benchmarkVersion >= 3
+    appendLine(
+        if (v21) {
+            "RRBOX System vs HEV A/B v2.1 实测报告"
+        } else {
+            "RRBOX System vs HEV A/B v2 实测报告（旧路径校验规则）"
+        }
+    )
     appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
     appendLine("节点: $nodeTag ($nodeServerMasked)")
     appendLine("原始引擎: $originalEngine")
+    if (v21) {
+        appendLine("代理路径预检: PASS（每个引擎先做 64 KiB HTTPS；未通过不会生成本报告）")
+    }
     appendLine("HTTPS 固定下载: $probeTarget / 每轮 ${formatBytesForReport(system.downloadBytesPerRound)} × 3")
     appendLine("UDP STUN: $udpTarget / 3 次")
     appendLine()
@@ -244,15 +265,22 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
     listOf(system, hev).forEach { sample ->
         appendLine("[${sample.engine}]")
         appendLine("重建耗时: ${sample.restartMillis} ms")
-        appendLine("原始 ICMP 参考: ${sample.rawIcmpMillis?.let { "$it ms" } ?: "超时/不可用"}（不参与引擎结论）")
+        if (!v21) {
+            appendLine("原始 ICMP 参考: ${sample.rawIcmpMillis?.let { "$it ms" } ?: "超时/不可用"}（不参与引擎结论）")
+        }
         appendLine("HTTPS 成功: ${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
+        appendLine("有效代理轮次: ${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
         appendLine("DNS 中位数: ${sample.httpsDnsMedianMillis?.let { "$it ms" } ?: "缓存/未触发"}")
-        appendLine("TCP 连接中位数: ${sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--"}")
+        appendLine("客户端 TCP connect 中位数: ${sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("TLS 中位数: ${sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("HTTPS 首字节中位数: ${sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("固定下载中位数: ${sample.httpsDownloadMedianBps?.let(::formatRateForReport) ?: "--"}")
         appendLine("代理流量计数验证: ${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
-        appendLine("UDP STUN: ${sample.udpSuccessCount}/${sample.udpAttemptCount}，中位 RTT ${sample.udpMedianRttMillis?.let { "$it ms" } ?: "--"}")
+        appendLine(
+            "UDP STUN: ${sample.udpSuccessCount}/${sample.udpAttemptCount}，中位 RTT " +
+                "${sample.udpMedianRttMillis?.let { "$it ms" } ?: "--"}" +
+                if (v21) "（共享已验证的 RRBOX UID VPN 路径）" else ""
+        )
         appendLine("进程 CPU: ${sample.processCpuMillis} ms / PSS ${String.format("%.1f", sample.processPssKb / 1024.0)} MB")
 
         sample.httpsRounds.orEmpty().forEach { round ->
@@ -277,7 +305,19 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         appendLine()
     }
 
-    appendLine("说明: A/B v2 仅调用 RRBOX 已验证的引擎重建入口。HTTPS/UDP 探针由 RRBOX 自身 UID 发起；固定 HTTPS 字节会再与 VPN 会话流量计数交叉验证。不会修改 System/HEV 数据面实现。")
+    if (v21) {
+        appendLine(
+            "说明: A/B v2.1 在每个引擎正式测试前先用 64 KiB HTTPS 与 sessionTraffic 做硬性路径校验。" +
+                "HEV 仅在实验室测试重建期间临时把 RRBOX 自身 UID 纳入 TUN，并显式排除 127/8，" +
+                "从而测到 TUN → lwIP → SOCKS5 → sing-box；正常 HEV 模式仍保持 RRBOX 自身绕过，测试结束或取消后会强制按正常模式恢复原始引擎。" +
+                "原始 ICMP 已从 v2.1 引擎成绩移除。"
+        )
+    } else {
+        appendLine(
+            "说明: A/B v2 旧记录的 HEV 自身 UID 可能绕过 HEV TUN，因此仅保留历史查看；" +
+                "v2.1 历史统计不会纳入这些旧记录。"
+        )
+    }
 }
 
 private fun medianLong(values: List<Long>): Long? = calculateMetricStats(values)?.median?.roundToLong()

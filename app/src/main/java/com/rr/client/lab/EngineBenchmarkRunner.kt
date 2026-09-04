@@ -8,8 +8,6 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import com.rr.client.core.NodeLatencyState
-import com.rr.client.core.NodeLatencyTester
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.vpn.RRVpnService
@@ -32,13 +30,19 @@ class EngineBenchmarkRunner(
             "请先让 RRBOX 正常连接，再开始 System / HEV A/B"
         }
         val originalEngine = preferences.tunEngine.first()
-        RRLogStore.record("BENCH", "开始 A/B v2: node=${node.tag}, original=$originalEngine")
+        RRLogStore.record("BENCH", "开始 A/B v2.1: node=${node.tag}, original=$originalEngine")
 
         return try {
-            val system = sampleEngine(PreferencesManager.TUN_ENGINE_SYSTEM)
-            val hev = sampleEngine(PreferencesManager.TUN_ENGINE_HEV)
+            val system = sampleEngine(
+                engine = PreferencesManager.TUN_ENGINE_SYSTEM,
+                includeSelfForHevBenchmark = false
+            )
+            val hev = sampleEngine(
+                engine = PreferencesManager.TUN_ENGINE_HEV,
+                includeSelfForHevBenchmark = true
+            )
             EngineBenchmarkReport(
-                benchmarkVersion = 2,
+                benchmarkVersion = 3,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
@@ -50,7 +54,7 @@ class EngineBenchmarkRunner(
                 BenchmarkHistoryStore.save(appContext, it)
                 RRLogStore.record(
                     "BENCH",
-                    "A/B v2 完成: System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
+                    "A/B v2.1 完成: System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
                         "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
                 )
             }
@@ -59,21 +63,38 @@ class EngineBenchmarkRunner(
                 onProgress("正在恢复原始引擎")
                 runCatching { restoreEngine(originalEngine) }
                     .onFailure { RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}") }
-                onProgress("A/B v2 已结束")
+                onProgress("A/B v2.1 已结束")
             }
         }
     }
 
-    private suspend fun sampleEngine(engine: String): EngineBenchmarkSample {
+    private suspend fun sampleEngine(
+        engine: String,
+        includeSelfForHevBenchmark: Boolean
+    ): EngineBenchmarkSample {
         onProgress("$engine · 正在重建引擎")
-        val restartMillis = restartInto(engine)
+        val restartMillis = restartInto(engine, includeSelfForHevBenchmark)
         delay(800L)
 
-        onProgress("$engine · 原始 ICMP 参考")
-        val rawIcmp = when (val state = NodeLatencyTester.ping(node.server)) {
-            is NodeLatencyState.Success -> state.millis
-            else -> null
+        onProgress("$engine · 64 KiB 代理路径预检")
+        val preflight = EngineBenchmarkProbe.httpsRound(
+            attempt = 0,
+            downloadBytes = EngineBenchmarkProbe.PREFLIGHT_BYTES
+        )
+        RRLogStore.record(
+            "BENCH",
+            "$engine PREFLIGHT success=${preflight.success} bytes=${preflight.bytesReceived} " +
+                "proxyCount=${preflight.proxyAccountedDownloadBytes} verified=${preflight.proxyPathVerified}"
+        )
+        check(preflight.success) {
+            "$engine 代理路径预检失败：${preflight.error ?: "HTTPS 预检未成功"}"
         }
+        check(preflight.proxyPathVerified) {
+            "$engine 代理路径预检未进入代理数据面：" +
+                "下载 ${preflight.bytesReceived} B，仅计入 ${preflight.proxyAccountedDownloadBytes} B；" +
+                "已停止测试，避免生成无效成绩"
+        }
+        delay(250L)
 
         val cpuStart = Process.getElapsedCpuTime()
         val httpsRounds = buildList {
@@ -88,8 +109,19 @@ class EngineBenchmarkRunner(
                         "ttfb=${result.firstByteMillis ?: -1}ms " +
                         "rate=${result.downloadBps ?: -1} verified=${result.proxyPathVerified}"
                 )
+                if (result.success && !result.proxyPathVerified) {
+                    error(
+                        "$engine HTTPS#$attempt 已下载但代理计数验证失败；" +
+                            "已停止测试，避免把旁路流量算作引擎成绩"
+                    )
+                }
                 delay(300L)
             }
+        }
+
+        val verifiedHttps = httpsRounds.count { it.success && it.proxyPathVerified }
+        check(verifiedHttps >= 2) {
+            "$engine 有效 HTTPS 轮次不足：$verifiedHttps/${EngineBenchmarkProbe.HTTPS_ATTEMPTS}"
         }
 
         val udpRounds = buildList {
@@ -100,7 +132,8 @@ class EngineBenchmarkRunner(
                 add(result)
                 RRLogStore.record(
                     "BENCH",
-                    "$engine UDP#$attempt success=${result.success} rtt=${result.rttMillis ?: -1}ms"
+                    "$engine UDP#$attempt success=${result.success} rtt=${result.rttMillis ?: -1}ms " +
+                        "path=preflight-verified"
                 )
                 delay(200L)
             }
@@ -110,7 +143,7 @@ class EngineBenchmarkRunner(
         val sample = EngineBenchmarkSample(
             engine = engine,
             restartMillis = restartMillis,
-            rawIcmpMillis = rawIcmp,
+            rawIcmpMillis = null,
             httpsRounds = httpsRounds,
             udpRounds = udpRounds,
             processCpuMillis = cpuDelta,
@@ -123,7 +156,7 @@ class EngineBenchmarkRunner(
 
         RRLogStore.record(
             "BENCH",
-            "$engine v2 sample: restart=${sample.restartMillis}ms " +
+            "$engine v2.1 sample: restart=${sample.restartMillis}ms " +
                 "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
                 "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
                 "udp=${sample.udpSuccessCount}/${sample.udpAttemptCount} " +
@@ -132,13 +165,20 @@ class EngineBenchmarkRunner(
         return sample
     }
 
-    private suspend fun restartInto(engine: String): Long {
+    private suspend fun restartInto(
+        engine: String,
+        includeSelfForHevBenchmark: Boolean = false
+    ): Long {
         preferences.setTunEngine(engine)
         val startedAt = SystemClock.elapsedRealtime()
         ContextCompat.startForegroundService(
             appContext,
             Intent(appContext, RRVpnService::class.java).apply {
                 action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
+                putExtra(
+                    RRVpnService.EXTRA_HEV_BENCHMARK_SELF_TRAFFIC,
+                    engine == PreferencesManager.TUN_ENGINE_HEV && includeSelfForHevBenchmark
+                )
             }
         )
 
@@ -159,17 +199,20 @@ class EngineBenchmarkRunner(
     }
 
     private suspend fun restoreEngine(originalEngine: String) {
-        val currentPreference = runCatching { preferences.tunEngine.first() }.getOrDefault(originalEngine)
-        if (currentPreference == originalEngine) return
+        // Always clear the transient HEV benchmark route by doing a normal restart when a data
+        // plane is alive. This is required even when the original preference was already HEV.
+        preferences.setTunEngine(originalEngine)
 
-        if (!RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
-            preferences.setTunEngine(originalEngine)
-            RRLogStore.record("BENCH", "VPN 非稳定运行态，仅恢复引擎偏好: $originalEngine")
+        if (!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) {
+            RRLogStore.record("BENCH", "VPN 已停止，仅恢复引擎偏好: $originalEngine")
             return
         }
 
-        val restoreMillis = restartInto(originalEngine)
-        RRLogStore.record("BENCH", "已恢复原始引擎: $originalEngine (${restoreMillis}ms)")
+        val restoreMillis = restartInto(
+            engine = originalEngine,
+            includeSelfForHevBenchmark = false
+        )
+        RRLogStore.record("BENCH", "已按正常模式恢复原始引擎: $originalEngine (${restoreMillis}ms)")
     }
 
     private fun maskHost(value: String): String {

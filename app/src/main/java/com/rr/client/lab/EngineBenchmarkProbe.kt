@@ -29,11 +29,10 @@ import kotlin.math.roundToLong
 /**
  * Active probes used only by Network Lab.
  *
- * RRBOX's own UID is intentionally kept inside the VPN UID set by ConfigBuilder.
- * Therefore these ordinary app sockets enter the active System/HEV TUN. Core
- * outbound sockets are still released from the VPN by VpnService.protect(fd).
- * This helper never receives a VpnService reference and cannot alter either
- * forwarding engine.
+ * System mode already keeps RRBOX's own UID inside the VPN. Normal HEV mode deliberately keeps
+ * RRBOX outside to avoid a local bridge loop, so A/B v2.1 uses a transient benchmark-only HEV
+ * restart that includes RRBOX while excluding 127/8 from the VPN. Core outbound sockets are still
+ * released from the VPN by VpnService.protect(fd). This helper never mutates either data plane.
  */
 internal object EngineBenchmarkProbe {
     const val HTTPS_HOST = "speed.cloudflare.com"
@@ -41,6 +40,7 @@ internal object EngineBenchmarkProbe {
     const val UDP_PORT = 19302
     const val HTTPS_ATTEMPTS = 3
     const val UDP_ATTEMPTS = 3
+    const val PREFLIGHT_BYTES = 64L * 1024L
     const val DOWNLOAD_BYTES = 2L * 1024L * 1024L
 
     private const val CONNECT_TIMEOUT_SECONDS = 8L
@@ -50,7 +50,12 @@ internal object EngineBenchmarkProbe {
     private const val ACCOUNTING_WAIT_MILLIS = 2_500L
     private val secureRandom = SecureRandom()
 
-    suspend fun httpsRound(attempt: Int): HttpsProbeRound = withContext(Dispatchers.IO) {
+    suspend fun httpsRound(
+        attempt: Int,
+        downloadBytes: Long = DOWNLOAD_BYTES
+    ): HttpsProbeRound = withContext(Dispatchers.IO) {
+        require(downloadBytes > 0L) { "HTTPS 测试字节必须大于 0" }
+
         val accountingStart = RRVpnService.sessionTraffic.value.proxyDownloadTotal
         val events = ProbeEventListener()
         val client = OkHttpClient.Builder()
@@ -64,10 +69,10 @@ internal object EngineBenchmarkProbe {
             .protocols(listOf(Protocol.HTTP_1_1))
             .build()
 
-        val nonce = "${SystemClock.elapsedRealtimeNanos()}-$attempt"
+        val nonce = "${SystemClock.elapsedRealtimeNanos()}-$attempt-$downloadBytes"
         val request = Request.Builder()
-            .url("https://$HTTPS_HOST/__down?bytes=$DOWNLOAD_BYTES&rrbox=$nonce")
-            .header("User-Agent", "RRBOX-Network-Lab/2")
+            .url("https://$HTTPS_HOST/__down?bytes=$downloadBytes&rrbox=$nonce")
+            .header("User-Agent", "RRBOX-Network-Lab/2.1")
             .header("Accept-Encoding", "identity")
             .header("Cache-Control", "no-cache")
             .header("Connection", "close")
@@ -102,12 +107,16 @@ internal object EngineBenchmarkProbe {
             }
 
             if (bytesReceived <= 0L) throw IOException("HTTPS 未收到响应正文")
+            if (bytesReceived < downloadBytes) {
+                throw IOException("HTTPS 响应正文不足: $bytesReceived/$downloadBytes bytes")
+            }
+
             val firstNs = firstByteNs ?: finishedNs
             val transferNs = (finishedNs - firstNs).coerceAtLeast(1L)
             val downloadBps = (bytesReceived.toDouble() * 1_000_000_000.0 / transferNs.toDouble())
                 .coerceAtMost(Long.MAX_VALUE.toDouble())
                 .roundToLong()
-            val accounting = awaitProxyAccounting(accountingStart, bytesReceived)
+            val accounting = awaitProxyAccounting(accountingStart, downloadBytes)
 
             HttpsProbeRound(
                 attempt = attempt,
@@ -181,7 +190,10 @@ internal object EngineBenchmarkProbe {
     }
 
     private suspend fun awaitProxyAccounting(startDown: Long, expectedBytes: Long): Pair<Long, Boolean> {
-        val threshold = max(64L * 1024L, expectedBytes * 55L / 100L)
+        // The status channel publishes roughly once per second. Use a conservative payload ratio
+        // instead of requiring an exact byte match, while keeping the preflight threshold large
+        // enough that ordinary background traffic is very unlikely to create a false PASS.
+        val threshold = max(16L * 1024L, expectedBytes / 2L)
         val deadline = SystemClock.elapsedRealtime() + ACCOUNTING_WAIT_MILLIS
         var delta = 0L
         while (SystemClock.elapsedRealtime() < deadline) {
