@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.rr.client.MainActivity
@@ -22,6 +23,10 @@ class RRNotificationManager(private val context: Context) {
 
     private val notificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+    private val appNotificationIcon by lazy {
+        BitmapFactory.decodeResource(context.resources, R.drawable.ic_rrbox_launcher)
+    }
 
     init {
         createNotificationChannel()
@@ -89,7 +94,10 @@ class RRNotificationManager(private val context: Context) {
         val expandedText = "节点: $nodeTag\n下行速率: ${speed.formattedDownSpeed}\n上行速率: ${speed.formattedUpSpeed}\n已连接: $durationFormatted"
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
+            // Android requires a monochrome small icon for the status bar.
             .setSmallIcon(R.drawable.ic_notification)
+            // The notification card itself should use the exact current RRBOX launcher artwork.
+            .setLargeIcon(appNotificationIcon)
             .setContentTitle("RRBOX · $nodeTag")
             .setContentText(collapsedText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
