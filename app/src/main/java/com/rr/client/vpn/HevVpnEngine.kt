@@ -17,8 +17,8 @@ import java.io.File
  * path. We do not alter 127/8 routing. sing-box remote sockets remain protected by
  * BoxServiceWrapper.autoDetectInterfaceControl(fd) -> VpnService.protect(fd).
  *
- * A/B v2.8 additionally enables a benchmark-only HEV SOCKS handshake latency candidate
- * (pipeline + best-effort TCP Fast Open). Normal HEV keeps the proven production profile.
+ * The HEV handshake profile (SOCKS5 pipeline + best-effort TCP Fast Open) graduated from the v2.8
+ * latency candidate and is now part of the normal HEV high-performance profile.
  */
 class HevVpnEngine(
     private val vpnService: VpnService,
@@ -54,15 +54,8 @@ class HevVpnEngine(
         }
 
         return runCatching {
-            val latencyCandidate = includeSelfForBenchmark
             val builder = vpnService.Builder()
-                .setSession(
-                    if (includeSelfForBenchmark) {
-                        "RRBOX · HEV · A/B v2.8 candidate"
-                    } else {
-                        "RRBOX · HEV"
-                    }
-                )
+                .setSession(if (includeSelfForBenchmark) "RRBOX · HEV · A/B" else "RRBOX · HEV")
                 .setMtu(HevTunnelConfig.MTU)
                 .addAddress(HevTunnelConfig.IPV4_CLIENT, HevTunnelConfig.IPV4_PREFIX)
                 .addRoute("0.0.0.0", 0)
@@ -81,12 +74,7 @@ class HevVpnEngine(
 
             workingDir.mkdirs()
             val configFile = File(workingDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(
-                HevTunnelConfig.build(
-                    socksPort = HevConfigAdapter.SOCKS_PORT,
-                    latencyCandidate = latencyCandidate
-                )
-            )
+            configFile.writeText(HevTunnelConfig.build(HevConfigAdapter.SOCKS_PORT))
 
             check(HevTunnelNative.start(configFile.absolutePath, pfd.fd)) {
                 "HEV native 线程启动失败"
@@ -99,14 +87,11 @@ class HevVpnEngine(
 
             if (includeSelfForBenchmark) {
                 onLog(
-                    "HEV A/B v2.8：RRBOX UID 临时进入 TUN；127/8 保持系统 loopback；" +
+                    "HEV A/B：RRBOX UID 临时进入 TUN；127/8 保持系统 loopback；" +
                         "sing-box 远端 socket 继续由 protect(fd) 绕过 VPN"
                 )
-                onLog(
-                    "HEV A/B v2.8 latency candidate：SOCKS5 pipeline=true；" +
-                        "tcp-fastopen=true（best-effort，系统不支持时回退普通 TCP）"
-                )
             }
+            onLog("HEV 高性能握手：SOCKS5 pipeline=true；tcp-fastopen=true（best-effort）")
             onLog("HEV native 极速数据面已启动：TUN → lwIP → SOCKS5 → sing-box")
             true
         }.getOrElse { error ->
