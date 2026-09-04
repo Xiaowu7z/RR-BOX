@@ -25,7 +25,7 @@ data class RawLocalImportResult(
 
 /** Strict all-or-nothing Raw importer used by Network Lab. */
 object RawLocalNodeImporter {
-    suspend fun import(raw: String): Result<RawLocalImportResult> = withContext(Dispatchers.IO) {
+    suspend fun importRaw(raw: String): Result<RawLocalImportResult> = withContext(Dispatchers.IO) {
         runCatching {
             require(raw.isNotBlank()) { "请输入 sing-box JSON" }
 
