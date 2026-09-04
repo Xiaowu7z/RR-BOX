@@ -3,6 +3,7 @@ package com.rr.client.lab
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
 import com.rr.client.core.NodeLatencyState
@@ -27,15 +28,21 @@ object NetworkDiagnostics {
         val activeCaps = activeNetwork?.let { network -> cm.getNetworkCapabilities(network) }
         val activeLink = activeNetwork?.let { network -> cm.getLinkProperties(network) }
 
-        val physicalNetwork = cm?.let { manager ->
-            manager.allNetworks.firstOrNull { network ->
-                val caps = manager.getNetworkCapabilities(network) ?: return@firstOrNull false
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-            }
-        }
-        val physicalCaps = physicalNetwork?.let { network -> cm?.getNetworkCapabilities(network) }
-        val physicalLink = physicalNetwork?.let { network -> cm?.getLinkProperties(network) }
+        /*
+         * Do not use allNetworks.firstOrNull(). Android may keep both cellular and Wi-Fi Network
+         * objects alive while a VPN is active, and enumeration order is not a statement about the
+         * physical route currently preferred by the system. That made Network Lab keep showing the
+         * old cellular interface after switching to Wi-Fi until the VPN itself was rebuilt.
+         *
+         * Refresh now takes a fresh snapshot of every non-VPN INTERNET network and ranks the live
+         * candidates. VALIDATED/NOT_SUSPENDED dominates; when both Wi-Fi and cellular remain valid,
+         * Wi-Fi is preferred because Android normally promotes it to the default physical route.
+         * A non-VPN activeNetwork, when available, always wins.
+         */
+        val physical = cm?.let { manager -> selectPhysicalNetwork(manager, activeNetwork) }
+        val physicalNetwork = physical?.network
+        val physicalCaps = physical?.capabilities
+        val physicalLink = physical?.linkProperties
 
         val tun = runCatching {
             Collections.list(NetworkInterface.getNetworkInterfaces())
@@ -46,31 +53,39 @@ object NetworkDiagnostics {
         }.getOrNull()
 
         val linkForAddresses = physicalLink ?: activeLink
+        val capsForSnapshot = physicalCaps ?: activeCaps
         val snapshot = NetworkSnapshot(
-            transport = transportLabel(physicalCaps ?: activeCaps),
+            transport = transportLabel(capsForSnapshot),
             activeInterface = physicalLink?.interfaceName ?: activeLink?.interfaceName ?: "--",
             mtu = (physicalLink?.mtu ?: activeLink?.mtu ?: 0).coerceAtLeast(0),
             ipv4Addresses = linkForAddresses.addressesV4(),
             ipv6Addresses = linkForAddresses.addressesV6(),
             dnsServers = linkForAddresses?.dnsServers?.mapNotNull { it.hostAddress }?.distinct().orEmpty(),
             privateDns = privateDnsLabel(linkForAddresses),
-            validated = (physicalCaps ?: activeCaps)
+            validated = capsForSnapshot
                 ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true,
-            metered = cm?.isActiveNetworkMetered == true,
+            metered = when {
+                physicalCaps != null -> !physicalCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                else -> cm?.isActiveNetworkMetered == true
+            },
             vpnInterface = tun?.name,
             vpnMtu = tun?.let { runCatching { it.mtu }.getOrNull() }
         )
 
         val checks = mutableListOf<LabCheck>()
         checks += LabCheck(
-            "活动网络",
-            if (activeNetwork != null) LabCheckStatus.PASS else LabCheckStatus.FAIL,
-            if (activeNetwork != null) "${snapshot.transport} / ${snapshot.activeInterface}" else "Android 未报告活动网络"
+            "活动物理网络",
+            if (physicalNetwork != null || activeNetwork != null) LabCheckStatus.PASS else LabCheckStatus.FAIL,
+            if (physicalNetwork != null || activeNetwork != null) {
+                "${snapshot.transport} / ${snapshot.activeInterface}"
+            } else {
+                "Android 未报告活动网络"
+            }
         )
         checks += LabCheck(
             "Internet 验证",
             if (snapshot.validated) LabCheckStatus.PASS else LabCheckStatus.WARN,
-            if (snapshot.validated) "Android 标记为 VALIDATED" else "当前网络未被 Android 标记为 VALIDATED"
+            if (snapshot.validated) "Android 标记为 VALIDATED" else "当前物理网络未被 Android 标记为 VALIDATED"
         )
         checks += LabCheck(
             "IPv4",
@@ -151,10 +166,70 @@ object NetworkDiagnostics {
         DiagnosticReport(snapshot = snapshot, checks = checks).also { report ->
             RRLogStore.record(
                 "DIAG",
-                "诊断完成: ${report.checks.count { it.status == LabCheckStatus.PASS }} PASS, " +
+                "诊断完成: physical=${snapshot.transport}/${snapshot.activeInterface}, " +
+                    "validated=${snapshot.validated}, metered=${snapshot.metered}, " +
+                    "${report.checks.count { it.status == LabCheckStatus.PASS }} PASS, " +
                     "${report.checks.count { it.status == LabCheckStatus.FAIL }} FAIL"
             )
         }
+    }
+
+    private data class PhysicalNetworkCandidate(
+        val network: Network,
+        val capabilities: NetworkCapabilities,
+        val linkProperties: LinkProperties?,
+        val score: Int
+    )
+
+    private fun selectPhysicalNetwork(
+        cm: ConnectivityManager,
+        activeNetwork: Network?
+    ): PhysicalNetworkCandidate? = cm.allNetworks
+        .mapNotNull { network ->
+            val caps = cm.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return@mapNotNull null
+
+            val link = cm.getLinkProperties(network)
+            PhysicalNetworkCandidate(
+                network = network,
+                capabilities = caps,
+                linkProperties = link,
+                score = physicalNetworkScore(
+                    caps = caps,
+                    link = link,
+                    isActiveNonVpn = network == activeNetwork
+                )
+            )
+        }
+        .maxWithOrNull(
+            compareBy<PhysicalNetworkCandidate> { it.score }
+                .thenBy { it.linkProperties?.interfaceName.orEmpty() }
+        )
+
+    private fun physicalNetworkScore(
+        caps: NetworkCapabilities,
+        link: LinkProperties?,
+        isActiveNonVpn: Boolean
+    ): Int {
+        var score = 0
+        if (isActiveNonVpn) score += 10_000
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 1_000
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) score += 200
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) score += 100
+
+        score += when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 80
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 60
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 40
+            else -> 10
+        }
+
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) score += 10
+        if (!link?.interfaceName.isNullOrBlank()) score += 4
+        if (!link.addressesV4().isEmpty()) score += 2
+        if (!link?.dnsServers.isNullOrEmpty()) score += 1
+        return score
     }
 
     private fun LinkProperties?.addressesV4(): List<String> = this?.linkAddresses
