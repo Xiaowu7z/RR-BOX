@@ -3,17 +3,20 @@ package com.rr.client.vpn
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import android.os.SystemClock
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class RRQuickTileService : TileService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var lastClickAt = 0L
 
     override fun onTileAdded() {
         super.onTileAdded()
@@ -28,12 +31,22 @@ class RRQuickTileService : TileService() {
     override fun onClick() {
         super.onClick()
 
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastClickAt < 300L) return
+        lastClickAt = now
+
         if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
-            setTileState(Tile.STATE_UNAVAILABLE, "正在断开")
+            // Optimistic UI first: the user sees OFF immediately while the service tears down in background.
+            setTileState(Tile.STATE_INACTIVE, "已断开")
             RRQuickTileController.stop(this)
             scope.launch {
-                delay(350L)
-                refreshTile()
+                repeat(40) {
+                    if (!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) return@launch
+                    delay(50L)
+                }
+                if (RRVpnService.isRunning.value) {
+                    setTileState(Tile.STATE_ACTIVE, "已连接")
+                }
             }
             return
         }
@@ -48,17 +61,33 @@ class RRQuickTileService : TileService() {
             return
         }
 
-        setTileState(Tile.STATE_UNAVAILABLE, "正在连接")
+        // Match mature VPN tiles: visual feedback is immediate; config/service work happens after it.
+        setTileState(Tile.STATE_ACTIVE, "正在连接")
         scope.launch {
             val result = RRQuickTileController.connect(this@RRQuickTileService)
             result.onFailure { error ->
+                setTileState(Tile.STATE_INACTIVE, "连接失败")
                 Toast.makeText(
                     this@RRQuickTileService,
                     "快速连接失败：${error.message ?: error.javaClass.simpleName}",
                     Toast.LENGTH_LONG
                 ).show()
+                return@launch
             }
-            delay(350L)
+
+            repeat(60) {
+                when {
+                    RRVpnService.isRunning.value -> {
+                        setTileState(Tile.STATE_ACTIVE, "已连接")
+                        return@launch
+                    }
+                    !RRVpnService.isStarting.value && !RRVpnService.lastError.value.isNullOrBlank() -> {
+                        setTileState(Tile.STATE_INACTIVE, "连接失败")
+                        return@launch
+                    }
+                }
+                delay(50L)
+            }
             refreshTile()
         }
     }
@@ -68,7 +97,7 @@ class RRQuickTileService : TileService() {
         val starting = RRVpnService.isStarting.value
         when {
             running -> setTileState(Tile.STATE_ACTIVE, "已连接")
-            starting -> setTileState(Tile.STATE_UNAVAILABLE, "正在连接")
+            starting -> setTileState(Tile.STATE_ACTIVE, "正在连接")
             else -> setTileState(Tile.STATE_INACTIVE, "已断开")
         }
     }
@@ -83,5 +112,10 @@ class RRQuickTileService : TileService() {
             }
             tile.updateTile()
         }
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
     }
 }
