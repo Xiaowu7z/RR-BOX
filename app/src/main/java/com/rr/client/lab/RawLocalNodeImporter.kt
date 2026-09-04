@@ -49,7 +49,7 @@ object RawLocalNodeImporter {
             }
 
             val app = RRApplication.instance
-            val profiles = app.database.profileDao().getAllProfiles().map(SubProfile::fromEntity)
+            val profiles = app.database.profileDao().getAllProfiles().map { SubProfile.fromEntity(it) }
             val existing = profiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
             val identities = existing.map(::identity).toMutableSet()
 
