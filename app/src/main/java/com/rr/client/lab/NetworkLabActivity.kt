@@ -492,23 +492,23 @@ private fun LabDashboard(
                 benchmarkHistory.take(5).forEach { item ->
                     val summary = when {
                         item.benchmarkVersion >= 10 ->
-                            "${item.nodeTag}: v2.8 已验证 ${item.executionOrder.orEmpty()} · System ${item.system.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"} / HEV-C ${item.hev.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"}"
+                            "${item.nodeTag}: 当前已验证 ${item.executionOrder.orEmpty()} · System ${item.system.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"} / HEV ${item.hev.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"}"
                         item.benchmarkVersion >= 9 ->
-                            "${item.nodeTag}: v2.7 普通 HEV 基线 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧 HEV 基线 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 8 ->
-                            "${item.nodeTag}: v2.6 旧测量 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧测量 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 7 ->
-                            "${item.nodeTag}: v2.5 旧实验 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧基准 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 6 ->
-                            "${item.nodeTag}: v2.4 旧实验 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧基准 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 5 ->
-                            "${item.nodeTag}: v2.3 旧实验 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧基准 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 4 ->
-                            "${item.nodeTag}: v2.2 旧实验 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧基准 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 3 ->
-                            "${item.nodeTag}: v2.1 旧实验 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧基准 · 不进入当前 A/B 统计"
                         item.benchmarkVersion >= 2 ->
-                            "${item.nodeTag}: v2 旧实验 · 不进入 v2.8 candidate 统计"
+                            "${item.nodeTag}: 旧基准 · 不进入当前 A/B 统计"
                         else ->
                             "${item.nodeTag}: v1 旧版 · 仅保留历史"
                     }
