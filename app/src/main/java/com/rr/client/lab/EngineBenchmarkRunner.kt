@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Debug
 import android.os.Process
-import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -34,20 +33,28 @@ class EngineBenchmarkRunner(
         return try {
             onProgress("正在固定测速 IPv4 目标")
             val target = EngineBenchmarkProbe.resolveTarget(appContext)
-            val previousV26Runs = BenchmarkHistoryStore.load(appContext)
-                .count { it.benchmarkVersion >= 8 }
-            // First v2.6 run intentionally starts with HEV to counter the System-first v2.5 sample.
-            // Every successful v2.6 report flips the order so time-of-test drift cancels in history.
-            val engineOrder = if (previousV26Runs % 2 == 0) {
-                listOf(PreferencesManager.TUN_ENGINE_HEV, PreferencesManager.TUN_ENGINE_SYSTEM)
-            } else {
-                listOf(PreferencesManager.TUN_ENGINE_SYSTEM, PreferencesManager.TUN_ENGINE_HEV)
+            val history = BenchmarkHistoryStore.load(appContext)
+            val latestComparable = history.firstOrNull {
+                it.benchmarkVersion >= 8 &&
+                    it.system.proxyPathVerifiedCount >= 2 &&
+                    it.hev.proxyPathVerifiedCount >= 2 &&
+                    it.hev.nativePathVerifiedCount >= 2
+            }
+            val engineOrder = when (latestComparable?.executionOrder) {
+                "HEV → SYSTEM" -> listOf(
+                    PreferencesManager.TUN_ENGINE_SYSTEM,
+                    PreferencesManager.TUN_ENGINE_HEV
+                )
+                else -> listOf(
+                    PreferencesManager.TUN_ENGINE_HEV,
+                    PreferencesManager.TUN_ENGINE_SYSTEM
+                )
             }
             val orderLabel = engineOrder.joinToString(" → ")
 
             RRLogStore.record(
                 "BENCH",
-                "开始 A/B v2.6: node=${node.tag}, original=$originalEngine, order=$orderLabel, " +
+                "开始 A/B v2.7: node=${node.tag}, original=$originalEngine, order=$orderLabel, " +
                     "transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}, target=${target.label}"
             )
 
@@ -63,13 +70,13 @@ class EngineBenchmarkRunner(
             val system = samples.getValue(PreferencesManager.TUN_ENGINE_SYSTEM)
             val hev = samples.getValue(PreferencesManager.TUN_ENGINE_HEV)
             EngineBenchmarkReport(
-                benchmarkVersion = 8,
+                benchmarkVersion = 9,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
                 probeTarget = EngineBenchmarkProbe.HTTPS_HOST,
                 helperPackage = "${EngineBenchmarkProbe.PROBE_TRANSPORT} · ${target.label}",
-                udpTarget = "disabled-v2.6",
+                udpTarget = "disabled-v2.7",
                 executionOrder = orderLabel,
                 system = system,
                 hev = hev
@@ -77,7 +84,7 @@ class EngineBenchmarkRunner(
                 BenchmarkHistoryStore.save(appContext, it)
                 RRLogStore.record(
                     "BENCH",
-                    "A/B v2.6 完成: order=$orderLabel target=${target.addressText} " +
+                    "A/B v2.7 完成: order=$orderLabel target=${target.addressText} " +
                         "System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
                         "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
                 )
@@ -89,7 +96,7 @@ class EngineBenchmarkRunner(
                     .onFailure {
                         RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}")
                     }
-                onProgress("A/B v2.6 已结束")
+                onProgress("A/B v2.7 已结束")
             }
         }
     }
@@ -101,7 +108,7 @@ class EngineBenchmarkRunner(
     ): EngineBenchmarkSample {
         onProgress(
             if (includeSelfForHevBenchmark) {
-                "$engine · 正在重建 A/B v2.6 临时测试路由"
+                "$engine · 正在重建 A/B 临时测试路由"
             } else {
                 "$engine · 正在按正常模式重建引擎"
             }
@@ -110,7 +117,7 @@ class EngineBenchmarkRunner(
         delay(900L)
         val baselinePssKb = currentPssKb()
 
-        onProgress("$engine · 64 KiB UID→TUN 路径预检并等待计数稳定")
+        onProgress("$engine · 64 KiB UID→TUN 路径预检")
         val preflight = EngineBenchmarkProbe.httpsRound(
             context = appContext,
             engine = engine,
@@ -122,7 +129,7 @@ class EngineBenchmarkRunner(
             "BENCH",
             "$engine PREFLIGHT success=${preflight.success} protocol=${preflight.protocol.orEmpty()} " +
                 "bytes=${preflight.bytesReceived} proxyCount=${preflight.proxyAccountedDownloadBytes} " +
-                "nativeRx=${preflight.nativeAccountedDownloadBytes} settle=${preflight.accountingSettleMillis}ms " +
+                "nativeRx=${preflight.nativeAccountedDownloadBytes} wait=${preflight.accountingSettleMillis}ms " +
                 "nativeVerified=${preflight.nativePathVerified} verified=${preflight.proxyPathVerified}"
         )
         check(preflight.success) {
@@ -139,14 +146,14 @@ class EngineBenchmarkRunner(
                 append("；已停止测试，避免生成旁路成绩")
             }
         }
-        delay(250L)
+        delay(200L)
 
         val cpuStart = Process.getElapsedCpuTime()
         val httpsRounds = buildList {
             repeat(EngineBenchmarkProbe.HTTPS_ATTEMPTS) { index ->
                 val attempt = index + 1
                 onProgress(
-                    "$engine · 固定 IPv4 HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB · 等待计数稳定"
+                    "$engine · 固定 IPv4 HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB"
                 )
                 val result = EngineBenchmarkProbe.httpsRound(
                     context = appContext,
@@ -161,7 +168,7 @@ class EngineBenchmarkRunner(
                         "tcp=${result.tcpConnectMillis ?: -1} tls=${result.tlsMillis ?: -1} " +
                         "ttfb=${result.firstByteMillis ?: -1} rate=${result.downloadBps ?: -1} " +
                         "proxy=${result.proxyAccountedDownloadBytes} nativeRx=${result.nativeAccountedDownloadBytes} " +
-                        "settle=${result.accountingSettleMillis}ms verified=${result.proxyPathVerified}"
+                        "wait=${result.accountingSettleMillis}ms verified=${result.proxyPathVerified}"
                 )
                 if (result.success && !result.proxyPathVerified) {
                     error(
@@ -169,7 +176,7 @@ class EngineBenchmarkRunner(
                             "已停止测试，避免把旁路流量算作引擎成绩"
                     )
                 }
-                delay(250L)
+                delay(200L)
             }
         }
 
@@ -194,7 +201,7 @@ class EngineBenchmarkRunner(
 
         RRLogStore.record(
             "BENCH",
-            "$engine v2.6 sample: restart=${sample.restartMillis}ms " +
+            "$engine v2.7 sample: internalRestart=${sample.restartMillis}ms " +
                 "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
                 "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
                 "verified=${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount} " +
@@ -215,7 +222,7 @@ class EngineBenchmarkRunner(
     ): Long {
         preferences.setTunEngine(engine)
         RRVpnService.clearLastError()
-        val startedAt = SystemClock.elapsedRealtime()
+        val previousSerial = RRVpnService.engineRestartMeasurement.value.serial
         ContextCompat.startForegroundService(
             appContext,
             Intent(appContext, RRVpnService::class.java).apply {
@@ -227,29 +234,23 @@ class EngineBenchmarkRunner(
             }
         )
 
-        var sawStarting = RRVpnService.isStarting.value
-        val ok = withTimeoutOrNull(20_000L) {
-            while (!(sawStarting && !RRVpnService.isStarting.value && RRVpnService.isRunning.value)) {
-                if (RRVpnService.isStarting.value) sawStarting = true
-                if (sawStarting && !RRVpnService.isStarting.value && !RRVpnService.isRunning.value) {
-                    error(RRVpnService.lastError.value ?: "$engine 引擎重建失败")
-                }
-                delay(80L)
-            }
-            true
-        } ?: false
-
-        check(ok) { RRVpnService.lastError.value ?: "$engine 引擎切换超时" }
-        return (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+        val measurement = withTimeoutOrNull(20_000L) {
+            RRVpnService.engineRestartMeasurement.first { it.serial > previousSerial }
+        }
+        check(measurement != null) { RRVpnService.lastError.value ?: "$engine 引擎切换超时" }
+        check(measurement.success && RRVpnService.isRunning.value) {
+            RRVpnService.lastError.value ?: "$engine 引擎重建失败"
+        }
+        check(measurement.engine == engine) {
+            "引擎重建结果不匹配：期望 $engine，实际 ${measurement.engine}"
+        }
+        return measurement.durationMillis.coerceAtLeast(1L)
     }
 
     private suspend fun restoreEngine(originalEngine: String) {
-        // HEV benchmark mode temporarily changes the per-UID policy. Always rebuild once with the
-        // normal policy after the experiment, even when the user's original engine was HEV.
         preferences.setTunEngine(originalEngine)
         RRVpnService.clearLastError()
-
-        val startedAt = SystemClock.elapsedRealtime()
+        val previousSerial = RRVpnService.engineRestartMeasurement.value.serial
         ContextCompat.startForegroundService(
             appContext,
             Intent(appContext, RRVpnService::class.java).apply {
@@ -258,23 +259,16 @@ class EngineBenchmarkRunner(
             }
         )
 
-        var sawStarting = RRVpnService.isStarting.value
-        val restored = withTimeoutOrNull(20_000L) {
-            while (!(sawStarting && !RRVpnService.isStarting.value && RRVpnService.isRunning.value)) {
-                if (RRVpnService.isStarting.value) sawStarting = true
-                if (sawStarting && !RRVpnService.isStarting.value && !RRVpnService.isRunning.value) {
-                    error(RRVpnService.lastError.value ?: "恢复 $originalEngine 失败")
-                }
-                delay(80L)
-            }
-            true
-        } ?: false
-
-        check(restored) { RRVpnService.lastError.value ?: "恢复 $originalEngine 超时" }
+        val measurement = withTimeoutOrNull(20_000L) {
+            RRVpnService.engineRestartMeasurement.first { it.serial > previousSerial }
+        }
+        check(measurement != null) { RRVpnService.lastError.value ?: "恢复 $originalEngine 超时" }
+        check(measurement.success && RRVpnService.isRunning.value) {
+            RRVpnService.lastError.value ?: "恢复 $originalEngine 失败"
+        }
         RRLogStore.record(
             "BENCH",
-            "已按正常模式恢复原始引擎: $originalEngine " +
-                "(${(SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)}ms)"
+            "已按正常模式恢复原始引擎: $originalEngine (${measurement.durationMillis}ms service-internal)"
         )
     }
 
