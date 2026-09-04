@@ -3,14 +3,10 @@ package com.rr.client.vpn
 /**
  * HEV native data-plane profile.
  *
- * HEV upstream ships an 8500-byte virtual TUN MTU in its reference config. Compared with the
- * common 1500-byte Android VPN MTU this reduces user-space TUN packet/syscall churn for TCP-heavy
- * traffic. Beta2 deliberately stays IPv4-only to match the real-device stable system-TUN baseline;
- * IPv6 can be enabled later as an independent compatibility change.
- *
- * Network Lab v2.8 may enable a benchmark-only latency candidate. That candidate changes only
- * HEV's loopback SOCKS5 client handshake (pipeline + TCP Fast Open); normal HEV keeps the proven
- * v2.5-v2.7 profile unchanged until real-device A/B data proves the candidate is beneficial.
+ * Real-device A/B testing through v2.8 established the production HEV profile used by RRBOX:
+ * 8500-byte virtual TUN MTU, mapped DNS, enlarged native buffers, SOCKS5 handshake pipelining and
+ * best-effort client TCP Fast Open. The pipeline/TFO pair reduced HEV cold TLS/TTFB variance while
+ * preserving its throughput and CPU advantage in the validated A/B path.
  */
 object HevTunnelConfig {
     const val MTU = 8500
@@ -19,7 +15,7 @@ object HevTunnelConfig {
     const val MAPPED_DNS = "198.18.0.2"
     const val SOCKS_HOST = "127.0.0.1"
 
-    fun build(socksPort: Int, latencyCandidate: Boolean = false): String = buildString {
+    fun build(socksPort: Int): String = buildString {
         appendLine("tunnel:")
         appendLine("  mtu: $MTU")
         appendLine("  ipv4: $IPV4_CLIENT")
@@ -30,12 +26,10 @@ object HevTunnelConfig {
         appendLine("  port: $socksPort")
         appendLine("  address: $SOCKS_HOST")
         appendLine("  udp: 'udp'")
-        if (latencyCandidate) {
-            // Upstream HEV supports both knobs. Pipeline removes one serialized SOCKS5 handshake
-            // turn; TCP Fast Open is best-effort and transparently falls back when unsupported.
-            appendLine("  pipeline: true")
-            appendLine("  tcp-fastopen: true")
-        }
+        // Validated in A/B v2.8. Pipeline removes a serialized SOCKS5 handshake turn. TFO is
+        // best-effort and transparently falls back to ordinary TCP on kernels that do not support it.
+        appendLine("  pipeline: true")
+        appendLine("  tcp-fastopen: true")
         appendLine()
 
         // HEV mapped DNS replies with synthetic A records and converts those destinations back
