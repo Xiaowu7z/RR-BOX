@@ -65,6 +65,9 @@ class RRVpnService : VpnService() {
         private val _isStarting = MutableStateFlow(false)
         val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
 
+        private val _activeRuntimeNodeId = MutableStateFlow<String?>(null)
+        val activeRuntimeNodeId: StateFlow<String?> = _activeRuntimeNodeId.asStateFlow()
+
         private val _lastError = MutableStateFlow<String?>(null)
         val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
@@ -174,6 +177,7 @@ class RRVpnService : VpnService() {
                 if (intent.hasExtra(EXTRA_NODE_ID)) {
                     activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
                 }
+                _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
 
                 val config = activeConfigJson
                 if (config.isNullOrBlank()) {
@@ -204,7 +208,10 @@ class RRVpnService : VpnService() {
             configJson == activeConfigJson
 
         requestedNodeTag?.let { activeNodeTag = it }
-        requestedNodeId?.let { activeNodeId = it }
+        requestedNodeId?.let {
+            activeNodeId = it
+            _activeRuntimeNodeId.value = it.takeIf(String::isNotBlank)
+        }
 
         if (duplicateEquivalentStart) {
             VpnConnectionIntentStore.setDesiredRunning(this, true)
@@ -222,6 +229,7 @@ class RRVpnService : VpnService() {
         ensureForeground("$activeNodeTag · 正在启动")
 
         if (configJson.isNullOrBlank()) {
+            _activeRuntimeNodeId.value = null
             VpnConnectionIntentStore.setDesiredRunning(this, false)
             _lastError.value = "没有收到可运行的 sing-box 配置"
             Log.e(TAG, _lastError.value.orEmpty())
@@ -316,6 +324,7 @@ class RRVpnService : VpnService() {
                 resetTrafficState()
                 _isStarting.value = false
                 _isRunning.value = true
+                _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
                 VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, true)
                 notificationMgr.updateNotification(displayNodeTag(), TrafficSpeed(), 0L)
                 publishRestartMeasurement(
@@ -563,6 +572,7 @@ class RRVpnService : VpnService() {
             activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             _isStarting.value = false
             _isRunning.value = false
+            _activeRuntimeNodeId.value = null
             _currentSpeed.value = TrafficSpeed()
             stopForeground(Service.STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -597,6 +607,7 @@ class RRVpnService : VpnService() {
         runCatching { boxCore?.stopService() }
         _isStarting.value = false
         _isRunning.value = false
+        _activeRuntimeNodeId.value = null
         if (serviceRef?.get() === this) serviceRef = null
         serviceScope.cancel()
         super.onDestroy()

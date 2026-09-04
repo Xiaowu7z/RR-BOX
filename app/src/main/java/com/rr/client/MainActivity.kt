@@ -42,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
+import com.rr.client.core.LocalNodeDeletionPolicy
 import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.NodeLatencyTester
 import com.rr.client.core.NodeOverridePatcher
@@ -203,6 +204,7 @@ class MainActivity : ComponentActivity() {
         var selectedTab by rememberSaveable { mutableIntStateOf(0) }
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
         val isVpnStarting by RRVpnService.isStarting.collectAsState()
+        val activeRuntimeNodeId by RRVpnService.activeRuntimeNodeId.collectAsState()
         val lastVpnError by RRVpnService.lastError.collectAsState()
         val currentSpeed by RRVpnService.currentSpeed.collectAsState()
         val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
@@ -383,8 +385,15 @@ class MainActivity : ComponentActivity() {
 
         fun deleteLocalNode(node: ProxyNode) {
             if (!node.profileId.equals(SubProfile.LOCAL_PROFILE_ID)) return
-            if (isVpnRunning || isVpnStarting) {
-                toast("请先断开连接再删除本地节点")
+            val vpnBusy = isVpnRunning || isVpnStarting
+            if (!LocalNodeDeletionPolicy.canDelete(node.id, activeRuntimeNodeId, vpnBusy)) {
+                toast(
+                    if (node.id == activeRuntimeNodeId) {
+                        "当前节点正在使用，请先断开或切换连接后再删除"
+                    } else {
+                        "正在确认当前运行节点，请稍后重试"
+                    }
+                )
                 return
             }
             lifecycleScope.launch {

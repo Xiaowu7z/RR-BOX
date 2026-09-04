@@ -227,7 +227,7 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "HEV 模式使用 ${HevTunnelConfig.MTU} MTU、mapped DNS 与加大的 native 缓冲区来降低 TUN 数据面的包处理开销。属于实验引擎；切换会自动重建当前 VPN，稳定模式始终保留。",
+                "HEV 模式使用 ${HevTunnelConfig.MTU} MTU、mapped DNS、SOCKS5 pipeline 与 best-effort TCP Fast Open。它是正式的高性能可选引擎；System 稳定模式仍为默认并始终保留。",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )

@@ -244,7 +244,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                             benchmarkBusy = true
                             benchmark = null
                             benchmarkError = null
-                            benchmarkProgress = "准备 A/B v2.8 latency candidate"
+                            benchmarkProgress = "准备 System vs HEV A/B"
                             scope.launch {
                                 runCatching {
                                     EngineBenchmarkRunner(
@@ -264,7 +264,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                                     )
                                 }.onFailure { error ->
                                     benchmarkError = error.message ?: error.javaClass.simpleName
-                                    RRLogStore.record("BENCH", "A/B v2.8 失败: ${benchmarkError.orEmpty()}")
+                                    RRLogStore.record("BENCH", "A/B 失败: ${benchmarkError.orEmpty()}")
                                 }
                                 benchmarkBusy = false
                                 benchmarkProgress = null
@@ -352,7 +352,7 @@ private fun LabDashboard(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         LabCard(title = "运行状态", icon = { Icon(Icons.Default.Memory, null, tint = CyanPrimary) }) {
-            StatusRow("转发引擎", if (engine == PreferencesManager.TUN_ENGINE_HEV) "HEV / Experimental" else "System / Stable")
+            StatusRow("转发引擎", if (engine == PreferencesManager.TUN_ENGINE_HEV) "HEV / High Performance" else "System / Stable")
             StatusRow("VPN", when { isStarting -> "正在重建"; isRunning -> "已连接"; else -> "未连接" })
             StatusRow("节点", selectedNode?.tag ?: "未选择")
             StatusRow("实时下载", currentSpeed.formattedDownSpeed)
@@ -408,15 +408,15 @@ private fun LabDashboard(
             )
         }
 
-        LabCard(title = "System vs HEV A/B v2.8 · latency candidate", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
+        LabCard(title = "System vs HEV A/B · 已验证基准", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
             Text(
-                "v2.8 保留 v2.7 已验证的数据路径和测量方法，只把 HEV 的实验臂临时切成延迟候选：开启上游 HEV 支持的 SOCKS5 pipeline 与 best-effort TCP Fast Open。正常 HEV 不启用这些参数，测试结束后仍强制恢复原始普通引擎配置。",
+                "System 与 HEV 使用同一节点、固定 2 MiB HTTPS 负载和路径计数交叉验证。HEV 正式配置包含 SOCKS5 pipeline 与 best-effort TCP Fast Open；测试结束后自动恢复用户原始引擎。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                "目标：验证 HEV 当前更高吞吐/更低 CPU 能否保留，同时把冷连接 TLS/TTFB 拉低。v2.7 普通 HEV 历史不会与 v2.8 candidate 混算。",
+                "该基准用于比较服务内重建、TLS、首字节、2 MiB 下载、CPU/PSS 与真实路径计数。公网结果只代表当前设备和网络，不用于宣称某引擎普遍更快。",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
@@ -427,7 +427,7 @@ private fun LabDashboard(
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {
                 Text(
-                    if (benchmarkBusy) "A/B v2.8 测试中…" else "开始一键 A/B v2.8",
+                    if (benchmarkBusy) "A/B 测试中…" else "开始一键 A/B",
                     color = DarkBackground,
                     fontWeight = FontWeight.Bold
                 )
@@ -442,7 +442,7 @@ private fun LabDashboard(
             benchmarkError?.let {
                 Text("失败：$it", color = MaterialTheme.colorScheme.error)
                 Text(
-                    "v2.8 candidate 只存在于实验重建；失败或结束后都会恢复正常 HEV，候选参数不会残留。",
+                    "A/B 失败或结束后都会恢复测试前的原始转发引擎，不改变日常运行配置。",
                     color = TextSecondary,
                     style = MaterialTheme.typography.labelSmall
                 )
@@ -466,14 +466,14 @@ private fun LabDashboard(
 
             historyStats?.let { stats ->
                 Spacer(Modifier.height(12.dp))
-                Text("A/B v2.8 candidate 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("A/B 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 StatusRow(
                     "顺序覆盖",
                     "SYSTEM→HEV ${stats.systemFirstRuns} · HEV→SYSTEM ${stats.hevFirstRuns}"
                 )
                 Text(
                     if (stats.systemFirstRuns > 0 && stats.hevFirstRuns > 0) {
-                        "两个测试顺序都已有 candidate 样本，可优先看历史中位数/P95。"
+                        "两个测试顺序都已有有效样本，可优先看历史中位数/P95。"
                     } else {
                         "再完成另一种顺序，可进一步抵消公网时间漂移。"
                     },
@@ -483,7 +483,7 @@ private fun LabDashboard(
                 Spacer(Modifier.height(6.dp))
                 HistoryStatsCard("SYSTEM", stats.system)
                 Spacer(Modifier.height(6.dp))
-                HistoryStatsCard("HEV CANDIDATE", stats.hev)
+                HistoryStatsCard("HEV", stats.hev)
             }
 
             if (benchmarkHistory.isNotEmpty()) {
@@ -492,7 +492,7 @@ private fun LabDashboard(
                 benchmarkHistory.take(5).forEach { item ->
                     val summary = when {
                         item.benchmarkVersion >= 10 ->
-                            "${item.nodeTag}: v2.8 candidate ${item.executionOrder.orEmpty()} · System ${item.system.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"} / HEV-C ${item.hev.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"}"
+                            "${item.nodeTag}: v2.8 已验证 ${item.executionOrder.orEmpty()} · System ${item.system.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"} / HEV-C ${item.hev.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--"}"
                         item.benchmarkVersion >= 9 ->
                             "${item.nodeTag}: v2.7 普通 HEV 基线 · 不进入 v2.8 candidate 统计"
                         item.benchmarkVersion >= 8 ->
@@ -650,12 +650,12 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
     Surface(shape = RoundedCornerShape(10.dp), color = DarkSurfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(10.dp)) {
             Text(
-                if (sample.engine.equals("HEV", ignoreCase = true)) "HEV · latency candidate" else sample.engine,
+                if (sample.engine.equals("HEV", ignoreCase = true)) "HEV · 高性能" else sample.engine,
                 color = CyanPrimary,
                 fontWeight = FontWeight.Bold
             )
             if (sample.engine.equals("HEV", ignoreCase = true)) {
-                StatusRow("候选握手", "SOCKS5 pipeline + client TFO")
+                StatusRow("HEV 握手", "SOCKS5 pipeline + client TFO")
             }
             StatusRow("路径预检", "PASS · 64 KiB UID→TUN")
             StatusRow("服务内重建", "${sample.restartMillis} ms")
@@ -687,7 +687,7 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
             ) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "路径验证不足，当前样本不会进入 v2.8 candidate 历史统计。",
+                    "路径验证不足，当前样本不会进入有效 A/B 历史统计。",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelSmall
                 )
