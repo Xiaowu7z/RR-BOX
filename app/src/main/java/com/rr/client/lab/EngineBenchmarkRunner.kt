@@ -116,17 +116,15 @@ class EngineBenchmarkRunner(
         )
 
         var sawStarting = RRVpnService.isStarting.value
-        val ok: Boolean = withTimeoutOrNull<Boolean>(20_000L) {
-            while (true) {
+        val ok = withTimeoutOrNull(20_000L) {
+            while (!(sawStarting && !RRVpnService.isStarting.value && RRVpnService.isRunning.value)) {
                 if (RRVpnService.isStarting.value) sawStarting = true
-                if (sawStarting && !RRVpnService.isStarting.value && RRVpnService.isRunning.value) {
-                    return@withTimeoutOrNull true
-                }
                 if (sawStarting && !RRVpnService.isStarting.value && !RRVpnService.isRunning.value) {
                     error(RRVpnService.lastError.value ?: "$engine 引擎重建失败")
                 }
                 delay(80L)
             }
+            true
         } ?: false
 
         check(ok) { "$engine 引擎切换超时" }
