@@ -2,7 +2,6 @@ package com.rr.client.lab
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.SystemClock
 import com.rr.client.storage.PreferencesManager
@@ -30,22 +29,20 @@ import kotlin.math.max
 import kotlin.math.roundToLong
 
 /**
- * Active probes used only by Network Lab A/B v2.4.
+ * Active probes used only by Network Lab A/B v2.5.
  *
- * v2.4 keeps the already verified System/HEV data planes completely unchanged. The benchmark
- * resolves speed.cloudflare.com once before switching engines, pins one IPv4 target for the whole
- * A/B run, and binds only the actual TCP/TLS socket to Android's current VPN Network.socketFactory.
- * This avoids HEV's mapped-DNS path while keeping SNI/Host as speed.cloudflare.com.
- *
- * Path validity is checked against sing-box sessionTraffic. HEV adds a second independent check
- * against hev-socks5-tunnel's native TUN RX byte counter before any measurement is accepted.
+ * The target IPv4 is resolved once on a physical network before switching engines. During the HEV
+ * sample RRBOX's UID is temporarily included in the HEV VPN, so this ordinary OkHttp socket follows
+ * Android's normal per-UID VPN routing into HEV. We deliberately do NOT bindSocket() and do NOT
+ * alter 127/8. HEV's local SOCKS hop stays loopback, while sing-box remote sockets are protected by
+ * BoxServiceWrapper.autoDetectInterfaceControl(fd) -> VpnService.protect(fd).
  */
 internal object EngineBenchmarkProbe {
     const val HTTPS_HOST = "speed.cloudflare.com"
     const val HTTPS_ATTEMPTS = 3
     const val PREFLIGHT_BYTES = 64L * 1024L
     const val DOWNLOAD_BYTES = 2L * 1024L * 1024L
-    const val PROBE_TRANSPORT = "Android VPN Network.socketFactory + fixed IPv4 bootstrap"
+    const val PROBE_TRANSPORT = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap"
 
     private const val CONNECT_TIMEOUT_SECONDS = 8L
     private const val READ_TIMEOUT_SECONDS = 15L
@@ -114,16 +111,7 @@ internal object EngineBenchmarkProbe {
     ): HttpsProbeRound = withContext(Dispatchers.IO) {
         require(downloadBytes > 0L) { "HTTPS 测试字节必须大于 0" }
 
-        val binding = runCatching { findVpnNetwork(context.applicationContext) }
-            .getOrElse { error ->
-                return@withContext HttpsProbeRound(
-                    attempt = attempt,
-                    success = false,
-                    protocol = "VPN-NETWORK/fixed=${target.addressText}",
-                    error = safeError(error)
-                )
-            }
-
+        val vpnLabel = observeVpnNetwork(context.applicationContext)
         val proxyStart = RRVpnService.sessionTraffic.value.proxyDownloadTotal
         val requireHevNative = engine == PreferencesManager.TUN_ENGINE_HEV
         val nativeStartRx = if (requireHevNative) nativeRxBytes() else null
@@ -131,7 +119,7 @@ internal object EngineBenchmarkProbe {
             return@withContext HttpsProbeRound(
                 attempt = attempt,
                 success = false,
-                protocol = "${binding.label}/fixed=${target.addressText}",
+                protocol = "$vpnLabel/fixed=${target.addressText}",
                 error = "HEV native 统计不可用"
             )
         }
@@ -140,7 +128,7 @@ internal object EngineBenchmarkProbe {
         val pinnedDns = object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {
                 if (!hostname.equals(HTTPS_HOST, ignoreCase = true)) {
-                    throw UnknownHostException("v2.4 不允许测速重定向到其他主机: $hostname")
+                    throw UnknownHostException("v2.5 不允许测速重定向到其他主机: $hostname")
                 }
                 return listOf(target.address)
             }
@@ -157,14 +145,13 @@ internal object EngineBenchmarkProbe {
             .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .protocols(listOf(Protocol.HTTP_1_1))
             .proxy(Proxy.NO_PROXY)
-            .socketFactory(binding.network.socketFactory)
             .dns(pinnedDns)
             .build()
 
         val nonce = "${SystemClock.elapsedRealtimeNanos()}-$engine-$attempt-$downloadBytes"
         val request = Request.Builder()
             .url("https://$HTTPS_HOST/__down?bytes=$downloadBytes&rrbox=$nonce")
-            .header("User-Agent", "RRBOX-Network-Lab/2.4")
+            .header("User-Agent", "RRBOX-Network-Lab/2.5")
             .header("Accept-Encoding", "identity")
             .header("Cache-Control", "no-cache")
             .header("Connection", "close")
@@ -172,7 +159,7 @@ internal object EngineBenchmarkProbe {
 
         val callStartedNs = System.nanoTime()
         var httpCode: Int? = null
-        var protocol: String? = "${binding.label}/fixed=${target.addressText}"
+        var protocol: String? = "$vpnLabel/fixed=${target.addressText}"
 
         try {
             var bytesReceived = 0L
@@ -181,7 +168,7 @@ internal object EngineBenchmarkProbe {
 
             client.newCall(request).execute().use { response ->
                 httpCode = response.code
-                protocol = "${binding.label}/fixed=${target.addressText}/${response.protocol}"
+                protocol = "$vpnLabel/fixed=${target.addressText}/${response.protocol}"
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
 
                 val body = response.body ?: throw IOException("HTTPS 响应正文为空")
@@ -217,7 +204,6 @@ internal object EngineBenchmarkProbe {
             HttpsProbeRound(
                 attempt = attempt,
                 success = true,
-                // DNS is resolved once before the A/B run and deliberately excluded from timing.
                 dnsMillis = null,
                 tcpConnectMillis = events.tcpConnectMillis,
                 tlsMillis = events.tlsMillis,
@@ -249,31 +235,20 @@ internal object EngineBenchmarkProbe {
         }
     }
 
-    private fun findVpnNetwork(context: Context): VpnNetworkBinding {
+    private fun observeVpnNetwork(context: Context): String {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
-            ?: throw IOException("ConnectivityManager 不可用")
-
-        val candidates = connectivity.allNetworks.mapNotNull { network ->
+            ?: return "VPN-UID[unknown]"
+        val selected = connectivity.allNetworks.mapNotNull { network ->
             val caps = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
             val link = connectivity.getLinkProperties(network)
-            val interfaceName = link?.interfaceName.orEmpty()
+            val iface = link?.interfaceName.orEmpty().ifBlank { "vpn" }
             val score =
-                (if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) 4 else 0) +
-                    (if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 2 else 0) +
-                    (if (interfaceName.startsWith("tun") || interfaceName.startsWith("ppp")) 1 else 0)
-            Triple(network, interfaceName, score)
-        }
-
-        val selected = candidates.maxByOrNull { it.third }
-            ?: throw IOException("未找到 Android VPN Network；请确认 RRBOX VPN 已连接")
-        val network = selected.first
-        val interfaceName = selected.second.ifBlank { "vpn" }
-        return VpnNetworkBinding(
-            network = network,
-            interfaceName = interfaceName,
-            handle = network.networkHandle
-        )
+                (if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) 2 else 0) +
+                    (if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 1 else 0)
+            Triple(network, iface, score)
+        }.maxByOrNull { it.third } ?: return "VPN-UID[unknown]"
+        return "VPN-UID[${selected.second}#${selected.first.networkHandle}]"
     }
 
     private suspend fun awaitPathAccounting(
@@ -321,15 +296,6 @@ internal object EngineBenchmarkProbe {
 
     private fun safeError(error: Throwable): String =
         (error.message?.takeIf(String::isNotBlank) ?: error.javaClass.simpleName).take(220)
-
-    private data class VpnNetworkBinding(
-        val network: Network,
-        val interfaceName: String,
-        val handle: Long
-    ) {
-        val label: String
-            get() = "VPN-NETWORK[$interfaceName#$handle]"
-    }
 
     private data class PathAccounting(
         val proxyBytes: Long,

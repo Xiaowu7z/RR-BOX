@@ -75,6 +75,7 @@ class RRVpnService : VpnService() {
         const val EXTRA_CONFIG_JSON = "EXTRA_CONFIG_JSON"
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
+        const val EXTRA_HEV_BENCHMARK_SELF_TRAFFIC = "EXTRA_HEV_BENCHMARK_SELF_TRAFFIC"
 
         /** Restart the current canonical config after a forwarding-engine preference change. */
         const val ACTION_RESTART_ACTIVE_ENGINE = "com.rr.client.action.RESTART_ACTIVE_ENGINE"
@@ -127,8 +128,18 @@ class RRVpnService : VpnService() {
                     Log.e(TAG, _lastError.value.orEmpty())
                     return START_NOT_STICKY
                 }
-                ensureForeground("$activeNodeTag · 正在切换引擎")
-                launchCore(config, restarting = true)
+                val benchmarkSelf = intent.getBooleanExtra(
+                    EXTRA_HEV_BENCHMARK_SELF_TRAFFIC,
+                    false
+                )
+                ensureForeground(
+                    if (benchmarkSelf) "$activeNodeTag · HEV A/B v2.5" else "$activeNodeTag · 正在切换引擎"
+                )
+                launchCore(
+                    stableConfigJson = config,
+                    restarting = true,
+                    hevBenchmarkSelfTraffic = benchmarkSelf
+                )
                 return START_NOT_STICKY
             }
 
@@ -209,7 +220,11 @@ class RRVpnService : VpnService() {
         )
     }
 
-    private fun launchCore(stableConfigJson: String, restarting: Boolean) {
+    private fun launchCore(
+        stableConfigJson: String,
+        restarting: Boolean,
+        hevBenchmarkSelfTraffic: Boolean = false
+    ) {
         val generation = ++requestGeneration
         stopping = false
         _lastError.value = null
@@ -242,7 +257,6 @@ class RRVpnService : VpnService() {
                                 return@withLock false
                             }
 
-                        // Validate the exact HEV-side config, not only the canonical system config.
                         runCatching { Libbox.checkConfig(runtime.configJson) }
                             .getOrElse { error ->
                                 Log.e(TAG, "HEV sing-box config validation failed", error)
@@ -252,15 +266,16 @@ class RRVpnService : VpnService() {
                         val coreStarted = boxCore?.startService(runtime.configJson, this@RRVpnService) == true
                         if (!coreStarted) return@withLock false
 
-                        val hevStarted = hevEngine?.start(runtime.perAppPolicy) == true
+                        val hevStarted = hevEngine?.start(
+                            policy = runtime.perAppPolicy,
+                            includeSelfForBenchmark = hevBenchmarkSelfTraffic
+                        ) == true
                         if (!hevStarted) {
                             boxCore?.stopService()
                             return@withLock false
                         }
                         true
                     } else {
-                        // Stable path: feed the exact canonical config into the same libbox path
-                        // that was real-device verified in 0.1.8. No HEV transformation occurs.
                         boxCore?.startService(stableConfigJson, this@RRVpnService) ?: false
                     }
                 }
@@ -276,7 +291,15 @@ class RRVpnService : VpnService() {
                 _isStarting.value = false
                 _isRunning.value = true
                 notificationMgr.updateNotification(displayNodeTag(), TrafficSpeed(), 0L)
-                Log.i(TAG, "VPN tunnel started: $activeNodeTag · engine=$activeEngine")
+                Log.i(
+                    TAG,
+                    "VPN tunnel started: $activeNodeTag · engine=$activeEngine" +
+                        if (hevBenchmarkSelfTraffic && activeEngine == PreferencesManager.TUN_ENGINE_HEV) {
+                            " · benchmark-self-route-v2.5"
+                        } else {
+                            ""
+                        }
+                )
             } else {
                 val reason = hevEngine?.lastError
                     ?: boxCore?.lastError
@@ -288,13 +311,24 @@ class RRVpnService : VpnService() {
                 _lastError.value = reason
                 Log.e(TAG, reason)
                 _isStarting.value = false
-                stopVpn(persistTraffic = false)
+
+                if (hevBenchmarkSelfTraffic) {
+                    withContext(Dispatchers.IO) {
+                        coreMutex.withLock { stopDataPlane() }
+                    }
+                    _isRunning.value = false
+                    _currentSpeed.value = TrafficSpeed()
+                    _sessionTraffic.value = SessionTraffic()
+                    ensureForeground("$activeNodeTag · A/B 失败，正在恢复")
+                    Log.w(TAG, "HEV benchmark restart failed; canonical config preserved for recovery")
+                } else {
+                    stopVpn(persistTraffic = false)
+                }
             }
         }
     }
 
     private fun stopDataPlane() {
-        // HEV must stop consuming the TUN before its loopback SOCKS listener/core is removed.
         hevEngine?.stop()
         boxCore?.stopService()
     }

@@ -11,8 +11,11 @@ import java.io.File
 /**
  * Android VpnService + HEV native TUN-to-SOCKS data plane.
  *
- * Unlike the stable engine, sing-box does not own the TUN fd here. Android creates the fd,
- * HEV consumes packets in native lwIP, and forwards them to sing-box's loopback SOCKS inbound.
+ * Normal HEV keeps RRBOX itself outside the VPN because HEV talks to sing-box through a local
+ * loopback SOCKS inbound. Network Lab A/B v2.5 has one narrow exception: during the transient HEV
+ * benchmark restart, RRBOX itself is allowed into the TUN so the benchmark socket follows the
+ * exact HEV data path. We do not alter 127/8 routing. sing-box remote sockets remain protected by
+ * BoxServiceWrapper.autoDetectInterfaceControl(fd) -> VpnService.protect(fd).
  */
 class HevVpnEngine(
     private val vpnService: VpnService,
@@ -33,7 +36,10 @@ class HevVpnEngine(
     val isRunning: Boolean
         get() = tunPfd != null && HevTunnelNative.isRunning()
 
-    fun start(policy: ResolvedPerAppPolicy): Boolean {
+    fun start(
+        policy: ResolvedPerAppPolicy,
+        includeSelfForBenchmark: Boolean = false
+    ): Boolean {
         stop()
         lastError = null
 
@@ -46,7 +52,7 @@ class HevVpnEngine(
 
         return runCatching {
             val builder = vpnService.Builder()
-                .setSession("RRBOX · HEV")
+                .setSession(if (includeSelfForBenchmark) "RRBOX · HEV · A/B v2.5" else "RRBOX · HEV")
                 .setMtu(HevTunnelConfig.MTU)
                 .addAddress(HevTunnelConfig.IPV4_CLIENT, HevTunnelConfig.IPV4_PREFIX)
                 .addRoute("0.0.0.0", 0)
@@ -56,7 +62,7 @@ class HevVpnEngine(
                 builder.setMetered(false)
             }
 
-            applyPerAppPolicy(builder, policy)
+            applyPerAppPolicy(builder, policy, includeSelfForBenchmark)
 
             val pfd = builder.establish()
                 ?: error("Android 拒绝建立 HEV VPN 接口")
@@ -71,13 +77,17 @@ class HevVpnEngine(
                 "HEV native 线程启动失败"
             }
 
-            // JNI returns after the worker thread is created. Give config/lwIP initialization a
-            // small window so malformed/native startup failures are detected before reporting UP.
             Thread.sleep(80L)
             check(HevTunnelNative.isRunning()) {
                 "HEV native 初始化后立即退出"
             }
 
+            if (includeSelfForBenchmark) {
+                onLog(
+                    "HEV A/B v2.5：RRBOX UID 临时进入 TUN；127/8 保持系统 loopback；" +
+                        "sing-box 远端 socket 继续由 protect(fd) 绕过 VPN"
+                )
+            }
             onLog("HEV native 极速数据面已启动：TUN → lwIP → SOCKS5 → sing-box")
             true
         }.getOrElse { error ->
@@ -98,22 +108,31 @@ class HevVpnEngine(
 
     private fun applyPerAppPolicy(
         builder: VpnService.Builder,
-        policy: ResolvedPerAppPolicy
+        policy: ResolvedPerAppPolicy,
+        includeSelfForBenchmark: Boolean
     ) {
         when {
             policy.allowedPackages.isNotEmpty() -> {
                 var added = 0
-                policy.allowedPackages
+                val allowed = if (includeSelfForBenchmark) {
+                    policy.allowedPackages + SELF_PACKAGE
+                } else {
+                    policy.allowedPackages.filterNot { it == SELF_PACKAGE }
+                }
+                allowed
                     .asSequence()
                     .map(String::trim)
                     .filter(String::isNotEmpty)
-                    .filterNot { it == SELF_PACKAGE }
                     .distinct()
                     .forEach { packageName ->
                         runCatching { builder.addAllowedApplication(packageName) }
                             .onSuccess {
                                 added++
-                                onLog("HEV 仅选中代理：$packageName")
+                                if (packageName == SELF_PACKAGE && includeSelfForBenchmark) {
+                                    onLog("HEV A/B v2.5 临时纳入 RRBOX 自身 UID")
+                                } else {
+                                    onLog("HEV 仅选中代理：$packageName")
+                                }
                             }
                             .onFailure { error ->
                                 Log.w(TAG, "Unable to allow package $packageName", error)
@@ -123,7 +142,12 @@ class HevVpnEngine(
             }
 
             policy.disallowedPackages.isNotEmpty() -> {
-                (policy.disallowedPackages + SELF_PACKAGE)
+                val disallowed = if (includeSelfForBenchmark) {
+                    policy.disallowedPackages.filterNot { it == SELF_PACKAGE }
+                } else {
+                    policy.disallowedPackages + SELF_PACKAGE
+                }
+                disallowed
                     .asSequence()
                     .map(String::trim)
                     .filter(String::isNotEmpty)
@@ -135,13 +159,18 @@ class HevVpnEngine(
                                 Log.w(TAG, "Unable to bypass package $packageName", error)
                             }
                     }
+                if (includeSelfForBenchmark) {
+                    onLog("HEV A/B v2.5：保留用户绕过列表，但 RRBOX 自身临时不绕过")
+                }
             }
 
             else -> {
-                // HEV connects to a local SOCKS listener from RRBOX's own UID. Keep self outside
-                // the VPN to prevent the bridge/core control traffic from re-entering the TUN.
-                builder.addDisallowedApplication(SELF_PACKAGE)
-                onLog("HEV 全部代理：RRBOX 自身保持 VPN 外以避免回环")
+                if (includeSelfForBenchmark) {
+                    onLog("HEV A/B v2.5：全部代理模式临时允许 RRBOX 自身进入 TUN")
+                } else {
+                    builder.addDisallowedApplication(SELF_PACKAGE)
+                    onLog("HEV 全部代理：RRBOX 自身保持 VPN 外以避免回环")
+                }
             }
         }
     }

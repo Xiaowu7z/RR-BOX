@@ -19,21 +19,21 @@ class LabModelsTest {
     }
 
     @Test
-    fun summarizeBenchmarkHistory_usesOnlyV24VerifiedRecords() {
+    fun summarizeBenchmarkHistory_usesOnlyV25VerifiedRecords() {
         val system = verifiedSample("SYSTEM")
         val hev = verifiedSample("HEV")
-        val v24 = EngineBenchmarkReport(
-            benchmarkVersion = 6,
+        val v25 = EngineBenchmarkReport(
+            benchmarkVersion = 7,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "SYSTEM",
-            helperPackage = "Android VPN Network.socketFactory + fixed IPv4 bootstrap",
+            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap",
             system = system,
             hev = hev
         )
-        val oldV23 = v24.copy(benchmarkVersion = 5)
+        val oldV24 = v25.copy(benchmarkVersion = 6)
 
-        val summary = summarizeBenchmarkHistory(listOf(oldV23, v24))
+        val summary = summarizeBenchmarkHistory(listOf(oldV24, v25))
         assertNotNull(summary)
         assertEquals(1, summary!!.runs)
         assertEquals(3, summary.system.httpsSuccessRounds)
@@ -51,11 +51,11 @@ class LabModelsTest {
             }
         )
         val report = EngineBenchmarkReport(
-            benchmarkVersion = 6,
+            benchmarkVersion = 7,
             nodeTag = "node",
             nodeServerMasked = "1.***.***.1",
             originalEngine = "HEV",
-            helperPackage = "Android VPN Network.socketFactory + fixed IPv4 bootstrap",
+            helperPackage = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap",
             system = system,
             hev = hev
         )
@@ -82,7 +82,7 @@ class LabModelsTest {
     }
 
     @Test
-    fun v24TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
+    fun v25TimingMetrics_excludeDnsAndUseOnlyVerifiedRounds() {
         val sample = verifiedSample("SYSTEM")
         assertNull(sample.httpsDnsMedianMillis)
         assertEquals(6L, sample.httpsTcpMedianMillis)
@@ -111,7 +111,7 @@ class LabModelsTest {
             nativeAccountedDownloadBytes = if (hev) 2L * 1024L * 1024L else 0L,
             nativePathVerified = hev,
             proxyPathVerified = true,
-            protocol = "VPN-NETWORK[tun0#123]/fixed=104.16.1.1/http/1.1"
+            protocol = "VPN-UID[tun0#123]/fixed=104.16.1.1/http/1.1"
         )
 
         return EngineBenchmarkSample(
