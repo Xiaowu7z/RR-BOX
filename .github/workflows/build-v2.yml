@@ -1,4 +1,4 @@
-name: RRBOX 0.9.1 Build & Release (arm64-v8a)
+name: RRBOX 0.9.3 Build & Release (arm64-v8a)
 
 on:
   push:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "91"
-  VERSION_NAME: "0.9.1"
-  OUTPUT_APK_NAME: RRBOX-0.9.1-arm64-v8a.apk
+  VERSION_CODE: "93"
+  VERSION_NAME: "0.9.3"
+  OUTPUT_APK_NAME: RRBOX-0.9.3-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RRBOX 0.9.1
+    name: Build signed RRBOX 0.9.3
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -257,20 +257,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          grep -q 'versionCode = 91' app/build.gradle.kts
-          grep -q 'versionName = "0.9.1"' app/build.gradle.kts
-          grep -q 'OsConstants.IFF_UP' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt
-          grep -q 'include_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'exclude_package' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
-          grep -q 'addProperty("stack", "system")' app/src/main/java/com/rr/client/core/ConfigBuilder.kt
+          grep -q 'versionCode = 93' app/build.gradle.kts
+          grep -q 'versionName = "0.9.3"' app/build.gradle.kts
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          grep -q 'TProxyStartService' app/src/main/java/com/rr/client/vpn/HevTunnelNative.kt
           grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
-          grep -q 'ScanContract' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
+          grep -q 'class RRQuickTileService' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
+          grep -q 'RRQuickTileController.connect' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
+          grep -q 'android.permission.BIND_QUICK_SETTINGS_TILE' app/src/main/AndroidManifest.xml
+          grep -q 'android.service.quicksettings.action.QS_TILE' app/src/main/AndroidManifest.xml
+          grep -q 'R.drawable.ic_notification' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'REPOSITORY = "RR-BOX"' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
           grep -q 'QrImageDecoder' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
-          grep -q 'android.permission.CAMERA' app/src/main/AndroidManifest.xml
 
           gradle \
             --no-daemon \
@@ -282,8 +281,6 @@ jobs:
 
       - name: Verify APK and generate reports
         shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
           source_apk="app/build/outputs/apk/release/app-release.apk"
@@ -303,8 +300,8 @@ jobs:
             | tee dist/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-          grep -q "versionCode='91'" dist/PACKAGE-REPORT.txt
-          grep -q "versionName='0.9.1'" dist/PACKAGE-REPORT.txt
+          grep -q "versionCode='93'" dist/PACKAGE-REPORT.txt
+          grep -q "versionName='0.9.3'" dist/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
@@ -313,6 +310,7 @@ jobs:
           grep -q '^assets/licenses/hev-socks5-tunnel-LICENSE\.txt$' dist/APK-FILE-LIST.txt
           grep -q '^assets/rules/geosite-geolocation-cn\.srs$' dist/APK-FILE-LIST.txt
           grep -q '^assets/rules/geoip-cn\.srs$' dist/APK-FILE-LIST.txt
+
           if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' dist/APK-FILE-LIST.txt; then
             echo "ERROR: APK contains unexpected ABI" >&2
             exit 1
@@ -326,12 +324,12 @@ jobs:
           hev_size="$(unzip -l "$output_apk" | awk '/libhev-socks5-tunnel\.so/ {print $1; exit}')"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.9.1 Public Beta Build Report
+          # RRBOX 0.9.3 Stable Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package: com.rr.client
-          - Version code: 91
-          - Version name: 0.9.1
+          - Version code: 93
+          - Version name: 0.9.3
           - ABI: arm64-v8a
           - APK: ${OUTPUT_APK_NAME}
           - APK size: ${apk_size} bytes
@@ -341,13 +339,12 @@ jobs:
           - HEV: ${HEV_COMMIT}
           - HEV native APK entry size: ${hev_size} bytes
           - Forwarding engines: System TUN + HEV native/lwIP TUN-to-SOCKS
-          - System TUN MTU: 1500
-          - HEV TUN MTU: 8500
-          - HEV mapped DNS: 198.18.0.2 / 100.64.0.0/10
+          - Quick Settings: RRBOX toggle tile registered
+          - Notification icon: RRBOX monochrome R
           - QR import: camera scanner + image-file QR decoding
           - CI: unit tests, signed Release, package/version/ABI/native/rule validation passed
 
-          RRBOX 0.9.1 is a public beta. No throughput superiority claim is made without same-device A/B data.
+          RRBOX 0.9.3 is a stable release. HEV remains an optional experimental data plane; System TUN is the stable baseline.
           EOF
 
           cp build-reports/LIBBOX-SHA256.txt dist/
@@ -361,51 +358,47 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.9.1-arm64-v8a
+          name: RRBOX-0.9.3-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
-      - name: Publish RRBOX 0.9.1 public beta
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.1') }}"
+      - name: Publish RRBOX 0.9.3 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.3') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.1
+          tag_name: v0.9.3
           target_commitish: ${{ github.sha }}
-          name: RRBOX 0.9.1 公测版
-          prerelease: true
+          name: RRBOX 0.9.3 正式版
+          prerelease: false
+          make_latest: true
           generate_release_notes: false
           body: |
-            ## RRBOX 0.9.1 公测版
+            ## RRBOX 0.9.3 正式版
 
-            这是 RRBOX 首个面向公开测试的版本，核心工作集中在 Android VPN 数据面研究，而不是单纯堆叠 UI 功能。
+            RRBOX 从 0.9.1 公测线进入正式发布线。
+
+            ### 本版重点
+            - 新增 Android **快速设置磁贴**：下拉控制中心直接连接 / 断开。
+            - 磁贴复用当前选中节点、智能分流、分应用与轻量模式配置。
+            - 首次 VPN 未授权时进入系统授权流程，授权完成后自动连接。
+            - 通知栏 small icon 更新为 RRBOX 专用单色 R 标识，快速磁贴同步使用同一视觉。
+            - App 内更新检查切换到公开仓库 `Xiaowu7z/RR-BOX`。
+            - Obtainium 改为默认跟踪正式 Release。
+            - System TUN 继续作为稳定基线；HEV native/lwIP 作为可选实验数据面保留。
 
             ### 核心技术
             - Stable System TUN：Android VpnService TUN → sing-box libbox system stack。
             - HEV Native：Android VpnService TUN → HEV/lwIP → loopback SOCKS5 → sing-box outbound。
-            - 两套引擎共享节点、订阅与路由配置，可切换验证。
-            - HEV 使用独立 UID 策略规避本地 SOCKS 回环。
-            - START_NOT_STICKY + 重复 START 去重，降低移动端 VPN 生命周期抖动。
-            - 中国规则使用二进制 SRS 快照并做原子更新。
-            - 相机二维码扫描升级，并支持直接从图片读取二维码。
-
-            ### 发布前验证数据
-            - System TUN MTU: 1500
-            - HEV TUN MTU: 8500
-            - HEV native library: arm64, JNI, -O3
-            - 发布前实机已跑通 TUN → lwIP → SOCKS5 → sing-box
-            - 历史稳定 APK: 39,288,731 bytes
-            - HEV 后实机构建 APK: 39,873,533 bytes
-            - 增量约 0.56 MiB / 1.49%
-
-            严格的同设备吞吐、CPU、RTT、电量 A/B 数据仍在继续采集，因此本版本不宣称 HEV 必然比 System TUN 快。
+            - START_NOT_STICKY + 重复 START 去重。
+            - 分应用路由与中国二进制 SRS 规则。
+            - arm64 可复现构建、签名与 ABI/native/rule 校验。
 
             ### 安装
-            - 现代 Android arm64 设备下载 `RRBOX-0.9.1-arm64-v8a.apk`
-            - Release 同时附带 SHA-256、签名报告、构建报告与 Obtainium 配置。
+            下载 `RRBOX-0.9.3-arm64-v8a.apk`。Release 同时附带 SHA-256、签名报告、构建报告与 Obtainium 配置。
           files: |
-            dist/RRBOX-0.9.1-arm64-v8a.apk
+            dist/RRBOX-0.9.3-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt

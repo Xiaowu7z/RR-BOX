@@ -17,7 +17,7 @@ data class AppUpdateResult(
 
 object AppUpdateChecker {
     private const val OWNER = "Xiaowu7z"
-    private const val REPOSITORY = "RR-Android"
+    private const val REPOSITORY = "RR-BOX"
     private const val API_URL = "https://api.github.com/repos/$OWNER/$REPOSITORY/releases/latest"
 
     private val client = OkHttpClient.Builder()
@@ -36,7 +36,7 @@ object AppUpdateChecker {
 
             client.newCall(request).execute().use { response ->
                 if (response.code == 404) {
-                    error("暂未找到公开的 RRBOX Release；仓库公开并发布版本后即可使用自动检查")
+                    error("暂未找到公开的 RRBOX 正式版 Release")
                 }
                 require(response.isSuccessful) { "GitHub 返回 HTTP ${response.code}" }
                 val body = response.body?.string().orEmpty()
