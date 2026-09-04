@@ -32,5 +32,36 @@ object SubscriptionUrlNormalizer {
         return listOf("https://$input", "http://$input")
     }
 
+    fun looksLikeSubscriptionAddress(raw: String): Boolean {
+        val input = raw.trim()
+        if (input.isEmpty() || input.contains('\n') || input.contains('\r')) return false
+
+        val lower = input.lowercase()
+        if (SCHEME_REGEX.containsMatchIn(input) &&
+            !lower.startsWith("https://") &&
+            !lower.startsWith("http://")
+        ) return false
+
+        val body = when {
+            lower.startsWith("https://") -> input.substring(8)
+            lower.startsWith("http://") -> input.substring(7)
+            input.startsWith("//") -> input.substring(2)
+            else -> input
+        }
+        val authority = body.substringBefore('/').substringBefore('?')
+        if (authority.isBlank() || authority.any(Char::isWhitespace) || '@' in authority) return false
+
+        val validHost = if (authority.startsWith("[") && authority.contains("]")) {
+            true
+        } else {
+            val host = authority.substringBefore(':')
+            host.equals("localhost", ignoreCase = true) || host.contains('.')
+        }
+        if (!validHost) return false
+
+        val remainder = body.removePrefix(authority)
+        return remainder.isNotBlank() && remainder != "/"
+    }
+
     private val SCHEME_REGEX = Regex("^[A-Za-z][A-Za-z0-9+.-]*://")
 }

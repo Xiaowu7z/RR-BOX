@@ -97,10 +97,12 @@ fun NodeListScreen(
     onSelectNode: (ProxyNode) -> Unit,
     onPingAll: () -> Unit,
     onPingNode: (ProxyNode) -> Unit,
+    onRenameNode: (ProxyNode, String) -> Unit,
     onEditNode: (ProxyNode) -> Unit,
     onResetNodeEdit: (ProxyNode) -> Unit,
     onDeleteLocalNode: (ProxyNode) -> Unit,
     onImportText: (String) -> Unit,
+    onImportClipboard: (String) -> Unit,
     onCreateManualNode: (ProtocolType) -> Unit,
     onGoToSubscription: () -> Unit
 ) {
@@ -211,6 +213,7 @@ fun NodeListScreen(
                                 isLocal = group.isLocal,
                                 onSelectNode = { onSelectNode(node) },
                                 onPingNode = { onPingNode(node) },
+                                onRenameNode = { name -> onRenameNode(node, name) },
                                 onEditNode = { onEditNode(node) },
                                 onResetNodeEdit = { onResetNodeEdit(node) },
                                 onDeleteLocalNode = { onDeleteLocalNode(node) }
@@ -244,7 +247,7 @@ fun NodeListScreen(
                 showImportMethods = false
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                onImportText(text)
+                onImportClipboard(text)
             },
             onText = {
                 showImportMethods = false
@@ -331,11 +334,14 @@ private fun NodeCard(
     isLocal: Boolean,
     onSelectNode: () -> Unit,
     onPingNode: () -> Unit,
+    onRenameNode: (String) -> Unit,
     onEditNode: () -> Unit,
     onResetNodeEdit: () -> Unit,
     onDeleteLocalNode: () -> Unit
 ) {
     var menuExpanded by remember(node.id) { mutableStateOf(false) }
+    var showRenameDialog by remember(node.id) { mutableStateOf(false) }
+    var renameInput by remember(node.id) { mutableStateOf(node.tag) }
 
     Card(
         modifier = Modifier
@@ -394,6 +400,15 @@ private fun NodeCard(
                         onClick = { menuExpanded = false; onPingNode() }
                     )
                     DropdownMenuItem(
+                        text = { Text("重命名") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = {
+                            menuExpanded = false
+                            renameInput = node.tag
+                            showRenameDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("编辑节点") },
                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                         onClick = { menuExpanded = false; onEditNode() }
@@ -415,6 +430,37 @@ private fun NodeCard(
                 }
             }
         }
+    }
+
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("重命名节点") },
+            text = {
+                OutlinedTextField(
+                    value = renameInput,
+                    onValueChange = { renameInput = it },
+                    label = { Text("节点名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val normalized = renameInput.trim()
+                        if (normalized.isNotEmpty()) {
+                            showRenameDialog = false
+                            onRenameNode(normalized)
+                        }
+                    },
+                    enabled = renameInput.trim().isNotEmpty()
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) { Text("取消") }
+            }
+        )
     }
 }
 

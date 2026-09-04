@@ -56,6 +56,7 @@ import com.rr.client.security.PinSecurity
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.subscription.SubscriptionFetcher
 import com.rr.client.subscription.SubscriptionParser
+import com.rr.client.subscription.SubscriptionUrlNormalizer
 import com.rr.client.subscription.model.SubProfile
 import com.rr.client.ui.components.NodeEditDialog
 import com.rr.client.ui.components.PinSetupDialog
@@ -403,6 +404,37 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+
+        fun renameNode(node: ProxyNode, requestedName: String) {
+            val newName = requestedName.trim()
+            if (newName.isEmpty()) {
+                toast("节点名称不能为空")
+                return
+            }
+            if (newName == node.tag) return
+
+            val renamed = NodeOverridePatcher.apply(node, node.copy(tag = newName))
+            if (node.profileId == SubProfile.LOCAL_PROFILE_ID) {
+                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
+                if (existing.none { it.id == node.id }) {
+                    toast("没有找到要重命名的本地节点")
+                    return
+                }
+                val normalized = renamed.copy(
+                    profileId = SubProfile.LOCAL_PROFILE_ID,
+                    profileName = SubProfile.LOCAL_PROFILE_NAME
+                )
+                persistLocalNodes(
+                    existing.map { if (it.id == node.id) normalized else it },
+                    "已重命名为「$newName」"
+                )
+            } else {
+                lifecycleScope.launch {
+                    prefs.setNodeOverride(renamed)
+                    toast("已重命名为「$newName」")
+                }
+            }
+        }
         fun scheduleRoutingRestart(
             mode: String,
             packages: Set<String>,
@@ -463,6 +495,21 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+
+        fun importClipboardContent(raw: String) {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) {
+                importLocalNodes(raw)
+                return
+            }
+            if (SubscriptionUrlNormalizer.looksLikeSubscriptionAddress(trimmed)) {
+                selectedTab = 3
+                toast("已识别订阅地址，正在同步")
+                addProfile("", trimmed)
+            } else {
+                importLocalNodes(raw)
+            }
+        }
         fun refreshProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
             refreshingIds = refreshingIds + profileId
@@ -603,6 +650,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onPingAll = ::pingAllNodes,
                         onPingNode = ::pingNode,
+                        onRenameNode = ::renameNode,
                         onEditNode = { node -> editingNode = node },
                         onResetNodeEdit = { node ->
                             lifecycleScope.launch {
@@ -612,6 +660,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onDeleteLocalNode = ::deleteLocalNode,
                         onImportText = ::importLocalNodes,
+                        onImportClipboard = ::importClipboardContent,
                         onCreateManualNode = { protocol ->
                             editingNode = manualNodeTemplate(protocol)
                         },

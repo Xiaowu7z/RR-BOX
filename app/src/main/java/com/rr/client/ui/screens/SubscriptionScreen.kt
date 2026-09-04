@@ -81,7 +81,11 @@ fun SubscriptionScreen(
 
         if (!showAddForm) {
             OutlinedButton(
-                onClick = { showAddForm = true },
+                onClick = {
+                    nameInput = ""
+                    urlInput = ""
+                    showAddForm = true
+                },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 border = BorderStroke(1.dp, CyanPrimary)
@@ -142,14 +146,22 @@ fun SubscriptionScreen(
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
-                            onClick = { showAddForm = false },
+                            onClick = {
+                                nameInput = ""
+                                urlInput = ""
+                                showAddForm = false
+                            },
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(12.dp)
                         ) { Text("取消", color = TextSecondary) }
                         Button(
                             onClick = {
-                                onAddProfile(nameInput, urlInput)
+                                val submittedName = nameInput.trim()
+                                val submittedUrl = urlInput.trim()
+                                nameInput = ""
+                                urlInput = ""
                                 showAddForm = false
+                                onAddProfile(submittedName, submittedUrl)
                             },
                             enabled = !adding && urlInput.isNotBlank(),
                             modifier = Modifier.weight(2f),
