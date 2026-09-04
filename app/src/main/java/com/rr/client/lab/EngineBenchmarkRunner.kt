@@ -30,31 +30,30 @@ class EngineBenchmarkRunner(
             "请先让 RRBOX 正常连接，再开始 System / HEV A/B"
         }
         val originalEngine = preferences.tunEngine.first()
-        val helperPackage = EngineBenchmarkProbe.HELPER_PACKAGE
         RRLogStore.record(
             "BENCH",
-            "开始 A/B v2.2: node=${node.tag}, original=$originalEngine, helper=$helperPackage"
+            "开始 A/B v2.3: node=${node.tag}, original=$originalEngine, transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}"
         )
 
         return try {
-            val system = sampleEngine(PreferencesManager.TUN_ENGINE_SYSTEM, helperPackage)
-            val hev = sampleEngine(PreferencesManager.TUN_ENGINE_HEV, helperPackage)
+            val system = sampleEngine(PreferencesManager.TUN_ENGINE_SYSTEM)
+            val hev = sampleEngine(PreferencesManager.TUN_ENGINE_HEV)
             EngineBenchmarkReport(
-                benchmarkVersion = 4,
+                benchmarkVersion = 5,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
                 probeTarget = EngineBenchmarkProbe.HTTPS_HOST,
-                helperPackage = helperPackage,
-                udpTarget = "disabled-v2.2",
+                helperPackage = EngineBenchmarkProbe.PROBE_TRANSPORT,
+                udpTarget = "disabled-v2.3",
                 system = system,
                 hev = hev
             ).also {
                 BenchmarkHistoryStore.save(appContext, it)
                 RRLogStore.record(
                     "BENCH",
-                    "A/B v2.2 完成: System first=${system.httpsFirstByteMedianMillis ?: -1}ms " +
-                        "HEV first=${hev.httpsFirstByteMedianMillis ?: -1}ms"
+                    "A/B v2.3 完成: System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
+                        "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
                 )
             }
         } finally {
@@ -64,20 +63,17 @@ class EngineBenchmarkRunner(
                     .onFailure {
                         RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}")
                     }
-                onProgress("A/B v2.2 已结束")
+                onProgress("A/B v2.3 已结束")
             }
         }
     }
 
-    private suspend fun sampleEngine(
-        engine: String,
-        helperPackage: String
-    ): EngineBenchmarkSample {
-        onProgress("$engine · 正在重建引擎")
-        val restartMillis = restartInto(engine, helperPackage)
+    private suspend fun sampleEngine(engine: String): EngineBenchmarkSample {
+        onProgress("$engine · 正在按正常模式重建引擎")
+        val restartMillis = restartInto(engine)
         delay(900L)
 
-        onProgress("$engine · 64 KiB 独立 UID 路径预检")
+        onProgress("$engine · 64 KiB VPN Network 路径预检")
         val preflight = EngineBenchmarkProbe.httpsRound(
             context = appContext,
             engine = engine,
@@ -86,17 +82,17 @@ class EngineBenchmarkRunner(
         )
         RRLogStore.record(
             "BENCH",
-            "$engine PREFLIGHT success=${preflight.success} bytes=${preflight.bytesReceived} " +
-                "proxyCount=${preflight.proxyAccountedDownloadBytes} " +
+            "$engine PREFLIGHT success=${preflight.success} protocol=${preflight.protocol.orEmpty()} " +
+                "bytes=${preflight.bytesReceived} proxyCount=${preflight.proxyAccountedDownloadBytes} " +
                 "nativeRx=${preflight.nativeAccountedDownloadBytes} " +
                 "nativeVerified=${preflight.nativePathVerified} verified=${preflight.proxyPathVerified}"
         )
         check(preflight.success) {
-            "$engine helper 预检失败：${preflight.error ?: "DownloadManager 未成功"}"
+            "$engine VPN Network 预检失败：${preflight.error ?: "HTTPS 未成功"}"
         }
         check(preflight.proxyPathVerified) {
             buildString {
-                append("$engine helper 流量未通过代理路径校验：")
+                append("$engine VPN Network 流量未通过代理路径校验：")
                 append("下载 ${preflight.bytesReceived} B，sing-box 计入 ")
                 append("${preflight.proxyAccountedDownloadBytes} B")
                 if (engine == PreferencesManager.TUN_ENGINE_HEV) {
@@ -111,7 +107,7 @@ class EngineBenchmarkRunner(
         val httpsRounds = buildList {
             repeat(EngineBenchmarkProbe.HTTPS_ATTEMPTS) { index ->
                 val attempt = index + 1
-                onProgress("$engine · helper HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB")
+                onProgress("$engine · VPN socket HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB")
                 val result = EngineBenchmarkProbe.httpsRound(
                     context = appContext,
                     engine = engine,
@@ -120,9 +116,10 @@ class EngineBenchmarkRunner(
                 add(result)
                 RRLogStore.record(
                     "BENCH",
-                    "$engine HTTPS#$attempt success=${result.success} " +
-                        "first=${result.firstByteMillis ?: -1}ms rate=${result.downloadBps ?: -1} " +
-                        "proxy=${result.proxyAccountedDownloadBytes} " +
+                    "$engine HTTPS#$attempt success=${result.success} protocol=${result.protocol.orEmpty()} " +
+                        "dns=${result.dnsMillis ?: -1} tcp=${result.tcpConnectMillis ?: -1} " +
+                        "tls=${result.tlsMillis ?: -1} ttfb=${result.firstByteMillis ?: -1} " +
+                        "rate=${result.downloadBps ?: -1} proxy=${result.proxyAccountedDownloadBytes} " +
                         "nativeRx=${result.nativeAccountedDownloadBytes} verified=${result.proxyPathVerified}"
                 )
                 if (result.success && !result.proxyPathVerified) {
@@ -157,19 +154,16 @@ class EngineBenchmarkRunner(
 
         RRLogStore.record(
             "BENCH",
-            "$engine v2.2 sample: restart=${sample.restartMillis}ms " +
+            "$engine v2.3 sample: restart=${sample.restartMillis}ms " +
                 "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
-                "first=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
+                "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
                 "verified=${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount} " +
                 "nativeVerified=${sample.nativePathVerifiedCount}"
         )
         return sample
     }
 
-    private suspend fun restartInto(
-        engine: String,
-        helperPackage: String? = null
-    ): Long {
+    private suspend fun restartInto(engine: String): Long {
         preferences.setTunEngine(engine)
         RRVpnService.clearLastError()
         val startedAt = SystemClock.elapsedRealtime()
@@ -177,9 +171,6 @@ class EngineBenchmarkRunner(
             appContext,
             Intent(appContext, RRVpnService::class.java).apply {
                 action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
-                helperPackage?.takeIf(String::isNotBlank)?.let {
-                    putExtra(RRVpnService.EXTRA_BENCHMARK_TRAFFIC_PACKAGE, it)
-                }
             }
         )
 
@@ -200,13 +191,21 @@ class EngineBenchmarkRunner(
     }
 
     private suspend fun restoreEngine(originalEngine: String) {
-        // Always perform one normal restart. It removes any transient helper package from the VPN
-        // policy and also recovers the canonical connection if a benchmark-only restart failed.
-        preferences.setTunEngine(originalEngine)
-        val restoreMillis = restartInto(
-            engine = originalEngine,
-            helperPackage = null
-        )
+        val currentPreference = runCatching { preferences.tunEngine.first() }.getOrDefault(originalEngine)
+        if (currentPreference == originalEngine &&
+            RRVpnService.isRunning.value &&
+            !RRVpnService.isStarting.value
+        ) {
+            return
+        }
+
+        if (!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) {
+            preferences.setTunEngine(originalEngine)
+            RRLogStore.record("BENCH", "VPN 已停止，仅恢复引擎偏好: $originalEngine")
+            return
+        }
+
+        val restoreMillis = restartInto(originalEngine)
         RRLogStore.record("BENCH", "已按正常模式恢复原始引擎: $originalEngine (${restoreMillis}ms)")
     }
 
