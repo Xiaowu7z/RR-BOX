@@ -12,10 +12,13 @@ import java.io.File
  * Android VpnService + HEV native TUN-to-SOCKS data plane.
  *
  * Normal HEV keeps RRBOX itself outside the VPN because HEV talks to sing-box through a local
- * loopback SOCKS inbound. Network Lab A/B v2.5 has one narrow exception: during the transient HEV
- * benchmark restart, RRBOX itself is allowed into the TUN so the benchmark socket follows the
- * exact HEV data path. We do not alter 127/8 routing. sing-box remote sockets remain protected by
+ * loopback SOCKS inbound. Network Lab has one narrow exception: during the transient HEV benchmark
+ * restart, RRBOX itself is allowed into the TUN so the benchmark socket follows the exact HEV data
+ * path. We do not alter 127/8 routing. sing-box remote sockets remain protected by
  * BoxServiceWrapper.autoDetectInterfaceControl(fd) -> VpnService.protect(fd).
+ *
+ * A/B v2.8 additionally enables a benchmark-only HEV SOCKS handshake latency candidate
+ * (pipeline + best-effort TCP Fast Open). Normal HEV keeps the proven production profile.
  */
 class HevVpnEngine(
     private val vpnService: VpnService,
@@ -51,8 +54,15 @@ class HevVpnEngine(
         }
 
         return runCatching {
+            val latencyCandidate = includeSelfForBenchmark
             val builder = vpnService.Builder()
-                .setSession(if (includeSelfForBenchmark) "RRBOX · HEV · A/B v2.5" else "RRBOX · HEV")
+                .setSession(
+                    if (includeSelfForBenchmark) {
+                        "RRBOX · HEV · A/B v2.8 candidate"
+                    } else {
+                        "RRBOX · HEV"
+                    }
+                )
                 .setMtu(HevTunnelConfig.MTU)
                 .addAddress(HevTunnelConfig.IPV4_CLIENT, HevTunnelConfig.IPV4_PREFIX)
                 .addRoute("0.0.0.0", 0)
@@ -71,7 +81,12 @@ class HevVpnEngine(
 
             workingDir.mkdirs()
             val configFile = File(workingDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(HevTunnelConfig.build(HevConfigAdapter.SOCKS_PORT))
+            configFile.writeText(
+                HevTunnelConfig.build(
+                    socksPort = HevConfigAdapter.SOCKS_PORT,
+                    latencyCandidate = latencyCandidate
+                )
+            )
 
             check(HevTunnelNative.start(configFile.absolutePath, pfd.fd)) {
                 "HEV native 线程启动失败"
@@ -84,8 +99,12 @@ class HevVpnEngine(
 
             if (includeSelfForBenchmark) {
                 onLog(
-                    "HEV A/B v2.5：RRBOX UID 临时进入 TUN；127/8 保持系统 loopback；" +
+                    "HEV A/B v2.8：RRBOX UID 临时进入 TUN；127/8 保持系统 loopback；" +
                         "sing-box 远端 socket 继续由 protect(fd) 绕过 VPN"
+                )
+                onLog(
+                    "HEV A/B v2.8 latency candidate：SOCKS5 pipeline=true；" +
+                        "tcp-fastopen=true（best-effort，系统不支持时回退普通 TCP）"
                 )
             }
             onLog("HEV native 极速数据面已启动：TUN → lwIP → SOCKS5 → sing-box")
@@ -129,7 +148,7 @@ class HevVpnEngine(
                             .onSuccess {
                                 added++
                                 if (packageName == SELF_PACKAGE && includeSelfForBenchmark) {
-                                    onLog("HEV A/B v2.5 临时纳入 RRBOX 自身 UID")
+                                    onLog("HEV A/B 临时纳入 RRBOX 自身 UID")
                                 } else {
                                     onLog("HEV 仅选中代理：$packageName")
                                 }
@@ -160,13 +179,13 @@ class HevVpnEngine(
                             }
                     }
                 if (includeSelfForBenchmark) {
-                    onLog("HEV A/B v2.5：保留用户绕过列表，但 RRBOX 自身临时不绕过")
+                    onLog("HEV A/B：保留用户绕过列表，但 RRBOX 自身临时不绕过")
                 }
             }
 
             else -> {
                 if (includeSelfForBenchmark) {
-                    onLog("HEV A/B v2.5：全部代理模式临时允许 RRBOX 自身进入 TUN")
+                    onLog("HEV A/B：全部代理模式临时允许 RRBOX 自身进入 TUN")
                 } else {
                     builder.addDisallowedApplication(SELF_PACKAGE)
                     onLog("HEV 全部代理：RRBOX 自身保持 VPN 外以避免回环")
