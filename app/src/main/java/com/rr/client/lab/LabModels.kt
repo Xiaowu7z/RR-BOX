@@ -130,7 +130,7 @@ data class EngineBenchmarkSample(
 }
 
 data class EngineBenchmarkReport(
-    val benchmarkVersion: Int = 9,
+    val benchmarkVersion: Int = 10,
     val timestamp: Long = System.currentTimeMillis(),
     val nodeTag: String,
     val nodeServerMasked: String,
@@ -206,10 +206,10 @@ fun calculateMetricStats(values: List<Long>): MetricStats? {
 }
 
 fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHistoryStats? {
-    // v2.7 changes restart timing to service-internal timestamps and bounds accounting wait, so only
-    // v2.7+ records are mixed for statistical comparison.
+    // v2.8 changes the HEV benchmark arm into a latency-tuning candidate (SOCKS5 pipeline +
+    // best-effort client TCP Fast Open). Do not mix v2.7 baseline HEV samples with candidate data.
     val reports = history.filter { report ->
-        report.benchmarkVersion >= 9 &&
+        report.benchmarkVersion >= 10 &&
             report.system.proxyPathVerifiedCount >= 2 &&
             report.hev.proxyPathVerifiedCount >= 2 &&
             report.hev.nativePathVerifiedCount >= 2
@@ -280,8 +280,9 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         return@buildString
     }
 
-    if (benchmarkVersion < 9) {
+    if (benchmarkVersion < 10) {
         val label = when {
+            benchmarkVersion >= 9 -> "v2.7"
             benchmarkVersion >= 8 -> "v2.6"
             benchmarkVersion >= 7 -> "v2.5"
             benchmarkVersion >= 6 -> "v2.4"
@@ -290,33 +291,39 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
             benchmarkVersion >= 3 -> "v2.1"
             else -> "v2"
         }
-        appendLine("RRBOX System vs HEV A/B $label 旧实验报告（不纳入 v2.7 统计）")
+        appendLine("RRBOX System vs HEV A/B $label 旧实验报告（不纳入 v2.8 candidate 统计）")
         appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
         appendLine("节点: $nodeTag ($nodeServerMasked)")
         appendLine("System 重建: ${system.restartMillis} ms")
         appendLine("HEV 重建: ${hev.restartMillis} ms")
-        appendLine("说明: v2.7 开始使用 Service 内部精确重建计时和有上限的路径落账窗口，因此旧记录仅保留查看。")
+        appendLine("说明: v2.8 的 HEV 是 benchmark-only latency candidate，与 v2.7 普通 HEV 基线分开统计。")
         return@buildString
     }
 
-    appendLine("RRBOX System vs HEV A/B v2.7 实测报告")
+    appendLine("RRBOX System vs HEV A/B v2.8 latency candidate 实测报告")
     appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
     appendLine("节点: $nodeTag ($nodeServerMasked)")
     appendLine("原始引擎: $originalEngine")
-    appendLine("本轮顺序: ${executionOrder.orEmpty().ifBlank { "--" }}（沿用 v2.6/v2.7 最近有效记录自动反转）")
+    appendLine("本轮顺序: ${executionOrder.orEmpty().ifBlank { "--" }}（沿用最近有效 A/B 记录自动反转）")
     appendLine("测速路径: ${helperPackage.ifBlank { "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting" }}")
     appendLine("DNS: 启动前固定解析一次 IPv4，两套引擎复用同一目标；DNS 不参与 A/B 成绩")
+    appendLine("HEV candidate: 仅实验态开启 SOCKS5 pipeline=true + tcp-fastopen=true（best-effort）；正常 HEV 配置完全不变")
     appendLine("HEV 测试态: 仅本轮临时纳入 RRBOX UID；不修改 127/8；sing-box 远端 socket 继续 protect(fd)")
-    appendLine("重建计时: 由 RRVpnService 内部从 launchCore 开始到数据面 READY 直接打点，不再包含 80ms 轮询误差")
-    appendLine("路径落账: HTTPS 完成后至少等待 1.2 秒；sessionTraffic/native RX 达到负载的 80% 即通过，最多等待 3.5 秒")
-    appendLine("说明: 路径计数只用于确认流量确实经过对应数据面，不作为精确 payload 字节计量")
+    appendLine("重建计时: RRVpnService 内部直接打点")
+    appendLine("路径落账: HTTPS 完成后至少等待 1.2 秒；sessionTraffic/native RX 达到负载 80% 即通过，最多等待 3.5 秒")
+    appendLine("说明: 路径计数只确认数据面，不作为精确 payload 字节计量")
     appendLine("代理路径预检: PASS（每个引擎先做 64 KiB；未通过不会生成本报告）")
     appendLine("HTTPS 固定下载: $probeTarget / 每轮 ${formatBytesForReport(system.downloadBytesPerRound)} × 3")
-    appendLine("UDP: v2.7 暂不纳入 A/B")
+    appendLine("UDP: v2.8 暂不纳入 A/B")
     appendLine()
 
     listOf(system, hev).forEach { sample ->
-        appendLine("[${sample.engine}]")
+        val label = if (sample.engine.equals("HEV", ignoreCase = true)) {
+            "HEV · LATENCY CANDIDATE"
+        } else {
+            sample.engine
+        }
+        appendLine("[$label]")
         appendLine("服务内数据面重建耗时: ${sample.restartMillis} ms")
         appendLine("HTTPS 成功: ${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
         appendLine("有效代理轮次: ${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
@@ -362,9 +369,9 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
     }
 
     appendLine(
-        "说明: A/B v2.7 保留已通过真机验证的 v2.5/v2.6 数据路径，只继续修正测量误差。" +
-            "Service 内部计时消除了 Runner 轮询粒度；有上限的路径落账避免全局后台流量让单轮等待延长到 4-6 秒。" +
-            "测试顺序继续自动交替，建议至少取得 SYSTEM→HEV 与 HEV→SYSTEM 各 1 次后，再看历史中位数/P95。"
+        "说明: A/B v2.8 沿用已经真机验证通过的 v2.7 测量与数据路径，只把 HEV benchmark arm 临时切成 latency candidate。" +
+            "候选只开启上游 HEV 的 SOCKS5 pipeline 与 best-effort TCP Fast Open；正常 HEV 不启用这些参数。" +
+            "本轮用于判断冷连接/TLS/TTFB 是否能下降，同时观察吞吐和 CPU 是否保持优势。"
     )
 }
 
