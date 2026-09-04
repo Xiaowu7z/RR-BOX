@@ -34,37 +34,50 @@ class EngineBenchmarkRunner(
         return try {
             onProgress("正在固定测速 IPv4 目标")
             val target = EngineBenchmarkProbe.resolveTarget(appContext)
+            val previousV26Runs = BenchmarkHistoryStore.load(appContext)
+                .count { it.benchmarkVersion >= 8 }
+            // First v2.6 run intentionally starts with HEV to counter the System-first v2.5 sample.
+            // Every successful v2.6 report flips the order so time-of-test drift cancels in history.
+            val engineOrder = if (previousV26Runs % 2 == 0) {
+                listOf(PreferencesManager.TUN_ENGINE_HEV, PreferencesManager.TUN_ENGINE_SYSTEM)
+            } else {
+                listOf(PreferencesManager.TUN_ENGINE_SYSTEM, PreferencesManager.TUN_ENGINE_HEV)
+            }
+            val orderLabel = engineOrder.joinToString(" → ")
+
             RRLogStore.record(
                 "BENCH",
-                "开始 A/B v2.5: node=${node.tag}, original=$originalEngine, " +
+                "开始 A/B v2.6: node=${node.tag}, original=$originalEngine, order=$orderLabel, " +
                     "transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}, target=${target.label}"
             )
 
-            val system = sampleEngine(
-                engine = PreferencesManager.TUN_ENGINE_SYSTEM,
-                target = target,
-                includeSelfForHevBenchmark = false
-            )
-            val hev = sampleEngine(
-                engine = PreferencesManager.TUN_ENGINE_HEV,
-                target = target,
-                includeSelfForHevBenchmark = true
-            )
+            val samples = mutableMapOf<String, EngineBenchmarkSample>()
+            engineOrder.forEach { engine ->
+                samples[engine] = sampleEngine(
+                    engine = engine,
+                    target = target,
+                    includeSelfForHevBenchmark = engine == PreferencesManager.TUN_ENGINE_HEV
+                )
+            }
+
+            val system = samples.getValue(PreferencesManager.TUN_ENGINE_SYSTEM)
+            val hev = samples.getValue(PreferencesManager.TUN_ENGINE_HEV)
             EngineBenchmarkReport(
-                benchmarkVersion = 7,
+                benchmarkVersion = 8,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
                 probeTarget = EngineBenchmarkProbe.HTTPS_HOST,
                 helperPackage = "${EngineBenchmarkProbe.PROBE_TRANSPORT} · ${target.label}",
-                udpTarget = "disabled-v2.5",
+                udpTarget = "disabled-v2.6",
+                executionOrder = orderLabel,
                 system = system,
                 hev = hev
             ).also {
                 BenchmarkHistoryStore.save(appContext, it)
                 RRLogStore.record(
                     "BENCH",
-                    "A/B v2.5 完成: target=${target.addressText} " +
+                    "A/B v2.6 完成: order=$orderLabel target=${target.addressText} " +
                         "System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
                         "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
                 )
@@ -76,7 +89,7 @@ class EngineBenchmarkRunner(
                     .onFailure {
                         RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}")
                     }
-                onProgress("A/B v2.5 已结束")
+                onProgress("A/B v2.6 已结束")
             }
         }
     }
@@ -88,15 +101,16 @@ class EngineBenchmarkRunner(
     ): EngineBenchmarkSample {
         onProgress(
             if (includeSelfForHevBenchmark) {
-                "$engine · 正在重建 A/B v2.5 临时测试路由"
+                "$engine · 正在重建 A/B v2.6 临时测试路由"
             } else {
                 "$engine · 正在按正常模式重建引擎"
             }
         )
         val restartMillis = restartInto(engine, includeSelfForHevBenchmark)
         delay(900L)
+        val baselinePssKb = currentPssKb()
 
-        onProgress("$engine · 64 KiB UID→TUN 路径预检")
+        onProgress("$engine · 64 KiB UID→TUN 路径预检并等待计数稳定")
         val preflight = EngineBenchmarkProbe.httpsRound(
             context = appContext,
             engine = engine,
@@ -108,7 +122,7 @@ class EngineBenchmarkRunner(
             "BENCH",
             "$engine PREFLIGHT success=${preflight.success} protocol=${preflight.protocol.orEmpty()} " +
                 "bytes=${preflight.bytesReceived} proxyCount=${preflight.proxyAccountedDownloadBytes} " +
-                "nativeRx=${preflight.nativeAccountedDownloadBytes} " +
+                "nativeRx=${preflight.nativeAccountedDownloadBytes} settle=${preflight.accountingSettleMillis}ms " +
                 "nativeVerified=${preflight.nativePathVerified} verified=${preflight.proxyPathVerified}"
         )
         check(preflight.success) {
@@ -131,7 +145,9 @@ class EngineBenchmarkRunner(
         val httpsRounds = buildList {
             repeat(EngineBenchmarkProbe.HTTPS_ATTEMPTS) { index ->
                 val attempt = index + 1
-                onProgress("$engine · 固定 IPv4 HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB")
+                onProgress(
+                    "$engine · 固定 IPv4 HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB · 等待计数稳定"
+                )
                 val result = EngineBenchmarkProbe.httpsRound(
                     context = appContext,
                     engine = engine,
@@ -144,8 +160,8 @@ class EngineBenchmarkRunner(
                     "$engine HTTPS#$attempt success=${result.success} protocol=${result.protocol.orEmpty()} " +
                         "tcp=${result.tcpConnectMillis ?: -1} tls=${result.tlsMillis ?: -1} " +
                         "ttfb=${result.firstByteMillis ?: -1} rate=${result.downloadBps ?: -1} " +
-                        "proxy=${result.proxyAccountedDownloadBytes} " +
-                        "nativeRx=${result.nativeAccountedDownloadBytes} verified=${result.proxyPathVerified}"
+                        "proxy=${result.proxyAccountedDownloadBytes} nativeRx=${result.nativeAccountedDownloadBytes} " +
+                        "settle=${result.accountingSettleMillis}ms verified=${result.proxyPathVerified}"
                 )
                 if (result.success && !result.proxyPathVerified) {
                     error(
@@ -153,7 +169,7 @@ class EngineBenchmarkRunner(
                             "已停止测试，避免把旁路流量算作引擎成绩"
                     )
                 }
-                delay(300L)
+                delay(250L)
             }
         }
 
@@ -163,6 +179,7 @@ class EngineBenchmarkRunner(
         }
 
         val cpuDelta = (Process.getElapsedCpuTime() - cpuStart).coerceAtLeast(0L)
+        val postPssKb = currentPssKb()
         val sample = EngineBenchmarkSample(
             engine = engine,
             restartMillis = restartMillis,
@@ -170,23 +187,27 @@ class EngineBenchmarkRunner(
             httpsRounds = httpsRounds,
             udpRounds = emptyList(),
             processCpuMillis = cpuDelta,
-            processPssKb = Debug.getPss()
-                .coerceAtLeast(0L)
-                .coerceAtMost(Int.MAX_VALUE.toLong())
-                .toInt(),
+            baselinePssKb = baselinePssKb,
+            processPssKb = postPssKb,
             downloadBytesPerRound = EngineBenchmarkProbe.DOWNLOAD_BYTES
         )
 
         RRLogStore.record(
             "BENCH",
-            "$engine v2.5 sample: restart=${sample.restartMillis}ms " +
+            "$engine v2.6 sample: restart=${sample.restartMillis}ms " +
                 "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
                 "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
                 "verified=${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount} " +
-                "nativeVerified=${sample.nativePathVerifiedCount}"
+                "nativeVerified=${sample.nativePathVerifiedCount} " +
+                "pss=${sample.baselinePssKb}->${sample.processPssKb}KB(delta=${sample.pssGrowthKb}KB)"
         )
         return sample
     }
+
+    private fun currentPssKb(): Int = Debug.getPss()
+        .coerceAtLeast(0L)
+        .coerceAtMost(Int.MAX_VALUE.toLong())
+        .toInt()
 
     private suspend fun restartInto(
         engine: String,
@@ -223,8 +244,8 @@ class EngineBenchmarkRunner(
     }
 
     private suspend fun restoreEngine(originalEngine: String) {
-        // v2.5 HEV sample temporarily changes the per-UID VPN policy, so always perform one normal
-        // restart after the experiment—even when the original engine was already HEV.
+        // HEV benchmark mode temporarily changes the per-UID policy. Always rebuild once with the
+        // normal policy after the experiment, even when the user's original engine was HEV.
         preferences.setTunEngine(originalEngine)
         RRVpnService.clearLastError()
 

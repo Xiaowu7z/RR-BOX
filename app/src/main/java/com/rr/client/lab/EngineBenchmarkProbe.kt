@@ -29,25 +29,28 @@ import kotlin.math.max
 import kotlin.math.roundToLong
 
 /**
- * Active probes used only by Network Lab A/B v2.5.
+ * Active probes used only by Network Lab A/B v2.6.
  *
- * The target IPv4 is resolved once on a physical network before switching engines. During the HEV
- * sample RRBOX's UID is temporarily included in the HEV VPN, so this ordinary OkHttp socket follows
- * Android's normal per-UID VPN routing into HEV. We deliberately do NOT bindSocket() and do NOT
- * alter 127/8. HEV's local SOCKS hop stays loopback, while sing-box remote sockets are protected by
- * BoxServiceWrapper.autoDetectInterfaceControl(fd) -> VpnService.protect(fd).
+ * The v2.5 routing topology is intentionally unchanged: the target IPv4 is resolved once on a
+ * physical network, System uses its normal UID routing, and the HEV sample temporarily includes
+ * RRBOX's UID while sing-box's remote sockets stay protected with VpnService.protect(fd).
+ *
+ * v2.6 only tightens measurement quality. sessionTraffic is asynchronous, so accounting now waits
+ * until the counters have been path-valid and stable for a full window before the next round starts.
  */
 internal object EngineBenchmarkProbe {
     const val HTTPS_HOST = "speed.cloudflare.com"
     const val HTTPS_ATTEMPTS = 3
     const val PREFLIGHT_BYTES = 64L * 1024L
     const val DOWNLOAD_BYTES = 2L * 1024L * 1024L
-    const val PROBE_TRANSPORT = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap"
+    const val PROBE_TRANSPORT = "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + settled accounting"
 
     private const val CONNECT_TIMEOUT_SECONDS = 8L
     private const val READ_TIMEOUT_SECONDS = 15L
     private const val CALL_TIMEOUT_SECONDS = 25L
-    private const val ACCOUNTING_WAIT_MILLIS = 3_500L
+    private const val ACCOUNTING_WAIT_MILLIS = 6_000L
+    private const val ACCOUNTING_POLL_MILLIS = 200L
+    private const val ACCOUNTING_STABLE_MILLIS = 1_400L
 
     data class ProbeTarget(
         val address: InetAddress,
@@ -128,7 +131,7 @@ internal object EngineBenchmarkProbe {
         val pinnedDns = object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {
                 if (!hostname.equals(HTTPS_HOST, ignoreCase = true)) {
-                    throw UnknownHostException("v2.5 不允许测速重定向到其他主机: $hostname")
+                    throw UnknownHostException("v2.6 不允许测速重定向到其他主机: $hostname")
                 }
                 return listOf(target.address)
             }
@@ -151,7 +154,7 @@ internal object EngineBenchmarkProbe {
         val nonce = "${SystemClock.elapsedRealtimeNanos()}-$engine-$attempt-$downloadBytes"
         val request = Request.Builder()
             .url("https://$HTTPS_HOST/__down?bytes=$downloadBytes&rrbox=$nonce")
-            .header("User-Agent", "RRBOX-Network-Lab/2.5")
+            .header("User-Agent", "RRBOX-Network-Lab/2.6")
             .header("Accept-Encoding", "identity")
             .header("Cache-Control", "no-cache")
             .header("Connection", "close")
@@ -215,6 +218,7 @@ internal object EngineBenchmarkProbe {
                 nativeAccountedDownloadBytes = accounting.nativeRxBytes,
                 nativePathVerified = accounting.nativeVerified,
                 proxyPathVerified = accounting.pathVerified,
+                accountingSettleMillis = accounting.waitMillis,
                 httpCode = httpCode,
                 protocol = protocol
             )
@@ -258,21 +262,38 @@ internal object EngineBenchmarkProbe {
         requireHevNative: Boolean
     ): PathAccounting {
         val threshold = max(16L * 1024L, expectedBytes / 2L)
-        val deadline = SystemClock.elapsedRealtime() + ACCOUNTING_WAIT_MILLIS
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + ACCOUNTING_WAIT_MILLIS
         var proxyDelta = 0L
         var nativeDelta = 0L
+        var lastProxy = Long.MIN_VALUE
+        var lastNative = Long.MIN_VALUE
+        var stableSince = startedAt
+        var pathWasValid = false
 
-        while (SystemClock.elapsedRealtime() < deadline) {
+        while (true) {
+            val now = SystemClock.elapsedRealtime()
             proxyDelta = (
                 RRVpnService.sessionTraffic.value.proxyDownloadTotal - proxyStart
                 ).coerceAtLeast(0L)
             if (requireHevNative && nativeStartRx != null) {
                 nativeDelta = ((nativeRxBytes() ?: nativeStartRx) - nativeStartRx).coerceAtLeast(0L)
             }
+
+            val changed = proxyDelta != lastProxy || nativeDelta != lastNative
+            if (changed) {
+                lastProxy = proxyDelta
+                lastNative = nativeDelta
+                stableSince = now
+            }
+
             val proxyOk = proxyDelta >= threshold
             val nativeOk = !requireHevNative || nativeDelta >= threshold
-            if (proxyOk && nativeOk) break
-            delay(200L)
+            if (proxyOk && nativeOk) pathWasValid = true
+
+            if (pathWasValid && now - stableSince >= ACCOUNTING_STABLE_MILLIS) break
+            if (now >= deadline) break
+            delay(ACCOUNTING_POLL_MILLIS)
         }
 
         val proxyOk = proxyDelta >= threshold
@@ -281,7 +302,8 @@ internal object EngineBenchmarkProbe {
             proxyBytes = proxyDelta,
             nativeRxBytes = nativeDelta,
             nativeVerified = nativeOk,
-            pathVerified = proxyOk && nativeOk
+            pathVerified = proxyOk && nativeOk,
+            waitMillis = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
         )
     }
 
@@ -301,7 +323,8 @@ internal object EngineBenchmarkProbe {
         val proxyBytes: Long,
         val nativeRxBytes: Long,
         val nativeVerified: Boolean,
-        val pathVerified: Boolean
+        val pathVerified: Boolean,
+        val waitMillis: Long
     )
 
     private class ProbeEventListener : EventListener() {
