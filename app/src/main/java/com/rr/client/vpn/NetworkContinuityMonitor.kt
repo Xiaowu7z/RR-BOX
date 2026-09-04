@@ -9,12 +9,11 @@ import android.net.NetworkRequest
 import android.util.Log
 
 /**
- * Event-driven physical-network observer used by RRBOX while the VPN service is alive.
+ * Event-driven physical-network observer used by RRBOX while the app process is alive.
  *
  * It does not send heartbeat packets. Android connectivity callbacks are enough to tell us when
- * Wi-Fi/cellular/interface/IP state changes. The service performs one cheap data-plane health check
- * after a preferred-path change and only rebuilds the VPN when the local core/native data plane has
- * actually stopped.
+ * Wi-Fi/cellular/interface/IP state changes. Higher layers can perform a cheap local VPN-state
+ * check after a preferred-path change without generating background probe traffic.
  */
 class NetworkContinuityMonitor(
     context: Context,
@@ -84,7 +83,19 @@ class NetworkContinuityMonitor(
         runCatching {
             manager.registerNetworkCallback(request, callback)
             registered = true
-            manager.allNetworks.forEach(::refresh)
+
+            // Seed the complete current snapshot first, then publish only the final preferred path.
+            // Publishing one network at a time here could falsely count app startup as a handoff when
+            // Android keeps both cellular and Wi-Fi Network objects alive.
+            synchronized(lock) {
+                manager.allNetworks.forEach { network ->
+                    val caps = manager.getNetworkCapabilities(network)
+                    if (caps != null && isPhysicalInternet(caps)) {
+                        candidates[network] = Candidate(network, caps, manager.getLinkProperties(network))
+                    }
+                }
+            }
+            publishPreferredIfChanged()
         }.onFailure { Log.w(TAG, "Unable to register physical network monitor", it) }
     }
 
