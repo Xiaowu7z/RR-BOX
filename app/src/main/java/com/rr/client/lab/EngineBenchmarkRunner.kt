@@ -13,16 +13,17 @@ import com.rr.client.core.NodeLatencyTester
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.vpn.RRVpnService
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.max
 
 class EngineBenchmarkRunner(
     context: Context,
     private val preferences: PreferencesManager,
     private val node: ProxyNode,
-    private val observationSeconds: Int = 5
+    private val onProgress: (String) -> Unit = {}
 ) {
     private val appContext = context.applicationContext
 
@@ -31,76 +32,102 @@ class EngineBenchmarkRunner(
             "请先让 RRBOX 正常连接，再开始 System / HEV A/B"
         }
         val originalEngine = preferences.tunEngine.first()
-        RRLogStore.record("BENCH", "开始 A/B: node=${node.tag}, original=$originalEngine")
+        RRLogStore.record("BENCH", "开始 A/B v2: node=${node.tag}, original=$originalEngine")
 
         return try {
             val system = sampleEngine(PreferencesManager.TUN_ENGINE_SYSTEM)
             val hev = sampleEngine(PreferencesManager.TUN_ENGINE_HEV)
             EngineBenchmarkReport(
+                benchmarkVersion = 2,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
+                probeTarget = EngineBenchmarkProbe.HTTPS_HOST,
+                udpTarget = "${EngineBenchmarkProbe.UDP_HOST}:${EngineBenchmarkProbe.UDP_PORT}",
                 system = system,
                 hev = hev
             ).also {
                 BenchmarkHistoryStore.save(appContext, it)
-                RRLogStore.record("BENCH", "A/B 完成: System=${system.restartMillis}ms HEV=${hev.restartMillis}ms")
+                RRLogStore.record(
+                    "BENCH",
+                    "A/B v2 完成: System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
+                        "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
+                )
             }
         } finally {
-            restoreEngine(originalEngine)
+            withContext(NonCancellable) {
+                onProgress("正在恢复原始引擎")
+                runCatching { restoreEngine(originalEngine) }
+                    .onFailure { RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}") }
+                onProgress("A/B v2 已结束")
+            }
         }
     }
 
     private suspend fun sampleEngine(engine: String): EngineBenchmarkSample {
+        onProgress("$engine · 正在重建引擎")
         val restartMillis = restartInto(engine)
-        delay(500L)
+        delay(800L)
 
-        val ping = when (val state = NodeLatencyTester.ping(node.server)) {
+        onProgress("$engine · 原始 ICMP 参考")
+        val rawIcmp = when (val state = NodeLatencyTester.ping(node.server)) {
             is NodeLatencyState.Success -> state.millis
             else -> null
         }
 
-        val startTraffic = RRVpnService.sessionTraffic.value
         val cpuStart = Process.getElapsedCpuTime()
-        var peakDown = 0L
-        var peakUp = 0L
-        var sumDown = 0L
-        var sumUp = 0L
-        var samples = 0
-
-        repeat(observationSeconds.coerceIn(3, 20) * 2) {
-            val speed = RRVpnService.currentSpeed.value
-            peakDown = max(peakDown, speed.downloadBytesPerSec)
-            peakUp = max(peakUp, speed.uploadBytesPerSec)
-            sumDown += speed.downloadBytesPerSec.coerceAtLeast(0L)
-            sumUp += speed.uploadBytesPerSec.coerceAtLeast(0L)
-            samples += 1
-            delay(500L)
+        val httpsRounds = buildList {
+            repeat(EngineBenchmarkProbe.HTTPS_ATTEMPTS) { index ->
+                val attempt = index + 1
+                onProgress("$engine · HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB")
+                val result = EngineBenchmarkProbe.httpsRound(attempt)
+                add(result)
+                RRLogStore.record(
+                    "BENCH",
+                    "$engine HTTPS#$attempt success=${result.success} " +
+                        "ttfb=${result.firstByteMillis ?: -1}ms " +
+                        "rate=${result.downloadBps ?: -1} verified=${result.proxyPathVerified}"
+                )
+                delay(300L)
+            }
         }
 
-        val endTraffic = RRVpnService.sessionTraffic.value
+        val udpRounds = buildList {
+            repeat(EngineBenchmarkProbe.UDP_ATTEMPTS) { index ->
+                val attempt = index + 1
+                onProgress("$engine · UDP STUN $attempt/${EngineBenchmarkProbe.UDP_ATTEMPTS}")
+                val result = EngineBenchmarkProbe.udpRound(attempt)
+                add(result)
+                RRLogStore.record(
+                    "BENCH",
+                    "$engine UDP#$attempt success=${result.success} rtt=${result.rttMillis ?: -1}ms"
+                )
+                delay(200L)
+            }
+        }
+
         val cpuDelta = (Process.getElapsedCpuTime() - cpuStart).coerceAtLeast(0L)
         val sample = EngineBenchmarkSample(
             engine = engine,
             restartMillis = restartMillis,
-            pingMillis = ping,
-            observedAverageDownloadBps = if (samples > 0) sumDown / samples else 0L,
-            observedAverageUploadBps = if (samples > 0) sumUp / samples else 0L,
-            observedPeakDownloadBps = peakDown,
-            observedPeakUploadBps = peakUp,
-            trafficDownloadDelta = (endTraffic.proxyDownloadTotal - startTraffic.proxyDownloadTotal).coerceAtLeast(0L),
-            trafficUploadDelta = (endTraffic.proxyUploadTotal - startTraffic.proxyUploadTotal).coerceAtLeast(0L),
+            rawIcmpMillis = rawIcmp,
+            httpsRounds = httpsRounds,
+            udpRounds = udpRounds,
             processCpuMillis = cpuDelta,
             processPssKb = Debug.getPss()
                 .coerceAtLeast(0L)
                 .coerceAtMost(Int.MAX_VALUE.toLong())
                 .toInt(),
-            observationSeconds = observationSeconds.coerceIn(3, 20)
+            downloadBytesPerRound = EngineBenchmarkProbe.DOWNLOAD_BYTES
         )
+
         RRLogStore.record(
             "BENCH",
-            "$engine sample: restart=${sample.restartMillis}ms ping=${sample.pingMillis ?: -1}ms " +
-                "peakDown=${sample.observedPeakDownloadBps} peakUp=${sample.observedPeakUploadBps}"
+            "$engine v2 sample: restart=${sample.restartMillis}ms " +
+                "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
+                "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
+                "udp=${sample.udpSuccessCount}/${sample.udpAttemptCount} " +
+                "verified=${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}"
         )
         return sample
     }
@@ -134,17 +161,15 @@ class EngineBenchmarkRunner(
     private suspend fun restoreEngine(originalEngine: String) {
         val currentPreference = runCatching { preferences.tunEngine.first() }.getOrDefault(originalEngine)
         if (currentPreference == originalEngine) return
-        preferences.setTunEngine(originalEngine)
-        if (!RRVpnService.isRunning.value || RRVpnService.isStarting.value) return
-        runCatching {
-            ContextCompat.startForegroundService(
-                appContext,
-                Intent(appContext, RRVpnService::class.java).apply {
-                    action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
-                }
-            )
+
+        if (!RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
+            preferences.setTunEngine(originalEngine)
+            RRLogStore.record("BENCH", "VPN 非稳定运行态，仅恢复引擎偏好: $originalEngine")
+            return
         }
-        RRLogStore.record("BENCH", "已恢复原始引擎偏好: $originalEngine")
+
+        val restoreMillis = restartInto(originalEngine)
+        RRLogStore.record("BENCH", "已恢复原始引擎: $originalEngine (${restoreMillis}ms)")
     }
 
     private fun maskHost(value: String): String {

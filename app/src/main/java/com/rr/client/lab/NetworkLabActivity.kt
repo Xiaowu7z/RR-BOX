@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.rr.client.RRApplication
 import com.rr.client.core.ConfigBuilder
@@ -58,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToLong
 
 class NetworkLabActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +69,16 @@ class NetworkLabActivity : ComponentActivity() {
                 NetworkLabRoot(onBack = ::finish)
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        RRLogCapture.start()
+    }
+
+    override fun onStop() {
+        RRLogCapture.stop()
+        super.onStop()
     }
 }
 
@@ -92,6 +104,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
     var diagnosticBusy by remember { mutableStateOf(false) }
     var benchmark by remember { mutableStateOf<EngineBenchmarkReport?>(null) }
     var benchmarkBusy by remember { mutableStateOf(false) }
+    var benchmarkProgress by remember { mutableStateOf<String?>(null) }
     var benchmarkError by remember { mutableStateOf<String?>(null) }
     var benchmarkHistory by remember { mutableStateOf(BenchmarkHistoryStore.load(context)) }
     var showRawDialog by remember { mutableStateOf(false) }
@@ -183,6 +196,8 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                     icon = { Icon(Icons.Default.Description, contentDescription = null) }
                 )
             }
+            HorizontalDivider(color = CardBorder)
+            Spacer(Modifier.height(6.dp).background(DarkBackground))
 
             if (selectedTab == 0) {
                 LabDashboard(
@@ -197,6 +212,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                     selfCheck = selfCheck,
                     benchmark = benchmark,
                     benchmarkBusy = benchmarkBusy,
+                    benchmarkProgress = benchmarkProgress,
                     benchmarkError = benchmarkError,
                     benchmarkHistory = benchmarkHistory,
                     rawValidation = rawValidation,
@@ -205,10 +221,17 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                         val node = selectedNode
                         if (node != null && !benchmarkBusy) {
                             benchmarkBusy = true
+                            benchmark = null
                             benchmarkError = null
+                            benchmarkProgress = "准备 A/B v2"
                             scope.launch {
                                 runCatching {
-                                    EngineBenchmarkRunner(context, preferences, node).run()
+                                    EngineBenchmarkRunner(
+                                        context = context,
+                                        preferences = preferences,
+                                        node = node,
+                                        onProgress = { benchmarkProgress = it }
+                                    ).run()
                                 }.onSuccess { result ->
                                     benchmark = result
                                     benchmarkHistory = BenchmarkHistoryStore.load(context)
@@ -220,9 +243,10 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                                     )
                                 }.onFailure { error ->
                                     benchmarkError = error.message ?: error.javaClass.simpleName
-                                    RRLogStore.record("BENCH", "A/B 失败: ${benchmarkError.orEmpty()}")
+                                    RRLogStore.record("BENCH", "A/B v2 失败: ${benchmarkError.orEmpty()}")
                                 }
                                 benchmarkBusy = false
+                                benchmarkProgress = null
                             }
                         }
                     },
@@ -275,6 +299,7 @@ private fun LabDashboard(
     selfCheck: SelfCheckReport?,
     benchmark: EngineBenchmarkReport?,
     benchmarkBusy: Boolean,
+    benchmarkProgress: String?,
     benchmarkError: String?,
     benchmarkHistory: List<EngineBenchmarkReport>,
     rawValidation: String?,
@@ -287,11 +312,13 @@ private fun LabDashboard(
     onClearBenchmarkHistory: () -> Unit,
     onOpenRawValidator: () -> Unit
 ) {
+    val historyStats = remember(benchmarkHistory) { summarizeBenchmarkHistory(benchmarkHistory) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         LabCard(title = "运行状态", icon = { Icon(Icons.Default.Memory, null, tint = CyanPrimary) }) {
@@ -336,9 +363,9 @@ private fun LabDashboard(
             }
         }
 
-        LabCard(title = "System vs HEV A/B", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
+        LabCard(title = "System vs HEV A/B v2", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
             Text(
-                "只调用 RRBOX 已验证的引擎切换入口，不修改 System/HEV 数据面。当前版本测量重建耗时、ICMP、CPU/PSS 和 5 秒运行态观察吞吐；不会主动制造大流量。测试结束会恢复原始引擎偏好。",
+                "两套引擎各做 3 轮固定 2 MiB HTTPS 下载（总计约 12 MiB），记录 DNS/TCP/TLS/首字节/下载速率，并用 VPN 会话流量反查测试字节是否进入代理数据面；随后各做 3 次 UDP STUN。原始 ICMP 仅作参考，不参与引擎结论。测试只调用现有引擎切换入口，结束或中途退出都会恢复原始引擎。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
@@ -348,12 +375,17 @@ private fun LabDashboard(
                 enabled = isRunning && !isStarting && selectedNode != null && !benchmarkBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {
-                Text(if (benchmarkBusy) "A/B 测试中…" else "开始一键 A/B", color = DarkBackground, fontWeight = FontWeight.Bold)
+                Text(if (benchmarkBusy) "A/B v2 测试中…" else "开始一键 A/B v2", color = DarkBackground, fontWeight = FontWeight.Bold)
+            }
+            benchmarkProgress?.let {
+                Spacer(Modifier.height(6.dp))
+                Text(it, color = CyanPrimary, style = MaterialTheme.typography.labelMedium)
             }
             if (!isRunning) {
                 Text("请先在主界面连接一个节点再运行 A/B。", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
             }
             benchmarkError?.let { Text("失败：$it", color = MaterialTheme.colorScheme.error) }
+
             benchmark?.let { report ->
                 Spacer(Modifier.height(12.dp))
                 BenchmarkSampleCard(report.system)
@@ -365,15 +397,26 @@ private fun LabDashboard(
                     OutlinedButton(onClick = onShareBenchmark) { Text("导出报告") }
                 }
             }
+
+            historyStats?.takeIf { it.runs >= 2 }?.let { stats ->
+                Spacer(Modifier.height(12.dp))
+                Text("A/B v2 历史统计 · ${stats.runs} 次", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                HistoryStatsCard("SYSTEM", stats.system)
+                Spacer(Modifier.height(6.dp))
+                HistoryStatsCard("HEV", stats.hev)
+            }
+
             if (benchmarkHistory.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text("历史记录 ${benchmarkHistory.size} 条", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 benchmarkHistory.take(3).forEach { item ->
-                    Text(
-                        "${item.nodeTag}: System ${item.system.restartMillis}ms / HEV ${item.hev.restartMillis}ms",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
+                    val summary = if (item.benchmarkVersion >= 2) {
+                        "${item.nodeTag}: System ${item.system.httpsFirstByteMedianMillis ?: -1}ms / HEV ${item.hev.httpsFirstByteMedianMillis ?: -1}ms TTFB"
+                    } else {
+                        "${item.nodeTag}: 旧版 · System ${item.system.restartMillis}ms / HEV ${item.hev.restartMillis}ms"
+                    }
+                    Text(summary, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                 }
                 TextButton(onClick = onClearBenchmarkHistory) { Text("清空 A/B 历史") }
             }
@@ -398,7 +441,7 @@ private fun LabDashboard(
             rawValidation?.let { Text(it, color = TextSecondary, style = MaterialTheme.typography.bodySmall) }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(18.dp))
     }
 }
 
@@ -411,7 +454,7 @@ private fun LogCenter(
 ) {
     Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
         Text("日志中心", style = MaterialTheme.typography.titleLarge, color = TextPrimary, fontWeight = FontWeight.Bold)
-        Text("仅采集 RRBOX 自身进程日志，并自动隐藏 UUID、token、password、private_key 等敏感字段。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+        Text("仅在 Network Lab 页面打开期间采集 RRBOX 自身进程日志，并自动隐藏 UUID、token、password、private_key 等敏感字段。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onCopy, enabled = entries.isNotEmpty()) {
@@ -468,9 +511,22 @@ private fun LabCard(title: String, icon: @Composable () -> Unit, content: @Compo
 
 @Composable
 private fun StatusRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-        Text(value, color = TextPrimary, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Text(
+            label,
+            modifier = Modifier.weight(0.36f),
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            value,
+            modifier = Modifier.weight(0.64f),
+            color = TextPrimary,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End
+        )
     }
 }
 
@@ -495,18 +551,59 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
         Column(Modifier.fillMaxWidth().padding(10.dp)) {
             Text(sample.engine, color = CyanPrimary, fontWeight = FontWeight.Bold)
             StatusRow("重建耗时", "${sample.restartMillis} ms")
-            StatusRow("ICMP", sample.pingMillis?.let { "$it ms" } ?: "超时")
-            StatusRow("观察平均下载", TrafficSampler.formatSpeed(sample.observedAverageDownloadBps))
-            StatusRow("观察平均上传", TrafficSampler.formatSpeed(sample.observedAverageUploadBps))
-            StatusRow("观察峰值下载", TrafficSampler.formatSpeed(sample.observedPeakDownloadBps))
-            StatusRow("观察峰值上传", TrafficSampler.formatSpeed(sample.observedPeakUploadBps))
-            StatusRow("窗口下载", TrafficSampler.formatBytes(sample.trafficDownloadDelta))
-            StatusRow("窗口上传", TrafficSampler.formatBytes(sample.trafficUploadDelta))
+            StatusRow("原始 ICMP 参考", sample.rawIcmpMillis?.let { "$it ms" } ?: "超时")
+            StatusRow("HTTPS 成功", "${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
+            StatusRow("DNS 中位", sample.httpsDnsMedianMillis?.let { "$it ms" } ?: "缓存/未触发")
+            StatusRow("TCP 中位", sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--")
+            StatusRow("TLS 中位", sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--")
+            StatusRow("HTTPS 首字节", sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--")
+            StatusRow("2 MiB 下载中位", sample.httpsDownloadMedianBps?.let(TrafficSampler::formatSpeed) ?: "--")
+            StatusRow("代理计数验证", "${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
+            StatusRow(
+                "UDP STUN",
+                "${sample.udpSuccessCount}/${sample.udpAttemptCount}" +
+                    (sample.udpMedianRttMillis?.let { " · ${it} ms" } ?: "")
+            )
             StatusRow("进程 CPU", "${sample.processCpuMillis} ms")
             StatusRow("PSS", String.format("%.1f MB", sample.processPssKb / 1024.0))
+
+            if (sample.httpsSuccessCount > 0 && sample.proxyPathVerifiedCount < sample.httpsSuccessCount) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "部分 HTTPS 轮次未能从会话计数确认足量代理字节；该轮吞吐可参考，但不要用于正式性能结论。",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
         }
     }
 }
+
+@Composable
+private fun HistoryStatsCard(label: String, stats: EngineHistoryStats) {
+    Surface(shape = RoundedCornerShape(10.dp), color = DarkSurfaceVariant) {
+        Column(Modifier.fillMaxWidth().padding(10.dp)) {
+            Text(label, color = CyanPrimary, fontWeight = FontWeight.Bold)
+            stats.restart?.let { StatusRow("重建", metricMillis(it)) }
+            stats.httpsFirstByte?.let { StatusRow("HTTPS 首字节", metricMillis(it)) }
+            stats.downloadBps?.let { StatusRow("下载", metricSpeed(it)) }
+            stats.pssKb?.let {
+                StatusRow(
+                    "PSS",
+                    "中位 ${String.format("%.1f", it.median / 1024.0)} MB · P95 ${String.format("%.1f", it.p95 / 1024.0)} MB"
+                )
+            }
+            StatusRow("UDP 成功率", "${stats.udpSuccesses}/${stats.udpAttempts}")
+            StatusRow("代理计数验证", "${stats.proxyVerifiedRounds}/${stats.httpsSuccessRounds}")
+        }
+    }
+}
+
+private fun metricMillis(stats: MetricStats): String =
+    "中位 ${stats.median.roundToLong()} ms · P95 ${stats.p95.roundToLong()} · σ ${String.format("%.1f", stats.stdDev)}"
+
+private fun metricSpeed(stats: MetricStats): String =
+    "中位 ${TrafficSampler.formatSpeed(stats.median.roundToLong())} · P95 ${TrafficSampler.formatSpeed(stats.p95.roundToLong())}"
 
 @Composable
 private fun RawOutboundDialog(
