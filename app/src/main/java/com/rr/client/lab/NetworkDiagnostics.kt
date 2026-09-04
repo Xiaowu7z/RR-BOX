@@ -28,17 +28,6 @@ object NetworkDiagnostics {
         val activeCaps = activeNetwork?.let { network -> cm.getNetworkCapabilities(network) }
         val activeLink = activeNetwork?.let { network -> cm.getLinkProperties(network) }
 
-        /*
-         * Do not use allNetworks.firstOrNull(). Android may keep both cellular and Wi-Fi Network
-         * objects alive while a VPN is active, and enumeration order is not a statement about the
-         * physical route currently preferred by the system. That made Network Lab keep showing the
-         * old cellular interface after switching to Wi-Fi until the VPN itself was rebuilt.
-         *
-         * Refresh now takes a fresh snapshot of every non-VPN INTERNET network and ranks the live
-         * candidates. VALIDATED/NOT_SUSPENDED dominates; when both Wi-Fi and cellular remain valid,
-         * Wi-Fi is preferred because Android normally promotes it to the default physical route.
-         * A non-VPN activeNetwork, when available, always wins.
-         */
         val physical = cm?.let { manager -> selectPhysicalNetwork(manager, activeNetwork) }
         val physicalNetwork = physical?.network
         val physicalCaps = physical?.capabilities
@@ -213,22 +202,22 @@ object NetworkDiagnostics {
         isActiveNonVpn: Boolean
     ): Int {
         var score = 0
-        if (isActiveNonVpn) score += 10_000
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 1_000
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) score += 200
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) score += 100
+        if (isActiveNonVpn) score += 100_000
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 20_000
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) score += 4_000
 
         score += when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 80
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 60
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 40
-            else -> 10
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3_000
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 2_000
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1_000
+            else -> 200
         }
 
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) score += 10
-        if (!link?.interfaceName.isNullOrBlank()) score += 4
-        if (!link.addressesV4().isEmpty()) score += 2
-        if (!link?.dnsServers.isNullOrEmpty()) score += 1
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) score += 100
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) score += 50
+        if (!link?.interfaceName.isNullOrBlank()) score += 20
+        if (link.addressesV4().isNotEmpty()) score += 10
+        if (!link?.dnsServers.isNullOrEmpty()) score += 5
         return score
     }
 
