@@ -299,16 +299,15 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
             onValidate = { raw ->
                 rawValidation = "正在校验并导入…"
                 scope.launch {
-                    val result = RawLocalNodeImporter.import(raw)
-                    rawValidation = result.fold(
-                        onSuccess = { summary ->
-                            reloadProfiles()
-                            summary.message()
-                        },
-                        onFailure = { error ->
-                            "导入失败：${error.message ?: error.javaClass.simpleName}"
-                        }
-                    )
+                    val result = RawLocalNodeImporter.importRaw(raw)
+                    if (result.isSuccess) {
+                        val summary = result.getOrThrow()
+                        reloadProfiles()
+                        rawValidation = summary.message()
+                    } else {
+                        val error = result.exceptionOrNull()
+                        rawValidation = "导入失败：${error?.message ?: error?.javaClass?.simpleName ?: "未知错误"}"
+                    }
                 }
             }
         )
