@@ -7,11 +7,15 @@ import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 
 /**
- * Applies user edits to the RRVPS raw sing-box outbound without throwing away
- * protocol-specific fields that RR Client does not model yet.
+ * Applies user edits to the raw sing-box outbound without throwing away protocol-specific fields
+ * that RRBOX does not model yet.
  */
 object NodeOverridePatcher {
     fun apply(original: ProxyNode, edited: ProxyNode): ProxyNode {
+        // Raw advanced mode already reparses the outbound into a normalized ProxyNode. When the raw
+        // payload changed, it is authoritative and must not be overwritten with patches from the
+        // old outbound.
+        if (edited.rawJson.isNotBlank() && edited.rawJson != original.rawJson) return edited
         if (original.rawJson.isBlank()) return edited.copy(rawJson = "")
 
         val outbound = runCatching {

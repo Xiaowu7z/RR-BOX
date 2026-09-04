@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.Build
 import com.rr.client.BuildConfig
 import com.rr.client.RRApplication
+import com.rr.client.core.model.ProtocolType
+import com.rr.client.subscription.ProtocolCapabilityRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -69,6 +71,20 @@ object StartupSelfCheck {
             name = "本地数据库",
             status = if (dbReady) LabCheckStatus.PASS else LabCheckStatus.FAIL,
             detail = if (dbReady) "Room 数据库可读" else "数据库读取失败"
+        )
+
+        val protocolTypes = ProtocolType.values().toList()
+        val capabilityFailures = protocolTypes.filter { type ->
+            runCatching { ProtocolCapabilityRegistry.capability(type) }.isFailure
+        }
+        checks += LabCheck(
+            name = "协议能力矩阵",
+            status = if (capabilityFailures.isEmpty()) LabCheckStatus.PASS else LabCheckStatus.FAIL,
+            detail = if (capabilityFailures.isEmpty()) {
+                "${protocolTypes.size}/${protocolTypes.size} 类型已声明分享链接/Raw JSON 兼容边界"
+            } else {
+                "缺少：${capabilityFailures.joinToString()}"
+            }
         )
 
         val arm64 = Build.SUPPORTED_ABIS.any { it.equals("arm64-v8a", ignoreCase = true) }

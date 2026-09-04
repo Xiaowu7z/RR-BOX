@@ -2,6 +2,7 @@ package com.rr.client
 
 import android.app.Application
 import android.util.Log
+import com.rr.client.lab.NetworkContinuityObserver
 import com.rr.client.lab.RRLogCapture
 import com.rr.client.lab.StartupSelfCheck
 import com.rr.client.storage.AppDatabase
@@ -25,9 +26,10 @@ class RRApplication : Application() {
         database = AppDatabase.getDatabase(this)
         preferencesManager = PreferencesManager(this)
 
-        // 0.10.0 observability layer only. These collectors never participate in packet forwarding.
+        // Observability only. These collectors never participate in packet forwarding.
         RRLogCapture.start()
         StartupSelfCheck.schedule(this)
+        NetworkContinuityObserver.start(this)
     }
 
     private fun initializeLibbox() {

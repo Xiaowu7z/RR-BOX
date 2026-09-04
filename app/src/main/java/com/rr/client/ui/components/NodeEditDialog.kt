@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.dp
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.friendlyLabel
+import com.rr.client.subscription.SubscriptionParser
+import com.rr.client.subscription.model.SubProfile
 
 @Composable
 fun NodeEditDialog(
@@ -53,13 +55,18 @@ fun NodeEditDialog(
     var obfsPassword by remember(node.id) { mutableStateOf(node.obfsPassword) }
     var ssMethod by remember(node.id) { mutableStateOf(node.ssMethod) }
     var tlsEnabled by remember(node.id) { mutableStateOf(node.tlsEnabled) }
+    var rawJson by remember(node.id) { mutableStateOf(node.rawJson) }
+    var rawMode by remember(node.id) { mutableStateOf(false) }
     var validationError by remember(node.id) { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text(if (node.profileId == com.rr.client.subscription.model.SubProfile.LOCAL_PROFILE_ID && node.server.isBlank()) "新建节点" else "编辑节点", fontWeight = FontWeight.Bold)
+                Text(
+                    if (node.profileId == SubProfile.LOCAL_PROFILE_ID && node.server.isBlank()) "新建节点" else "编辑节点",
+                    fontWeight = FontWeight.Bold
+                )
                 Text(node.type.friendlyLabel())
             }
         },
@@ -67,84 +74,112 @@ fun NodeEditDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 560.dp)
+                    .heightIn(max = 600.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                EditField("节点名称", tag) { tag = it }
-                EditField("服务器", server) { server = it }
-                EditField("端口", port) { port = it.filter(Char::isDigit) }
+                if (!rawMode) {
+                    EditField("节点名称", tag) { tag = it }
+                    EditField("服务器", server) { server = it }
+                    EditField("端口", port) { port = it.filter(Char::isDigit) }
 
-                when (node.type) {
-                    ProtocolType.VLESS_REALITY -> {
-                        EditField("UUID", credential) { credential = it }
-                        EditField("Flow", flow) { flow = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("Reality 公钥", realityPublicKey) { realityPublicKey = it }
-                        EditField("Reality Short ID", realityShortId) { realityShortId = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
-                    }
+                    when (node.type) {
+                        ProtocolType.VLESS_REALITY -> {
+                            EditField("UUID", credential) { credential = it }
+                            EditField("Flow", flow) { flow = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("Reality 公钥", realityPublicKey) { realityPublicKey = it }
+                            EditField("Reality Short ID", realityShortId) { realityShortId = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                        }
 
-                    ProtocolType.VLESS_TLS -> {
-                        EditField("UUID", credential) { credential = it }
-                        EditField("Flow", flow) { flow = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("传输层（tcp/ws/grpc）", network) { network = it }
-                        EditField("Path / gRPC Service", path) { path = it }
-                        EditField("Host", host) { host = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
-                        TlsSwitch(tlsEnabled) { tlsEnabled = it }
-                    }
+                        ProtocolType.VLESS_TLS -> {
+                            EditField("UUID", credential) { credential = it }
+                            EditField("Flow", flow) { flow = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("传输层（tcp/ws/grpc）", network) { network = it }
+                            EditField("Path / gRPC Service", path) { path = it }
+                            EditField("Host", host) { host = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                            TlsSwitch(tlsEnabled) { tlsEnabled = it }
+                        }
 
-                    ProtocolType.VMESS_WS_ARGO,
-                    ProtocolType.VMESS_TLS -> {
-                        EditField("UUID", credential) { credential = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("传输层（tcp/ws/grpc）", network) { network = it }
-                        EditField("Path / gRPC Service", path) { path = it }
-                        EditField("Host", host) { host = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
-                        TlsSwitch(tlsEnabled) { tlsEnabled = it }
-                    }
+                        ProtocolType.VMESS_WS_ARGO,
+                        ProtocolType.VMESS_TLS -> {
+                            EditField("UUID", credential) { credential = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("传输层（tcp/ws/grpc）", network) { network = it }
+                            EditField("Path / gRPC Service", path) { path = it }
+                            EditField("Host", host) { host = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                            TlsSwitch(tlsEnabled) { tlsEnabled = it }
+                        }
 
-                    ProtocolType.HYSTERIA2 -> {
-                        EditField("密码", credential) { credential = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
-                        EditField("端口跳跃（逗号分隔）", hoppingPorts) { hoppingPorts = it }
-                        EditField("Obfs", obfs) { obfs = it }
-                        EditField("Obfs 密码", obfsPassword) { obfsPassword = it }
-                    }
+                        ProtocolType.HYSTERIA2 -> {
+                            EditField("密码", credential) { credential = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                            EditField("端口跳跃（逗号分隔）", hoppingPorts) { hoppingPorts = it }
+                            EditField("Obfs", obfs) { obfs = it }
+                            EditField("Obfs 密码", obfsPassword) { obfsPassword = it }
+                        }
 
-                    ProtocolType.TUIC_V5 -> {
-                        EditField("UUID", credential) { credential = it }
-                        EditField("密码", extraPassword) { extraPassword = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
-                    }
+                        ProtocolType.TUIC_V5 -> {
+                            EditField("UUID", credential) { credential = it }
+                            EditField("密码", extraPassword) { extraPassword = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                        }
 
-                    ProtocolType.SHADOWSOCKS -> {
-                        EditField("加密方式", ssMethod) { ssMethod = it }
-                        EditField("密码", credential) { credential = it }
-                    }
+                        ProtocolType.SHADOWSOCKS -> {
+                            EditField("加密方式", ssMethod) { ssMethod = it }
+                            EditField("密码", credential) { credential = it }
+                        }
 
-                    ProtocolType.TROJAN -> {
-                        EditField("密码", credential) { credential = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("传输层（tcp/ws/grpc）", network) { network = it }
-                        EditField("Path / gRPC Service", path) { path = it }
-                        EditField("Host", host) { host = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
-                    }
+                        ProtocolType.TROJAN -> {
+                            EditField("密码", credential) { credential = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("传输层（tcp/ws/grpc）", network) { network = it }
+                            EditField("Path / gRPC Service", path) { path = it }
+                            EditField("Host", host) { host = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                        }
 
-                    else -> {
-                        EditField("UUID / 密码", credential) { credential = it }
-                        EditField("SNI", sni) { sni = it }
-                        EditField("传输层", network) { network = it }
-                        EditField("Path", path) { path = it }
-                        EditField("Host", host) { host = it }
-                        EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                        else -> {
+                            EditField("UUID / 密码", credential) { credential = it }
+                            EditField("SNI", sni) { sni = it }
+                            EditField("传输层", network) { network = it }
+                            EditField("Path", path) { path = it }
+                            EditField("Host", host) { host = it }
+                            EditField("ALPN（逗号分隔）", alpn) { alpn = it }
+                        }
                     }
+                } else {
+                    Text(
+                        "Raw 高级模式会以原生 sing-box outbound 为准。适合 WireGuard、Tor、新协议字段或 UI 尚未建模的参数。保存前会先解析，且只接受 1 个 outbound。"
+                    )
+                    OutlinedTextField(
+                        value = rawJson,
+                        onValueChange = { rawJson = it },
+                        label = { Text("sing-box outbound JSON") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 10,
+                        maxLines = 18
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        rawMode = !rawMode
+                        validationError = null
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (rawMode) "返回表单编辑" else "Raw outbound 高级模式")
+                }
+
+                if (!rawMode && node.rawJson.isNotBlank()) {
+                    Text("该节点保留原始 outbound；表单修改会尽量补丁式写回，不丢未知字段。")
                 }
 
                 validationError?.let { Text(it) }
@@ -153,6 +188,31 @@ fun NodeEditDialog(
         },
         confirmButton = {
             Button(onClick = {
+                if (rawMode) {
+                    val profileId = node.profileId.ifBlank { SubProfile.LOCAL_PROFILE_ID }
+                    val profileName = node.profileName.ifBlank { SubProfile.LOCAL_PROFILE_NAME }
+                    val parsed = if (rawJson.isBlank()) {
+                        emptyList()
+                    } else {
+                        SubscriptionParser.parseContent(rawJson, profileId, profileName)
+                    }
+                    validationError = when {
+                        rawJson.isBlank() -> "请输入 sing-box outbound JSON"
+                        parsed.isEmpty() -> "Raw JSON 未识别到可运行 outbound"
+                        parsed.size != 1 -> "节点编辑器一次只接受 1 个 outbound；完整配置请从节点导入入口添加"
+                        else -> null
+                    }
+                    if (validationError == null) {
+                        val normalized = parsed.single().copy(
+                            id = node.id,
+                            profileId = profileId,
+                            profileName = profileName
+                        )
+                        onSave(normalized)
+                    }
+                    return@Button
+                }
+
                 val parsedPort = port.toIntOrNull()
                 validationError = when {
                     tag.isBlank() -> "节点名称不能为空"
