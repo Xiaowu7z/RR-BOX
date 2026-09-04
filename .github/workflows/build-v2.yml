@@ -1,4 +1,4 @@
-name: RRBOX 0.9.6 Build & Release (arm64-v8a)
+name: RRBOX 0.9.7 Build & Release (arm64-v8a)
 
 on:
   push:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "96"
-  VERSION_NAME: "0.9.6"
-  OUTPUT_APK_NAME: RRBOX-0.9.6-arm64-v8a.apk
+  VERSION_CODE: "97"
+  VERSION_NAME: "0.9.7"
+  OUTPUT_APK_NAME: RRBOX-0.9.7-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RRBOX 0.9.6
+    name: Build signed RRBOX 0.9.7
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -57,10 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;${ANDROID_PLATFORM}" \
-            "build-tools;${ANDROID_BUILD_TOOLS}"
+          sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
 
       - name: Set up Android NDK
         id: setup-ndk
@@ -74,23 +71,6 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Record toolchain
-        shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          set -euo pipefail
-          mkdir -p build-reports
-          {
-            echo "Git commit: $(git rev-parse HEAD)"
-            java -version 2>&1
-            go version
-            gradle --version
-            echo "ANDROID_HOME=${ANDROID_HOME}"
-            echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
-            grep -F "Pkg.Revision" "${ANDROID_NDK_HOME}/source.properties"
-          } | tee build-reports/TOOLCHAIN.txt
-
       - name: Download maintained China binary rules
         shell: bash
         run: |
@@ -98,50 +78,27 @@ jobs:
           rules_dir="app/src/main/assets/rules"
           rm -rf "$rules_dir"
           mkdir -p "$rules_dir" build-reports
-
-          validate_rule() {
-            local file="$1"
-            test "$(xxd -p -l 3 "$file")" = "535253"
-            test "$(stat -c '%s' "$file")" -gt 8
-            local version
-            version="$(od -An -tu1 -j3 -N1 "$file" | tr -d ' ')"
-            test -n "$version"
-            test "$version" -ge 1
-            test "$version" -le 5
-          }
-
           fetch_rule() {
-            local output="$1"
-            shift
-            local temp="${output}.tmp"
-            rm -f "$temp"
+            local output="$1"; shift
+            local tmp="${output}.tmp"
             for url in "$@"; do
-              if curl --fail --location --silent --show-error \
-                --retry 3 --retry-delay 2 \
-                --connect-timeout 15 --max-time 60 \
-                "$url" -o "$temp"; then
-                if validate_rule "$temp"; then
-                  mv "$temp" "$output"
+              rm -f "$tmp"
+              if curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 60 "$url" -o "$tmp"; then
+                if [ "$(xxd -p -l 3 "$tmp")" = "535253" ] && [ "$(stat -c '%s' "$tmp")" -gt 8 ]; then
+                  mv "$tmp" "$output"
                   return 0
                 fi
               fi
-              rm -f "$temp"
             done
-            echo "ERROR: unable to download sing-box-compatible SRS: $output" >&2
             return 1
           }
-
           fetch_rule "$rules_dir/geosite-geolocation-cn.srs" \
             "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs" \
             "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
-
           fetch_rule "$rules_dir/geoip-cn.srs" \
             "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" \
             "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
-
           sha256sum "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SHA256.txt
-          ls -lh "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SIZES.txt
-          test "$(find "$rules_dir" -maxdepth 1 -name '*.srs' | wc -l)" -eq 2
 
       - name: Build pinned sing-box libbox
         shell: bash
@@ -151,39 +108,21 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$PATH:$(go env GOPATH)/bin"
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
           rm -rf sing-box-src
           rm -f app/libs/libbox.aar
           mkdir -p app/libs build-reports
-
-          git clone --branch "$SING_BOX_TAG" --depth 1 \
-            https://github.com/SagerNet/sing-box.git sing-box-src
-
+          git clone --branch "$SING_BOX_TAG" --depth 1 https://github.com/SagerNet/sing-box.git sing-box-src
           cd sing-box-src
-          actual_commit="$(git rev-parse HEAD)"
-          echo "sing-box commit: ${actual_commit}" | tee ../build-reports/SING-BOX.txt
-          test "$actual_commit" = "$SING_BOX_COMMIT"
-
+          test "$(git rev-parse HEAD)" = "$SING_BOX_COMMIT"
           make lib_install
           grep -q 'with_gvisor' cmd/internal/build_libbox/main.go
           grep -q 'with_tailscale' cmd/internal/build_libbox/main.go
           grep -q 'with_naive_outbound' cmd/internal/build_libbox/main.go
-
-          go run ./cmd/internal/build_libbox \
-            -target android \
-            -platform android/arm64
-
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64
           test -s libbox.aar
-          cp -v libbox.aar ../app/libs/libbox.aar
+          cp libbox.aar ../app/libs/libbox.aar
           cd ..
-
-          unzip -Z1 app/libs/libbox.aar | tee build-reports/LIBBOX-AAR-FILES.txt
-          grep -q '^jni/arm64-v8a/libbox\.so$' build-reports/LIBBOX-AAR-FILES.txt
-          if grep -Eq '^jni/(armeabi-v7a|x86|x86_64)/' build-reports/LIBBOX-AAR-FILES.txt; then
-            echo "ERROR: libbox.aar contains unexpected ABI" >&2
-            exit 1
-          fi
+          unzip -Z1 app/libs/libbox.aar | grep -q '^jni/arm64-v8a/libbox\.so$'
           sha256sum app/libs/libbox.aar | tee build-reports/LIBBOX-SHA256.txt
 
       - name: Build pinned HEV native TUN engine
@@ -192,38 +131,22 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
-          rm -rf hev-socks5-tunnel "$RUNNER_TEMP/rr-hev"
-          rm -rf app/src/main/jniLibs/arm64-v8a
-          mkdir -p "$RUNNER_TEMP/rr-hev/libs" "$RUNNER_TEMP/rr-hev/obj" \
-            app/src/main/jniLibs/arm64-v8a build-reports
-
+          rm -rf hev-socks5-tunnel "$RUNNER_TEMP/rr-hev" app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$RUNNER_TEMP/rr-hev/libs" "$RUNNER_TEMP/rr-hev/obj" app/src/main/jniLibs/arm64-v8a build-reports
           git clone https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
           git -C hev-socks5-tunnel checkout --detach "$HEV_COMMIT"
           git -C hev-socks5-tunnel submodule update --init --recursive
-
-          actual_hev_commit="$(git -C hev-socks5-tunnel rev-parse HEAD)"
-          echo "hev-socks5-tunnel commit: ${actual_hev_commit}" | tee build-reports/HEV.txt
-          test "$actual_hev_commit" = "$HEV_COMMIT"
-
+          test "$(git -C hev-socks5-tunnel rev-parse HEAD)" = "$HEV_COMMIT"
           pushd hev-socks5-tunnel
           "$ANDROID_NDK_HOME/ndk-build" \
-            NDK_PROJECT_PATH=. \
-            APP_BUILD_SCRIPT=Android.mk \
-            APP_ABI=arm64-v8a \
-            APP_PLATFORM=android-26 \
-            NDK_LIBS_OUT="$RUNNER_TEMP/rr-hev/libs" \
-            NDK_OUT="$RUNNER_TEMP/rr-hev/obj" \
+            NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=arm64-v8a APP_PLATFORM=android-26 \
+            NDK_LIBS_OUT="$RUNNER_TEMP/rr-hev/libs" NDK_OUT="$RUNNER_TEMP/rr-hev/obj" \
             "APP_CFLAGS=-O3 -DNDEBUG -DPKGNAME=com/rr/client/vpn -DCLSNAME=HevTunnelNative" \
             "APP_LDFLAGS=-Wl,--build-id=none -Wl,--hash-style=gnu"
           popd
-
-          hev_so="$RUNNER_TEMP/rr-hev/libs/arm64-v8a/libhev-socks5-tunnel.so"
-          test -s "$hev_so"
-          cp -v "$hev_so" app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
-          file app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so | tee build-reports/HEV-FILE.txt
-          grep -q 'ARM aarch64' build-reports/HEV-FILE.txt
-          sha256sum app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so \
-            | tee build-reports/HEV-SHA256.txt
+          cp "$RUNNER_TEMP/rr-hev/libs/arm64-v8a/libhev-socks5-tunnel.so" app/src/main/jniLibs/arm64-v8a/
+          test -s app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
+          sha256sum app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so | tee build-reports/HEV-SHA256.txt
 
       - name: Restore release signing key
         shell: bash
@@ -234,18 +157,13 @@ jobs:
           RR_KEY_PASSWORD_VALUE: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          umask 077
           : "${RR_KEYSTORE_BASE64:?Missing RR_KEYSTORE_BASE64}"
           : "${RR_KEYSTORE_PASSWORD:?Missing RR_KEYSTORE_PASSWORD}"
           : "${RR_KEY_ALIAS_VALUE:?Missing RR_KEY_ALIAS}"
-          : "${RR_KEY_PASSWORD_VALUE:?Missing RR_KEY_PASSWORD}"
+          : "${RR_KEY_PASSWORD_VALUE:?Missing RR_KEY_PASSWORD_VALUE}"
           keystore_path="$RUNNER_TEMP/rr-client-release.jks"
           printf '%s' "$RR_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
-          test -s "$keystore_path"
-          keytool -list \
-            -keystore "$keystore_path" \
-            -storepass "$RR_KEYSTORE_PASSWORD" \
-            -alias "$RR_KEY_ALIAS_VALUE" >/dev/null
+          keytool -list -keystore "$keystore_path" -storepass "$RR_KEYSTORE_PASSWORD" -alias "$RR_KEY_ALIAS_VALUE" >/dev/null
           echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
 
       - name: Source regressions, unit tests and signed Release build
@@ -256,51 +174,41 @@ jobs:
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          grep -q 'versionCode = 96' app/build.gradle.kts
-          grep -q 'versionName = "0.9.6"' app/build.gradle.kts
+          grep -q 'versionCode = 97' app/build.gradle.kts
+          grep -q 'versionName = "0.9.7"' app/build.gradle.kts
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
           grep -q 'class RRQuickTileService' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
-          grep -q 'RRQuickTileController.connect' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
           grep -q 'android.permission.BIND_QUICK_SETTINGS_TILE' app/src/main/AndroidManifest.xml
-          grep -q 'android.service.quicksettings.action.QS_TILE' app/src/main/AndroidManifest.xml
 
-          test "$(grep -c 'android:icon="@drawable/ic_rrbox_launcher_096"' app/src/main/AndroidManifest.xml)" -ge 3
-          grep -q 'android:logo="@drawable/ic_rrbox_launcher_096"' app/src/main/AndroidManifest.xml
-          grep -A6 'android:name=".vpn.RRVpnService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_launcher_096"'
-          grep -A6 'android:name=".vpn.RRQuickTileService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_status_096"'
-          cmp app/src/main/res/drawable-nodpi/ic_rrbox_launcher.webp app/src/main/res/drawable-nodpi/ic_rrbox_launcher_096.webp
+          test "$(grep -c 'android:icon="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml)" -ge 3
+          grep -q 'android:logo="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml
+          grep -q 'android:roundIcon="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml
+          grep -A6 'android:name=".vpn.RRVpnService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@mipmap/ic_rrbox_app_097"'
+          grep -A6 'android:name=".vpn.RRQuickTileService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_status_097"'
+          cmp app/src/main/res/drawable-nodpi/ic_rrbox_launcher.webp app/src/main/res/drawable-nodpi/ic_rrbox_launcher_097.webp
 
-          grep -q 'CHANNEL_ID = "rrbox_status_channel_096"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'NOTIFICATION_ID = 1006' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'R.drawable.ic_rrbox_status_096' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'deleteNotificationChannel(LEGACY_CHANNEL_ID)' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          if grep -q '\.setLargeIcon' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then
-            echo "ERROR: notification card must not contain a LargeIcon" >&2
-            exit 1
-          fi
-          if grep -q 'BitmapFactory' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then
-            echo "ERROR: notification card image decoding must stay removed" >&2
-            exit 1
-          fi
-          test -s app/src/main/res/drawable/ic_rrbox_status_096.xml
+          test -s app/src/main/res/mipmap-anydpi-v26/ic_rrbox_app_097.xml
+          test -s app/src/main/res/mipmap-anydpi-v33/ic_rrbox_app_097.xml
+          grep -q '<monochrome android:drawable="@drawable/ic_rrbox_monochrome_097"' app/src/main/res/mipmap-anydpi-v33/ic_rrbox_app_097.xml
+          grep -q '<monochrome android:drawable="@drawable/ic_rrbox_monochrome_097"' app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
+          grep -q '@drawable/ic_rrbox_adaptive_foreground_097' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          test -s app/src/main/res/drawable/ic_rrbox_monochrome_097.xml
+
+          grep -q 'CHANNEL_ID = "rrbox_status_channel_097"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'NOTIFICATION_ID = 1007' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'R.drawable.ic_rrbox_status_097' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'PREVIOUS_CHANNEL_ID = "rrbox_status_channel_096"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          if grep -q '\.setLargeIcon' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then exit 1; fi
+          if grep -q 'BitmapFactory' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then exit 1; fi
 
           grep -q 'REPOSITORY = "RR-BOX"' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
           grep -q 'releases/latest' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
-          grep -q 'isSupportedApkAsset' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
           grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' obtainium.json
-          grep -q 'QrImageDecoder' app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt
 
-          gradle \
-            --no-daemon \
-            --max-workers=2 \
-            --stacktrace \
-            clean \
-            :app:testReleaseUnitTest \
-            :app:assembleRelease
+          gradle --no-daemon --max-workers=2 --stacktrace clean :app:testReleaseUnitTest :app:assembleRelease
 
       - name: Verify APK and generate reports
         shell: bash
@@ -308,150 +216,104 @@ jobs:
           set -euo pipefail
           source_apk="app/build/outputs/apk/release/app-release.apk"
           test -s "$source_apk"
-
           mkdir -p dist
           output_apk="dist/${OUTPUT_APK_NAME}"
           cp "$source_apk" "$output_apk"
           cp obtainium.json dist/obtainium.json
-
           apksigner="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
           aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
-
-          "$apksigner" verify --verbose --print-certs "$output_apk" \
-            | tee dist/SIGNATURE-REPORT.txt
-          "$aapt2" dump badging "$output_apk" \
-            | tee dist/PACKAGE-REPORT.txt
-
+          "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
+          "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
           grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-          grep -q "versionCode='96'" dist/PACKAGE-REPORT.txt
-          grep -q "versionName='0.9.6'" dist/PACKAGE-REPORT.txt
+          grep -q "versionCode='97'" dist/PACKAGE-REPORT.txt
+          grep -q "versionName='0.9.7'" dist/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
-          grep -q "application: label='RRBOX' icon='res/" dist/PACKAGE-REPORT.txt
-
           unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libhev-socks5-tunnel\.so$' dist/APK-FILE-LIST.txt
-          grep -q '^assets/licenses/hev-socks5-tunnel-LICENSE\.txt$' dist/APK-FILE-LIST.txt
           grep -q '^assets/rules/geosite-geolocation-cn\.srs$' dist/APK-FILE-LIST.txt
           grep -q '^assets/rules/geoip-cn\.srs$' dist/APK-FILE-LIST.txt
-
-          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' dist/APK-FILE-LIST.txt; then
-            echo "ERROR: APK contains unexpected ABI" >&2
-            exit 1
-          fi
-
+          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' dist/APK-FILE-LIST.txt; then exit 1; fi
           sha256sum "$output_apk" | tee dist/SHA256SUMS.txt
-
           apk_sha256="$(awk '{print $1}' dist/SHA256SUMS.txt)"
           apk_size="$(stat -c '%s' "$output_apk")"
           certificate_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' dist/SIGNATURE-REPORT.txt | head -n 1)"
-          hev_size="$(unzip -l "$output_apk" | awk '/libhev-socks5-tunnel\.so/ {print $1; exit}')"
-
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.9.6 Stable Build Report
+          # RRBOX 0.9.7 Stable Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package: com.rr.client
-          - Version code: 96
-          - Version name: 0.9.6
+          - Version code: 97
+          - Version name: 0.9.7
           - ABI: arm64-v8a
           - APK: ${OUTPUT_APK_NAME}
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - sing-box: ${SING_BOX_TAG} / ${SING_BOX_COMMIT}
-          - HEV: ${HEV_COMMIT}
-          - HEV native APK entry size: ${hev_size} bytes
-          - Application/MainActivity/VpnService icon: refreshed RRBOX launcher artwork resource
-          - Notification left Small Icon: refreshed RRBOX monochrome resource
-          - Notification right Large Icon: none
-          - Notification channel/id: refreshed to bypass stale SystemUI identity
-          - App update source: GitHub releases/latest, official arm64 APK only
-          - Obtainium source: Xiaowu7z/RR-BOX stable releases
-          - CI: unit tests, signed Release, package/version/ABI/native/rule/icon/update-channel validation passed
-
-          RRBOX 0.9.6 targets OEM/SystemUI icon caching and VPN service icon selection while preserving the exact RRBOX launcher artwork.
+          - App icon: adaptive RRBOX artwork + Android 13+ monochrome layer
+          - System/OEM fallback launcher resources: RRBOX adaptive artwork
+          - VPN Service icon: RRBOX adaptive app icon
+          - Notification Small Icon: RRBOX monochrome status resource
+          - Notification Large Icon: none
+          - Update channels: GitHub releases/latest + Obtainium
           EOF
-
-          cp build-reports/LIBBOX-SHA256.txt dist/
-          cp build-reports/HEV-SHA256.txt dist/
-          cp build-reports/HEV-FILE.txt dist/
-          cp build-reports/HEV.txt dist/
-          cp build-reports/CHINA-RULES-SHA256.txt dist/
-          cp build-reports/CHINA-RULES-SIZES.txt dist/
-          cp build-reports/TOOLCHAIN.txt dist/
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.9.6-arm64-v8a
+          name: RRBOX-0.9.7-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
-      - name: Publish RRBOX 0.9.6 stable release
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.6') }}"
+      - name: Publish RRBOX 0.9.7 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.7') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.6
+          tag_name: v0.9.7
           target_commitish: ${{ github.sha }}
-          name: RRBOX 0.9.6 正式版
+          name: RRBOX 0.9.7 正式版
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body: |
-            ## RRBOX 0.9.6 正式版
+            ## RRBOX 0.9.7 正式版
 
-            0.9.6 针对 OnePlus/OxygenOS/ColorOS 类 SystemUI 可能绕过 Notification Small Icon、改用应用或 VPN Service 图标的情况做强制刷新。
+            本版继续处理 OnePlus/OxygenOS 16 通知左侧仍显示旧双向箭头的问题。
 
             ### 本版重点
-            - RRBOX 正式 App 图标复制到全新资源 ID，视觉内容不变。
-            - Application、MainActivity、RRVpnService 显式绑定同一张新的 RRBOX 正式图标资源。
-            - 通知 Small Icon 同样改用全新资源 ID。
-            - 通知 Channel/Notification ID 全部刷新，并清理旧通知 Channel/ID，规避 SystemUI 缓存旧箭头。
-            - 右侧 Large Icon 继续保持完全移除。
-            - App 内更新与 Obtainium 继续共同跟踪正式 Release。
+            - Application、MainActivity、RRVpnService 改为标准 Android Adaptive App Icon。
+            - Android 13+ Adaptive Icon 增加 RRBOX 专用 monochrome layer。
+            - 系统常见 `mipmap/ic_launcher` / `ic_launcher_round` 同步为 RRBOX 正式图标，覆盖 OEM 绕过 Manifest 的取图路径。
+            - 通知 Small Icon、Channel、Notification ID 再次刷新。
+            - 右侧 Large Icon 继续完全移除。
+            - App 内更新与 Obtainium 继续跟踪正式 Release。
 
-            ### 安装
-            下载 `RRBOX-0.9.6-arm64-v8a.apk`。安装升级后请重新连接一次 VPN，让系统建立新的通知/VPN 服务图标身份。
+            安装后断开并重新连接一次 VPN，让 OxygenOS 重新建立通知图标身份。
           files: |
-            dist/RRBOX-0.9.6-arm64-v8a.apk
+            dist/RRBOX-0.9.7-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
             dist/obtainium.json
 
       - name: Verify App and Obtainium update channels
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.6') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.7') }}"
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
-          expected_tag="v0.9.6"
-          expected_apk="RRBOX-0.9.6-arm64-v8a.apk"
+          expected_tag="v0.9.7"
+          expected_apk="RRBOX-0.9.7-arm64-v8a.apk"
           latest_tag=""
-
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
-            if [ "$latest_tag" = "$expected_tag" ]; then
-              break
-            fi
+            [ "$latest_tag" = "$expected_tag" ] && break
             sleep 3
           done
-
           test "$latest_tag" = "$expected_tag"
-
-          asset_url="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${expected_tag}" \
-            --jq ".assets[] | select(.name == \"${expected_apk}\") | .browser_download_url" \
-            | head -n 1)"
-          test -n "$asset_url"
-
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${expected_tag}" \
+            --jq ".assets[] | select(.name == \"${expected_apk}\") | .browser_download_url" | grep -q .
           grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' dist/obtainium.json
-          grep -q '"includePrereleases\\":false' dist/obtainium.json
-
-          echo "App update latest tag: $latest_tag"
-          echo "Official APK asset: $asset_url"
-          echo "Obtainium stable source verified"

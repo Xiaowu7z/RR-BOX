@@ -14,11 +14,13 @@ import com.rr.client.traffic.TrafficSpeed
 
 class RRNotificationManager(private val context: Context) {
     companion object {
-        const val CHANNEL_ID = "rrbox_status_channel_096"
-        const val NOTIFICATION_ID = 1006
+        const val CHANNEL_ID = "rrbox_status_channel_097"
+        const val NOTIFICATION_ID = 1007
         const val ACTION_STOP_VPN = "com.rr.client.ACTION_STOP_VPN"
         const val ACTION_RESTART_VPN = "com.rr.client.ACTION_RESTART_VPN"
 
+        private const val PREVIOUS_CHANNEL_ID = "rrbox_status_channel_096"
+        private const val PREVIOUS_NOTIFICATION_ID = 1006
         private const val LEGACY_CHANNEL_ID = "rrbox_status_channel"
         private const val LEGACY_NOTIFICATION_ID = 1001
     }
@@ -27,13 +29,15 @@ class RRNotificationManager(private val context: Context) {
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     init {
-        clearLegacyNotificationIdentity()
+        clearPreviousNotificationIdentity()
         createNotificationChannel()
     }
 
-    private fun clearLegacyNotificationIdentity() {
+    private fun clearPreviousNotificationIdentity() {
+        notificationManager.cancel(PREVIOUS_NOTIFICATION_ID)
         notificationManager.cancel(LEGACY_NOTIFICATION_ID)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching { notificationManager.deleteNotificationChannel(PREVIOUS_CHANNEL_ID) }
             runCatching { notificationManager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
         }
     }
@@ -100,8 +104,7 @@ class RRNotificationManager(private val context: Context) {
         val expandedText = "节点: $nodeTag\n下行速率: ${speed.formattedDownSpeed}\n上行速率: ${speed.formattedUpSpeed}\n已连接: $durationFormatted"
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_rrbox_status_096)
-            // No LargeIcon: the right side of the notification card must stay empty.
+            .setSmallIcon(R.drawable.ic_rrbox_status_097)
             .setContentTitle("RRBOX · $nodeTag")
             .setContentText(collapsedText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
