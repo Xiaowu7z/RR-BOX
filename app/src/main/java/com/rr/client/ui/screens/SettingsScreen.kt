@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.rr.client.BuildConfig
 import com.rr.client.RRApplication
+import com.rr.client.lab.NetworkLabActivity
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
@@ -257,6 +258,25 @@ fun SettingsScreen(
                     color = DarkBackground,
                     fontWeight = FontWeight.Bold
                 )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        SettingsCard {
+            Text(text = "Network Lab · 网络实验室", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "旁路查看网络路径、TUN/MTU、DNS、IPv4/IPv6、启动自检、进程日志，并运行 System vs HEV A/B 观察。实验室不会替换或重写两套现有数据面。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = { context.startActivity(Intent(context, NetworkLabActivity::class.java)) },
+                colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+            ) {
+                Text("打开 Network Lab", color = DarkBackground, fontWeight = FontWeight.Bold)
             }
         }
 

@@ -2,6 +2,8 @@ package com.rr.client
 
 import android.app.Application
 import android.util.Log
+import com.rr.client.lab.RRLogCapture
+import com.rr.client.lab.StartupSelfCheck
 import com.rr.client.storage.AppDatabase
 import com.rr.client.storage.PreferencesManager
 import io.nekohasekai.libbox.Libbox
@@ -22,6 +24,10 @@ class RRApplication : Application() {
 
         database = AppDatabase.getDatabase(this)
         preferencesManager = PreferencesManager(this)
+
+        // 0.10.0 observability layer only. These collectors never participate in packet forwarding.
+        RRLogCapture.start()
+        StartupSelfCheck.schedule(this)
     }
 
     private fun initializeLibbox() {

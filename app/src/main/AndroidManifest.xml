@@ -39,6 +39,12 @@
         </activity>
 
         <activity
+            android:name=".lab.NetworkLabActivity"
+            android:exported="false"
+            android:theme="@style/Theme.RRClient"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".qr.QrScanActivity"
             android:exported="false"
             android:hardwareAccelerated="true"
