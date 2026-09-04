@@ -91,7 +91,10 @@ class EngineBenchmarkRunner(
             trafficDownloadDelta = (endTraffic.proxyDownloadTotal - startTraffic.proxyDownloadTotal).coerceAtLeast(0L),
             trafficUploadDelta = (endTraffic.proxyUploadTotal - startTraffic.proxyUploadTotal).coerceAtLeast(0L),
             processCpuMillis = cpuDelta,
-            processPssKb = Debug.getPss().coerceAtLeast(0),
+            processPssKb = Debug.getPss()
+                .coerceAtLeast(0L)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt(),
             observationSeconds = observationSeconds.coerceIn(3, 20)
         )
         RRLogStore.record(
@@ -113,7 +116,7 @@ class EngineBenchmarkRunner(
         )
 
         var sawStarting = RRVpnService.isStarting.value
-        val ok = withTimeoutOrNull(20_000L) {
+        val ok: Boolean = withTimeoutOrNull<Boolean>(20_000L) {
             while (true) {
                 if (RRVpnService.isStarting.value) sawStarting = true
                 if (sawStarting && !RRVpnService.isStarting.value && RRVpnService.isRunning.value) {
