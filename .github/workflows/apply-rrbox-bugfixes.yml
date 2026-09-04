@@ -27,64 +27,61 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace_once(text: str, old: str, new: str, label: str) -> str:
+          def once(text: str, old: str, new: str, label: str) -> str:
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"{label}: expected exactly one match, got {count}")
+                  raise SystemExit(f"{label}: expected 1 match, got {count}")
               return text.replace(old, new, 1)
 
-          # 1) Subscription URL detection for clipboard routing.
+          # Clipboard subscription-address recognition.
           p = Path("app/src/main/java/com/rr/client/subscription/SubscriptionUrlNormalizer.kt")
           text = p.read_text()
-          old = '''        return listOf("https://$input", "http://$input")
+          marker = '    private val SCHEME_REGEX = Regex("^[A-Za-z][A-Za-z0-9+.-]*://")\n'
+          helper = '''    fun looksLikeSubscriptionAddress(raw: String): Boolean {
+              val input = raw.trim()
+              if (input.isEmpty() || input.contains('\\n') || input.contains('\\r')) return false
+
+              val lower = input.lowercase()
+              if (SCHEME_REGEX.containsMatchIn(input) &&
+                  !lower.startsWith("https://") &&
+                  !lower.startsWith("http://")
+              ) return false
+
+              val body = when {
+                  lower.startsWith("https://") -> input.substring(8)
+                  lower.startsWith("http://") -> input.substring(7)
+                  input.startsWith("//") -> input.substring(2)
+                  else -> input
               }
+              val authority = body.substringBefore('/').substringBefore('?')
+              if (authority.isBlank() || authority.any(Char::isWhitespace) || '@' in authority) return false
 
-              private val SCHEME_REGEX = Regex("^[A-Za-z][A-Za-z0-9+.-]*://")
-          }'''.replace("              ", "    ")
-          new = '''        return listOf("https://$input", "http://$input")
-              }
-
-              fun looksLikeSubscriptionAddress(raw: String): Boolean {
-                  val input = raw.trim()
-                  if (input.isEmpty() || input.contains('\\n') || input.contains('\\r')) return false
-
-                  val lower = input.lowercase()
-                  if (SCHEME_REGEX.containsMatchIn(input) &&
-                      !lower.startsWith("https://") &&
-                      !lower.startsWith("http://")
-                  ) return false
-
-                  val body = when {
-                      lower.startsWith("https://") -> input.substring(8)
-                      lower.startsWith("http://") -> input.substring(7)
-                      input.startsWith("//") -> input.substring(2)
-                      else -> input
-                  }
-                  val authority = body.substringBefore('/').substringBefore('?')
-                  if (authority.isBlank() || authority.any(Char::isWhitespace) || '@' in authority) return false
-                  if (authority.startsWith("[") && authority.contains("]")) return true
-
+              val validHost = if (authority.startsWith("[") && authority.contains("]")) {
+                  true
+              } else {
                   val host = authority.substringBefore(':')
-                  return host.equals("localhost", ignoreCase = true) || host.contains('.')
+                  host.equals("localhost", ignoreCase = true) || host.contains('.')
               }
+              if (!validHost) return false
 
-              private val SCHEME_REGEX = Regex("^[A-Za-z][A-Za-z0-9+.-]*://")
-          }'''.replace("              ", "    ")
-          text = replace_once(text, old, new, "SubscriptionUrlNormalizer")
+              val remainder = body.removePrefix(authority)
+              return remainder.isNotBlank() && remainder != "/"
+          }
+
+'''
+          text = once(text, marker, helper + marker, "normalizer helper")
           p.write_text(text)
 
-          # Tests for clipboard subscription-address classification.
           p = Path("app/src/test/java/com/rr/client/subscription/SubscriptionUrlNormalizerTest.kt")
           text = p.read_text()
-          text = replace_once(
+          text = once(
               text,
               "import org.junit.Assert.assertEquals\n",
               "import org.junit.Assert.assertEquals\nimport org.junit.Assert.assertFalse\nimport org.junit.Assert.assertTrue\n",
               "normalizer test imports"
           )
-          marker = "\n    @Test(expected = IllegalArgumentException::class)\n    fun rejectsNonHttpSubscriptionScheme()"
-          addition = '''
-              @Test
+          test_marker = "    @Test(expected = IllegalArgumentException::class)\n    fun rejectsNonHttpSubscriptionScheme()"
+          test_block = '''    @Test
               fun recognizesClipboardSubscriptionAddresses() {
                   assertTrue(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("https://example.com/sub?token=x"))
                   assertTrue(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("192.0.2.8:8080/sub"))
@@ -92,126 +89,128 @@ jobs:
               }
 
               @Test
-              fun doesNotTreatProxyOrNodeLinksAsSubscriptionAddresses() {
+              fun avoidsNodeLinksAndBareProxyEndpoints() {
                   assertFalse(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("vless://uuid@example.com:443"))
                   assertFalse(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("http://user:pass@example.com:8080"))
-                  assertFalse(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("{\\\"type\\\":\\\"vless\\\",\\\"server\\\":\\\"example.com\\\"}"))
+                  assertFalse(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("http://example.com:8080"))
+                  assertFalse(SubscriptionUrlNormalizer.looksLikeSubscriptionAddress("{\\\"type\\\":\\\"vless\\\"}"))
               }
-          '''.replace("              ", "    ")
-          if marker not in text:
-              raise SystemExit("normalizer test insertion marker missing")
-          text = text.replace(marker, "\n" + addition + marker, 1)
+
+'''.replace("              ", "    ")
+          text = once(text, test_marker, test_block + test_marker, "normalizer tests")
           p.write_text(text)
 
-          # 2) Subscription form must never retain old name/address after use/cancel/reopen.
+          # Always clear add-subscription form after use, cancel, and reopen.
           p = Path("app/src/main/java/com/rr/client/ui/screens/SubscriptionScreen.kt")
           text = p.read_text()
-          text = replace_once(
+          text = once(
               text,
               "                onClick = { showAddForm = true },",
               '''                onClick = {
-                      nameInput = ""
-                      urlInput = ""
-                      showAddForm = true
-                  },'''.replace("                  ", "                "),
-              "subscription reopen clear"
+                    nameInput = ""
+                    urlInput = ""
+                    showAddForm = true
+                },''',
+              "subscription reopen"
           )
-          text = replace_once(
+          text = once(
               text,
               "                            onClick = { showAddForm = false },",
               '''                            onClick = {
-                                  nameInput = ""
-                                  urlInput = ""
-                                  showAddForm = false
-                              },'''.replace("                              ", "                            "),
-              "subscription cancel clear"
+                                nameInput = ""
+                                urlInput = ""
+                                showAddForm = false
+                            },''',
+              "subscription cancel"
           )
-          text = replace_once(
+          text = once(
               text,
               '''                            onClick = {
-                                  onAddProfile(nameInput, urlInput)
-                                  showAddForm = false
-                              },'''.replace("                              ", "                            "),
+                                onAddProfile(nameInput, urlInput)
+                                showAddForm = false
+                            },''',
               '''                            onClick = {
-                                  val submittedName = nameInput.trim()
-                                  val submittedUrl = urlInput.trim()
-                                  nameInput = ""
-                                  urlInput = ""
-                                  showAddForm = false
-                                  onAddProfile(submittedName, submittedUrl)
-                              },'''.replace("                              ", "                            "),
-              "subscription submit clear"
+                                val submittedName = nameInput.trim()
+                                val submittedUrl = urlInput.trim()
+                                nameInput = ""
+                                urlInput = ""
+                                showAddForm = false
+                                onAddProfile(submittedName, submittedUrl)
+                            },''',
+              "subscription submit"
           )
           p.write_text(text)
 
-          # 3) Add a dedicated node rename action in the node list.
+          # Node list: explicit Rename command + dedicated clipboard callback.
           p = Path("app/src/main/java/com/rr/client/ui/screens/NodeListScreen.kt")
           text = p.read_text()
-          text = replace_once(
+          text = once(
               text,
               "    onPingNode: (ProxyNode) -> Unit,\n    onEditNode: (ProxyNode) -> Unit,",
               "    onPingNode: (ProxyNode) -> Unit,\n    onRenameNode: (ProxyNode, String) -> Unit,\n    onEditNode: (ProxyNode) -> Unit,",
-              "NodeListScreen rename callback"
+              "screen rename callback"
           )
-          text = replace_once(
+          text = once(
               text,
               "    onDeleteLocalNode: (ProxyNode) -> Unit,\n    onImportText: (String) -> Unit,",
               "    onDeleteLocalNode: (ProxyNode) -> Unit,\n    onImportText: (String) -> Unit,\n    onImportClipboard: (String) -> Unit,",
-              "NodeListScreen clipboard callback"
+              "screen clipboard callback"
           )
-          text = replace_once(
+          text = once(
               text,
               "                                onPingNode = { onPingNode(node) },\n                                onEditNode = { onEditNode(node) },",
-              "                                onPingNode = { onPingNode(node) },\n                                onRenameNode = { newName -> onRenameNode(node, newName) },\n                                onEditNode = { onEditNode(node) },",
-              "NodeCard rename callback wiring"
+              "                                onPingNode = { onPingNode(node) },\n                                onRenameNode = { name -> onRenameNode(node, name) },\n                                onEditNode = { onEditNode(node) },",
+              "card rename wiring"
           )
-          text = replace_once(
+          text = once(
               text,
               '''                val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                    onImportText(text)'''.replace("                    ", "                "),
+                onImportText(text)''',
               '''                val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                    onImportClipboard(text)'''.replace("                    ", "                "),
-              "clipboard dedicated routing"
+                onImportClipboard(text)''',
+              "clipboard routing"
           )
-          text = replace_once(
+          text = once(
               text,
               "    onPingNode: () -> Unit,\n    onEditNode: () -> Unit,",
               "    onPingNode: () -> Unit,\n    onRenameNode: (String) -> Unit,\n    onEditNode: () -> Unit,",
-              "NodeCard rename parameter"
+              "card rename parameter"
           )
-          text = replace_once(
+          text = once(
               text,
               "    var menuExpanded by remember(node.id) { mutableStateOf(false) }\n",
               "    var menuExpanded by remember(node.id) { mutableStateOf(false) }\n    var showRenameDialog by remember(node.id) { mutableStateOf(false) }\n    var renameInput by remember(node.id) { mutableStateOf(node.tag) }\n",
-              "NodeCard rename state"
+              "rename state"
           )
-          menu_old = '''                    DropdownMenuItem(
-                              text = { Text("编辑节点") },
-                              leadingIcon = { Icon(Icons.Default.Edit, null) },
-                              onClick = { menuExpanded = false; onEditNode() }
-                          )'''.replace("                          ", "                    ")
-          menu_new = '''                    DropdownMenuItem(
-                              text = { Text("重命名") },
-                              leadingIcon = { Icon(Icons.Default.Edit, null) },
-                              onClick = {
-                                  menuExpanded = false
-                                  renameInput = node.tag
-                                  showRenameDialog = true
-                              }
-                          )
-                          DropdownMenuItem(
-                              text = { Text("编辑节点") },
-                              leadingIcon = { Icon(Icons.Default.Edit, null) },
-                              onClick = { menuExpanded = false; onEditNode() }
-                          )'''.replace("                          ", "                    ")
-          text = replace_once(text, menu_old, menu_new, "NodeCard rename menu")
+          edit_item = '''                    DropdownMenuItem(
+                        text = { Text("编辑节点") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = { menuExpanded = false; onEditNode() }
+                    )'''
+          rename_and_edit = '''                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = {
+                            menuExpanded = false
+                            renameInput = node.tag
+                            showRenameDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("编辑节点") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = { menuExpanded = false; onEditNode() }
+                    )'''
+          text = once(text, edit_item, rename_and_edit, "rename menu item")
 
-          node_start = text.index("private fun NodeCard(")
-          node_end = text.index("\n@Composable\nprivate fun NodeImportMethodDialog(", node_start)
-          segment = text[node_start:node_end]
-          if not segment.endswith("}\n"):
-              raise SystemExit("NodeCard function ending changed")
+          start = text.index("private fun NodeCard(")
+          end = text.index("\n@Composable\nprivate fun NodeImportMethodDialog(", start)
+          segment = text[start:end]
+          close = segment.rfind("\n}")
+          if close < 0:
+              raise SystemExit("NodeCard closing brace not found")
           rename_dialog = '''
+
               if (showRenameDialog) {
                   AlertDialog(
                       onDismissRequest = { showRenameDialog = false },
@@ -241,34 +240,25 @@ jobs:
                           TextButton(onClick = { showRenameDialog = false }) { Text("取消") }
                       }
                   )
-              }
-          '''.replace("              ", "    ")
-          segment = segment[:-2] + rename_dialog + "}\n"
-          text = text[:node_start] + segment + text[node_end:]
+              }'''.replace("              ", "    ")
+          segment = segment[:close] + rename_dialog + segment[close:]
+          text = text[:start] + segment + text[end:]
           p.write_text(text)
 
-          # 4) MainActivity: clipboard URL -> subscription; explicit rename persistence.
+          # Main activity routing and persistence.
           p = Path("app/src/main/java/com/rr/client/MainActivity.kt")
           text = p.read_text()
-          text = replace_once(
+          text = once(
               text,
               "import com.rr.client.subscription.SubscriptionParser\n",
               "import com.rr.client.subscription.SubscriptionParser\nimport com.rr.client.subscription.SubscriptionUrlNormalizer\n",
-              "MainActivity normalizer import"
+              "normalizer import"
           )
 
-          # Move addProfile before importLocalNodes so clipboard routing can call it without forward-reference ambiguity.
           add_start = text.index("        fun addProfile(name: String, url: String) {")
           add_end = text.index("\n        fun refreshProfile(profileId: String) {", add_start)
-          add_block = text[add_start:add_end]
-          text = text[:add_start] + text[add_end:]
-          import_pos = text.index("        fun importLocalNodes(raw: String) {")
-          text = text[:import_pos] + add_block + "\n\n" + text[import_pos:]
-
-          delete_marker = "\n        fun deleteLocalNode(node: ProxyNode) {"
-          if delete_marker not in text:
-              raise SystemExit("deleteLocalNode marker missing")
           clipboard_func = '''
+
               fun importClipboardContent(raw: String) {
                   val trimmed = raw.trim()
                   if (trimmed.isEmpty()) {
@@ -282,14 +272,12 @@ jobs:
                   } else {
                       importLocalNodes(raw)
                   }
-              }
-          '''.replace("              ", "        ")
-          text = text.replace(delete_marker, "\n" + clipboard_func + delete_marker, 1)
+              }'''.replace("              ", "        ")
+          text = text[:add_end] + clipboard_func + text[add_end:]
 
           schedule_marker = "\n        fun scheduleRoutingRestart("
-          if schedule_marker not in text:
-              raise SystemExit("scheduleRoutingRestart marker missing")
           rename_func = '''
+
               fun renameNode(node: ProxyNode, requestedName: String) {
                   val newName = requestedName.trim()
                   if (newName.isEmpty()) {
@@ -319,25 +307,22 @@ jobs:
                           toast("已重命名为「$newName」")
                       }
                   }
-              }
-          '''.replace("              ", "        ")
-          text = text.replace(schedule_marker, "\n" + rename_func + schedule_marker, 1)
-
-          text = replace_once(
+              }'''.replace("              ", "        ")
+          text = once(text, schedule_marker, rename_func + schedule_marker, "rename function")
+          text = once(
               text,
               "                        onPingNode = ::pingNode,\n                        onEditNode = { node -> editingNode = node },",
               "                        onPingNode = ::pingNode,\n                        onRenameNode = ::renameNode,\n                        onEditNode = { node -> editingNode = node },",
-              "MainActivity rename wiring"
+              "rename UI wiring"
           )
-          text = replace_once(
+          text = once(
               text,
               "                        onDeleteLocalNode = ::deleteLocalNode,\n                        onImportText = ::importLocalNodes,\n                        onCreateManualNode = { protocol ->",
               "                        onDeleteLocalNode = ::deleteLocalNode,\n                        onImportText = ::importLocalNodes,\n                        onImportClipboard = ::importClipboardContent,\n                        onCreateManualNode = { protocol ->",
-              "MainActivity clipboard wiring"
+              "clipboard UI wiring"
           )
           p.write_text(text)
 
-          # Freeze requested version number.
           gradle = Path("app/build.gradle.kts").read_text()
           if 'versionCode = 100' not in gradle or 'versionName = "1.0.0"' not in gradle:
               raise SystemExit("Version changed unexpectedly")
