@@ -93,6 +93,22 @@ object NetworkDiagnostics {
         )
         checks += LabCheck("当前转发引擎", LabCheckStatus.INFO, engine)
 
+        val continuity = NetworkContinuityObserver.state.value
+        checks += LabCheck(
+            "网络连续性守护",
+            when {
+                !continuity.monitoring -> LabCheckStatus.INFO
+                !continuity.healthy -> LabCheckStatus.WARN
+                else -> LabCheckStatus.PASS
+            },
+            if (!continuity.monitoring) {
+                "守护未启动"
+            } else {
+                "${continuity.transport} / ${continuity.interfaceName} · " +
+                    "切换 ${continuity.switchCount} 次 · ${continuity.lastEvent}"
+            }
+        )
+
         if (vpnRunning) {
             checks += LabCheck(
                 "VPN TUN",
