@@ -40,7 +40,11 @@ object ProtocolCapabilityRegistry {
             notes = "无统一安全分享链接格式；推荐导入 sing-box JSON"
         ),
         ProtocolCapability(ProtocolType.SHADOWTLS, shareLinkImport = true),
-        ProtocolCapability(ProtocolType.SNELL, shareLinkImport = true, clashImport = true),
+        ProtocolCapability(
+            ProtocolType.SNELL,
+            shareLinkImport = true,
+            notes = "分享链接可导入；当前 Clash 转换器未声明 Snell"
+        ),
         ProtocolCapability(
             ProtocolType.TOR,
             shareLinkImport = false,
