@@ -10,7 +10,12 @@ data class VpnRuntimeState(
     val nodeTag: String,
     val nodeId: String,
     val perAppMode: String = PerAppPolicyResolver.MODE_ALL,
-    val selectedPackages: Set<String> = emptySet()
+    val selectedPackages: Set<String> = emptySet(),
+    /** Null means this cache was written by an older build; accept once, then refresh it. */
+    val smartRouting: Boolean? = null,
+    /** Null means this cache was written by an older build; accept once, then refresh it. */
+    val fastForwarding: Boolean? = null,
+    val savedAtMillis: Long = 0L
 )
 
 class VpnRuntimeStateStore(context: Context) {
@@ -19,7 +24,7 @@ class VpnRuntimeStateStore(context: Context) {
 
     fun save(state: VpnRuntimeState) {
         val temp = File(file.parentFile, ".${file.name}.tmp")
-        temp.writeText(gson.toJson(state))
+        temp.writeText(gson.toJson(state.copy(savedAtMillis = System.currentTimeMillis())))
         if (!temp.renameTo(file)) {
             temp.copyTo(file, overwrite = true)
             temp.delete()
