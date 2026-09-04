@@ -1,0 +1,524 @@
+name: RRBOX 1.0.0 one-time finalizer
+
+on:
+  push:
+    branches: ["dev"]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: "${{ github.event.head_commit.message == 'chore: start RRBOX 1.0.0 finalizer' }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Apply 1.0.0 product closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"missing expected text in {path}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # 1) Protect only the actually running/starting node from deletion.
+          replace_once(
+              "app/src/main/java/com/rr/client/MainActivity.kt",
+              "import com.rr.client.core.ConfigBuilder\n",
+              "import com.rr.client.core.ConfigBuilder\nimport com.rr.client.core.LocalNodeDeletionPolicy\n"
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/MainActivity.kt",
+              "        val isVpnStarting by RRVpnService.isStarting.collectAsState()\n",
+              "        val isVpnStarting by RRVpnService.isStarting.collectAsState()\n        val activeRuntimeNodeId by RRVpnService.activeRuntimeNodeId.collectAsState()\n"
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/MainActivity.kt",
+              '''        fun deleteLocalNode(node: ProxyNode) {
+            if (!node.profileId.equals(SubProfile.LOCAL_PROFILE_ID)) return
+            if (isVpnRunning || isVpnStarting) {
+                toast("请先断开连接再删除本地节点")
+                return
+            }
+            lifecycleScope.launch {
+                prefs.clearNodeOverride(node.id)
+                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
+                persistLocalNodes(existing.filterNot { it.id == node.id }, "已删除本地节点「${node.tag}」")
+            }
+        }
+''',
+              '''        fun deleteLocalNode(node: ProxyNode) {
+            if (!node.profileId.equals(SubProfile.LOCAL_PROFILE_ID)) return
+            val vpnBusy = isVpnRunning || isVpnStarting
+            if (!LocalNodeDeletionPolicy.canDelete(node.id, activeRuntimeNodeId, vpnBusy)) {
+                toast(
+                    if (node.id == activeRuntimeNodeId) {
+                        "当前节点正在使用，请先断开或切换连接后再删除"
+                    } else {
+                        "正在确认当前运行节点，请稍后重试"
+                    }
+                )
+                return
+            }
+            lifecycleScope.launch {
+                prefs.clearNodeOverride(node.id)
+                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
+                persistLocalNodes(existing.filterNot { it.id == node.id }, "已删除本地节点「${node.tag}」")
+            }
+        }
+'''
+          )
+
+          p = Path("app/src/main/java/com/rr/client/core/LocalNodeDeletionPolicy.kt")
+          p.write_text('''package com.rr.client.core
+
+/** Keeps the live runtime node protected while allowing unrelated local-node cleanup. */
+object LocalNodeDeletionPolicy {
+    fun canDelete(nodeId: String, activeRuntimeNodeId: String?, vpnBusy: Boolean): Boolean {
+        if (!vpnBusy) return true
+        val active = activeRuntimeNodeId?.takeIf(String::isNotBlank) ?: return false
+        return nodeId != active
+    }
+}
+''')
+          p = Path("app/src/test/java/com/rr/client/core/LocalNodeDeletionPolicyTest.kt")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text('''package com.rr.client.core
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalNodeDeletionPolicyTest {
+    @Test fun disconnectedAllowsDeletion() {
+        assertTrue(LocalNodeDeletionPolicy.canDelete("node-a", null, false))
+    }
+
+    @Test fun runningNodeIsProtected() {
+        assertFalse(LocalNodeDeletionPolicy.canDelete("node-a", "node-a", true))
+    }
+
+    @Test fun unrelatedNodeCanBeDeletedWhileVpnRuns() {
+        assertTrue(LocalNodeDeletionPolicy.canDelete("node-b", "node-a", true))
+    }
+
+    @Test fun unknownRunningNodeFailsClosed() {
+        assertFalse(LocalNodeDeletionPolicy.canDelete("node-b", null, true))
+    }
+}
+''')
+
+          # Expose the actual runtime node id from the VPN service.
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''        private val _isStarting = MutableStateFlow(false)
+        val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+''',
+              '''        private val _isStarting = MutableStateFlow(false)
+        val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+        private val _activeRuntimeNodeId = MutableStateFlow<String?>(null)
+        val activeRuntimeNodeId: StateFlow<String?> = _activeRuntimeNodeId.asStateFlow()
+
+'''
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''                if (intent.hasExtra(EXTRA_NODE_ID)) {
+                    activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
+                }
+
+                val config = activeConfigJson
+''',
+              '''                if (intent.hasExtra(EXTRA_NODE_ID)) {
+                    activeNodeId = intent.getStringExtra(EXTRA_NODE_ID).orEmpty()
+                }
+                _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
+
+                val config = activeConfigJson
+'''
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''        requestedNodeTag?.let { activeNodeTag = it }
+        requestedNodeId?.let { activeNodeId = it }
+
+''',
+              '''        requestedNodeTag?.let { activeNodeTag = it }
+        requestedNodeId?.let {
+            activeNodeId = it
+            _activeRuntimeNodeId.value = it.takeIf(String::isNotBlank)
+        }
+
+'''
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''        if (configJson.isNullOrBlank()) {
+            VpnConnectionIntentStore.setDesiredRunning(this, false)
+''',
+              '''        if (configJson.isNullOrBlank()) {
+            _activeRuntimeNodeId.value = null
+            VpnConnectionIntentStore.setDesiredRunning(this, false)
+'''
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''                _isStarting.value = false
+                _isRunning.value = true
+                VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, true)
+''',
+              '''                _isStarting.value = false
+                _isRunning.value = true
+                _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
+                VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, true)
+'''
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''            activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
+            _isStarting.value = false
+            _isRunning.value = false
+            _currentSpeed.value = TrafficSpeed()
+''',
+              '''            activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
+            _isStarting.value = false
+            _isRunning.value = false
+            _activeRuntimeNodeId.value = null
+            _currentSpeed.value = TrafficSpeed()
+'''
+          )
+          replace_once(
+              "app/src/main/java/com/rr/client/vpn/RRVpnService.kt",
+              '''        _isStarting.value = false
+        _isRunning.value = false
+        if (serviceRef?.get() === this) serviceRef = null
+''',
+              '''        _isStarting.value = false
+        _isRunning.value = false
+        _activeRuntimeNodeId.value = null
+        if (serviceRef?.get() === this) serviceRef = null
+'''
+          )
+
+          # 2) Remove stale experimental/candidate product language.
+          settings = Path("app/src/main/java/com/rr/client/ui/screens/SettingsScreen.kt")
+          s = settings.read_text()
+          old = "HEV 模式使用 ${HevTunnelConfig.MTU} MTU、mapped DNS 与加大的 native 缓冲区来降低 TUN 数据面的包处理开销。属于实验引擎；切换会自动重建当前 VPN，稳定模式始终保留。"
+          new = "HEV 模式使用 ${HevTunnelConfig.MTU} MTU、mapped DNS、SOCKS5 pipeline 与 best-effort TCP Fast Open。它是正式的高性能可选引擎；System 稳定模式仍为默认并始终保留。"
+          if old not in s: raise SystemExit("settings HEV product copy not found")
+          settings.write_text(s.replace(old, new, 1))
+
+          lab = Path("app/src/main/java/com/rr/client/lab/NetworkLabActivity.kt")
+          s = lab.read_text()
+          replacements = {
+              '"HEV / Experimental"': '"HEV / High Performance"',
+              '"准备 A/B v2.8 latency candidate"': '"准备 System vs HEV A/B"',
+              '"A/B v2.8 失败: ${benchmarkError.orEmpty()}"': '"A/B 失败: ${benchmarkError.orEmpty()}"',
+              '"System vs HEV A/B v2.8 · latency candidate"': '"System vs HEV A/B · 已验证基准"',
+              'if (benchmarkBusy) "A/B v2.8 测试中…" else "开始一键 A/B v2.8"': 'if (benchmarkBusy) "A/B 测试中…" else "开始一键 A/B"',
+              '"A/B v2.8 candidate 历史统计 · ${stats.runs} 次"': '"A/B 历史统计 · ${stats.runs} 次"',
+              '"两个测试顺序都已有 candidate 样本，可优先看历史中位数/P95。"': '"两个测试顺序都已有有效样本，可优先看历史中位数/P95。"',
+              'HistoryStatsCard("HEV CANDIDATE", stats.hev)': 'HistoryStatsCard("HEV", stats.hev)',
+              '"${item.nodeTag}: v2.8 candidate ${item.executionOrder.orEmpty()} · System': '"${item.nodeTag}: v2.8 已验证 ${item.executionOrder.orEmpty()} · System',
+              'if (sample.engine.equals("HEV", ignoreCase = true)) "HEV · latency candidate" else sample.engine': 'if (sample.engine.equals("HEV", ignoreCase = true)) "HEV · 高性能" else sample.engine',
+              'StatusRow("候选握手", "SOCKS5 pipeline + client TFO")': 'StatusRow("HEV 握手", "SOCKS5 pipeline + client TFO")',
+              '"路径验证不足，当前样本不会进入 v2.8 candidate 历史统计。"': '"路径验证不足，当前样本不会进入有效 A/B 历史统计。"'
+          }
+          for old, new in replacements.items():
+              if old in s:
+                  s = s.replace(old, new)
+          old_para = "v2.8 保留 v2.7 已验证的数据路径和测量方法，只把 HEV 的实验臂临时切成延迟候选：开启上游 HEV 支持的 SOCKS5 pipeline 与 best-effort TCP Fast Open。正常 HEV 不启用这些参数，测试结束后仍强制恢复原始普通引擎配置。"
+          new_para = "System 与 HEV 使用同一节点、固定 2 MiB HTTPS 负载和路径计数交叉验证。HEV 正式配置包含 SOCKS5 pipeline 与 best-effort TCP Fast Open；测试结束后自动恢复用户原始引擎。"
+          s = s.replace(old_para, new_para)
+          old_goal = "目标：验证 HEV 当前更高吞吐/更低 CPU 能否保留，同时把冷连接 TLS/TTFB 拉低。v2.7 普通 HEV 历史不会与 v2.8 candidate 混算。"
+          new_goal = "该基准用于比较服务内重建、TLS、首字节、2 MiB 下载、CPU/PSS 与真实路径计数。公网结果只代表当前设备和网络，不用于宣称某引擎普遍更快。"
+          s = s.replace(old_goal, new_goal)
+          s = s.replace("v2.8 candidate 只存在于实验重建；失败或结束后都会恢复正常 HEV，候选参数不会残留。", "A/B 失败或结束后都会恢复测试前的原始转发引擎，不改变日常运行配置。")
+          lab.write_text(s)
+
+          # 3) Version becomes 1.0.0 / 100.
+          gradle = Path("app/build.gradle.kts")
+          s = gradle.read_text().replace("versionCode = 98", "versionCode = 100", 1).replace('versionName = "0.9.8"', 'versionName = "1.0.0"', 1)
+          gradle.write_text(s)
+
+          # 4) Product README.
+          Path("README.md").write_text(r'''<div align="center">
+
+<img src="app/src/main/res/drawable-nodpi/ic_rrbox_launcher.webp" width="128" alt="RRBOX" />
+
+# RRBOX 1.0
+
+**Android 原生代理客户端 · System / HEV 双数据面 · 移动网络连续性守护 · 可复现构建**
+
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](#)
+[![ABI](https://img.shields.io/badge/ABI-arm64--v8a-00E5FF)](#)
+[![Release](https://img.shields.io/github/v/release/Xiaowu7z/RR-BOX?label=Stable)](https://github.com/Xiaowu7z/RR-BOX/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/Xiaowu7z/RR-BOX/build-v2.yml?branch=main&label=Build)](https://github.com/Xiaowu7z/RR-BOX/actions/workflows/build-v2.yml)
+[![Core](https://img.shields.io/badge/Core-sing--box%20libbox-161B22)](#)
+
+[下载正式版](https://github.com/Xiaowu7z/RR-BOX/releases/latest) · [技术验证](docs/TECHNICAL-VALIDATION.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
+
+</div>
+
+---
+
+## 项目定位
+
+RRBOX 是一个面向 Android 的原生 VPN / 代理客户端。1.0 的重点不是追求“协议数量最多”，而是把 **Android VpnService 数据面、移动网络切换、异常恢复、分应用路由、可观测性与可复现 Release** 做成一套稳定工程。
+
+**当前正式版：1.0.0 · arm64-v8a · Android 8.0+。**
+
+项目原则：**数据面正确性 > 移动网络稳定性 > 可测量性能 > 功能数量。**
+
+---
+
+## 双数据面
+
+### System · 默认稳定引擎
+
+```text
+Android VpnService TUN
+        ↓
+sing-box libbox / system stack
+        ↓
+routing / DNS / outbound
+        ↓
+Internet
+```
+
+System 是 RRBOX 的默认稳定路径，启动快、兼容性高，并始终作为回退基线。
+
+### HEV · 高性能可选引擎
+
+```text
+Android VpnService TUN
+        ↓
+HEV native / lwIP
+        ↓
+Loopback SOCKS5 (pipeline)
+        ↓
+sing-box outbound
+        ↓
+Internet
+```
+
+HEV 使用 8500 MTU、mapped DNS、SOCKS5 pipeline 与 best-effort client TCP Fast Open。它不是“所有场景必然更快”的替代品，而是正式保留的低 CPU / native 数据面选项。
+
+---
+
+## 实机 A/B 结果
+
+同一台 Android 设备、同一节点、每个引擎 3 轮固定 2 MiB HTTPS，3 次有效 A/B 运行的 run-level 中位数汇总：
+
+| 指标 | System | HEV |
+|---|---:|---:|
+| TLS 中位 | 591 ms | 610 ms |
+| HTTPS 首字节 | 859 ms | 1010 ms |
+| 2 MiB 下载 | 1.57 MB/s | 1.56 MB/s |
+| RRBOX 进程 CPU | 1081 ms | 790 ms |
+| 服务内重建 | 121 ms | 222 ms |
+
+- 两条路径均完成代理路径计数验证；HEV 额外完成 native RX 验证。
+- HEV 在这组实测中 CPU 约低 **27%**，吞吐基本同档；TTFB 约慢 **18%**。
+- 这些数据用于解释产品取舍，不代表不同运营商、VPS、协议或设备上的普遍结论。
+
+因此 1.0 保持：**System 默认，HEV 可选。**
+
+---
+
+## 移动网络稳定性
+
+RRBOX 1.0 内置事件驱动的网络连续性守护，不靠高频心跳发包：
+
+- 实时识别 Wi-Fi / 蜂窝 / 以太网与接口变化。
+- Wi-Fi 与蜂窝同时有效时按健康度和物理网络优先级选择真实出口。
+- Wi-Fi ↔ 蜂窝正常切换只观察，不重启健康 VPN。
+- 切网后本地数据面确实停止时，才使用最近一次已验证 Runtime Cache 自动恢复。
+- 用户手动断开后 `desiredRunning=false`，守护不会擅自重新连接。
+- Network Lab 提供恢复演练，可控地暂停数据面并验证恢复链。
+
+---
+
+## 快捷控制
+
+Android Quick Settings 的 RRBOX 快捷按钮使用已验证 Runtime Cache：
+
+- 点击立即更新 Tile 状态，实际启动/停止在后台完成。
+- 已缓存运行配置时跳过数据库扫描、App 枚举、规则重建和重复 ConfigBuilder。
+- 实机记录的缓存准备时间约 **4–21 ms**；这只是配置准备时间，不等同于完整 VPN 数据面启动时间。
+- 失败会回滚 Tile 状态，不用“假连接”掩盖启动错误。
+
+---
+
+## 协议与导入
+
+分享链接 / Clash / 原生 sing-box JSON 的能力按协议分别声明。当前覆盖：
+
+- VLESS Reality / VLESS TLS
+- VMess WS / gRPC / TLS
+- Hysteria1 / Hysteria2
+- TUIC v5
+- AnyTLS
+- Naive H2 / H3
+- Trojan
+- Shadowsocks
+- SOCKS / HTTP(S)
+- SSH
+- ShadowTLS
+- Snell
+- WireGuard / Tor（推荐原生 sing-box JSON）
+- 自定义 / 新协议字段：Raw outbound 兼容入口
+
+导入入口包括：扫码、二维码图片、剪贴板、文本、订阅、Clash/Mihomo `proxies:`、sing-box 单 outbound / `outbounds[]` / 完整 config。
+
+Raw 高级模式会保留 UI 尚未建模的 outbound 字段，并在写入本地节点前通过 sing-box 1.14 配置校验。
+
+---
+
+## 主要能力
+
+- Android 8.0+ / arm64-v8a
+- System / HEV 双转发引擎
+- 中国大陆域名 / IP SRS 智能分流
+- 全部代理 / 仅选中应用代理 / 选中应用绕过
+- HTTP / HTTPS 订阅、IPv4 / IPv6 订阅地址
+- 节点编辑、Ping、本地覆盖与本地节点管理
+- VPN 连接时仅保护实际运行节点，其他本地节点仍可删除
+- Network Lab：物理网络、MTU、DNS、IPv4/IPv6、TUN、自检、日志、A/B、恢复演练
+- 自动脱敏日志
+- 通知栏实时速率与连接时长
+- Android Quick Settings 快捷开关
+- App 内检查更新
+- Obtainium 更新
+- 可选 PIN 锁
+
+---
+
+## 安装与更新
+
+### GitHub Releases
+
+**[下载 RRBOX 最新正式版](https://github.com/Xiaowu7z/RR-BOX/releases/latest)**
+
+正式 Release 当前只提供 `arm64-v8a` APK。
+
+### Obtainium
+
+<a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.rr.client%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FXiaowu7z%2FRR-BOX%22%2C%22author%22%3A%22Xiaowu7z%22%2C%22name%22%3A%22RRBOX%22%2C%22preferredApkIndex%22%3A0%2C%22additionalSettings%22%3A%22%7B%5C%22includePrereleases%5C%22%3Afalse%2C%5C%22fallbackToOlderReleases%5C%22%3Atrue%2C%5C%22apkFilterRegEx%5C%22%3A%5C%22RRBOX-%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B-arm64-v8a%5C%5C%5C%5C.apk%24%5C%22%2C%5C%22autoApkFilterByArch%5C%22%3Atrue%7D%22%2C%22overrideSource%22%3A%22GitHub%22%2C%22allowIdChange%22%3Afalse%7D"><img alt="Add to Obtainium" src="https://img.shields.io/badge/Add_to_Obtainium-6750A3?style=for-the-badge"></a>
+
+App 内更新和 Obtainium 都只跟踪 GitHub 的正式 Release APK。
+
+---
+
+## 可复现构建
+
+1.0.0 Release 固定：
+
+- sing-box `v1.14.0` / `0b8995879f29a9b98ee027bc17b75e101445b238`
+- HEV `64cc609f945253b0e9ebc56317d544268f3c68c1`
+- Go `1.26.7`
+- Android NDK `r28`
+- Gradle `8.10.2`
+- Android API 35 / Build Tools 35.0.0
+
+CI 从固定源码重新构建 `libbox.aar` 和 HEV JNI，运行单元测试，生成签名 Release APK，并验证版本、ABI、native libs、SRS 规则、签名、图标资源、GitHub Release 与 Obtainium 通道。
+
+---
+
+## 1.0 之后
+
+1.0 开始冻结核心数据面。后续优先处理真实设备 / 真实网络暴露的问题，不为了版本号继续堆叠自动选节点或未经验证的“智能”功能。
+
+RRBOX 不替用户猜测哪台 VPS 最适合某个业务；线路、IP 地区、目标服务和运营商差异应由用户掌握，客户端负责把选择稳定地执行。
+''')
+
+          # 5) Technical validation becomes the 1.0 evidence record.
+          Path("docs/TECHNICAL-VALIDATION.md").write_text(r'''# RRBOX 1.0 技术验证记录
+
+本文只记录可以由源码、CI 或真实设备日志支撑的工程事实。
+
+## 1. 双数据面
+
+### System TUN
+- Android VpnService TUN 直接交给 sing-box libbox。
+- 默认稳定引擎，MTU 1500。
+- `START_NOT_STICKY`，重复等价 START 不拆健康数据面。
+
+### HEV Native
+- Android VpnService 建立 TUN，HEV JNI 在 RRBOX 进程内启动 lwIP 数据面。
+- TUN → HEV/lwIP → loopback SOCKS5 → sing-box outbound。
+- MTU 8500，mapped DNS，SOCKS5 pipeline，best-effort client TCP Fast Open。
+- sing-box 远端 socket 经 VpnService protect，避免 VPN 自环。
+
+## 2. A/B 实机结果
+
+固定同一设备、网络、节点和 2 MiB HTTPS 负载。每个引擎每轮 3 次请求，并以 sing-box session traffic 交叉验证；HEV 额外验证 native RX。
+
+三次有效运行的 run-level 中位数：
+
+| 指标 | System | HEV |
+|---|---:|---:|
+| TLS | 591 ms | 610 ms |
+| HTTPS TTFB | 859 ms | 1010 ms |
+| 下载 | 1.57 MB/s | 1.56 MB/s |
+| RRBOX CPU | 1081 ms | 790 ms |
+| 服务内重建 | 121 ms | 222 ms |
+
+结论：这组设备/公网条件下 HEV CPU 约低 27%，吞吐同档，TLS 接近，TTFB 约慢 18%。因此 System 保持默认，HEV 作为正式高性能可选引擎；不宣称 HEV 在所有网络中必然更快。
+
+## 3. 网络连续性
+
+真实设备日志已经验证：
+- 蜂窝 `rmnet_data1` ↔ Wi-Fi `wlan0` 连续切换可实时识别。
+- 正常切换后 `dataPlaneHealthy=true`，不会误重启 VPN。
+- 恢复演练可主动暂停本地数据面，再通过最近一次已验证 Runtime Cache 恢复。
+- 连续两次演练均恢复成功，`recoveryCount` 正常递增。
+- 用户主动断开后切换网络，`desiredRunning=false`，自动恢复明确跳过。
+
+网络守护是 Android `NetworkCallback` 驱动，不通过高频网络心跳轮询。
+
+## 4. Quick Settings
+
+快捷开关命中 Runtime Cache 后，跳过数据库扫描、应用枚举和完整规则构建。真实设备记录过 4 ms、11 ms、13 ms、14 ms、21 ms 的配置准备时间；完整 VPN 数据面启动仍受 Android VpnService 与核心启动时间影响。
+
+## 5. 协议 / Raw
+
+协议能力由 `ProtocolCapabilityRegistry` 声明；AnyTLS、Naive H2/H3 等已有解析路径不重复实现。Raw 模式支持单 outbound、`outbounds[]` 与完整 sing-box config 解析，并在写入本地节点前执行 libbox 配置校验。
+
+## 6. Release 验证
+
+正式 CI 固定核心 commit、Go、NDK、Gradle 与 Android API，重新构建 arm64 `libbox.so` 和 `libhev-socks5-tunnel.so`，执行单元测试，并验证：
+- package / version / ABI
+- APK v2 签名
+- native libs
+- 中国 SRS 规则资产
+- Adaptive / monochrome / notification icon 资源
+- App 内更新与 Obtainium 正式通道
+''')
+
+          # Clearly obsolete root-stage notes are not part of the 1.0 repository surface.
+          for obsolete in ["GITHUB-SECRETS-SETUP.md", "WORKFLOW-FIX-REPORT.md"]:
+              Path(obsolete).unlink(missing_ok=True)
+          PY
+
+      - name: Commit prepared 1.0 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: prepare RRBOX 1.0.0 tree"
+          git push origin HEAD:dev
