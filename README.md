@@ -4,27 +4,28 @@
 
 ![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
 ![ABI](https://img.shields.io/badge/ABI-arm64--v8a-00E5FF)
-![Release](https://img.shields.io/badge/Stable-0.9.4-2EA44F)
+![Release](https://img.shields.io/badge/Stable-0.9.5-2EA44F)
 ![Core](https://img.shields.io/badge/Core-sing--box%20libbox-161B22)
 ![Build](https://img.shields.io/badge/Build-Reproducible-6f42c1)
 
-## RRBOX 0.9.4 正式版
+## RRBOX 0.9.5 正式版
 
-0.9.4 是 0.9.3 稳定线的维护更新，重点把 **通知视觉、App 内更新、Obtainium 更新链路**统一到公开仓库 `Xiaowu7z/RR-BOX`。
+0.9.5 是通知图标修正版本，重点把通知卡片恢复为 **只使用左侧 Small Icon** 的标准布局。
 
-### 0.9.4 新增 / 修复
+### 0.9.5 修复
 
-- **通知卡片 Logo 与 App 桌面图标统一**：通知卡片使用当前 RRBOX 正式 App 图标，不再出现旧的双向箭头视觉。
-- Android 状态栏 small icon 继续使用符合系统规范的 RRBOX 单色图标。
-- Android 快速设置磁贴继续复用 RRBOX 单色状态图标，并可直接连接 / 断开。
-- **App 内“检查更新”固定读取 `RR-BOX` 最新正式 Release**。
-- App 内更新只接受 `RRBOX-x.x.x-arm64-v8a.apk` 正式资产，避免误选其他 APK。
-- **Obtainium 继续跟踪正式 Release**；0.9.3 用户可以正常识别并升级到 0.9.4。
-- CI 在发布后反查 GitHub `releases/latest` 与 0.9.4 APK 资产，验证 App 内更新和 Obtainium 的共同更新源。
+- **移除通知卡片右侧 Large Icon**：不再在通知卡片右侧显示任何图片。
+- **替换左侧 Small Icon**：使用全新的 `ic_rrbox_status` 资源，按 RRBOX 当前正式 App 图标的圆环 + R + 人像轮廓制作单色版本。
+- 使用新的资源名，避免部分 Android / OxygenOS 对旧通知图标资源的缓存干扰。
+- 快速设置磁贴同步使用新的 RRBOX 单色状态图标。
+- App 内“检查更新”继续读取 `Xiaowu7z/RR-BOX` 最新正式 Release。
+- Obtainium 继续跟踪正式 Release，0.9.4 用户可正常识别并升级到 0.9.5。
+
+> Android 的通知 Small Icon 由系统强制按单色蒙版渲染，因此它不能显示桌面图标的原始彩色效果；0.9.5 使用与桌面图标同一视觉结构的单色轮廓来保持识别一致性。
 
 ## 安装
 
-- **GitHub Releases**：下载 `RRBOX-0.9.4-arm64-v8a.apk`
+- **GitHub Releases**：下载 `RRBOX-0.9.5-arm64-v8a.apk`
 - **Obtainium 一键添加**：
 
 <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.rr.client%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FXiaowu7z%2FRR-BOX%22%2C%22author%22%3A%22Xiaowu7z%22%2C%22name%22%3A%22RRBOX%22%2C%22preferredApkIndex%22%3A0%2C%22additionalSettings%22%3A%22%7B%5C%22includePrereleases%5C%22%3Afalse%2C%5C%22fallbackToOlderReleases%5C%22%3Atrue%2C%5C%22apkFilterRegEx%5C%22%3A%5C%22RRBOX-%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B-arm64-v8a%5C%5C%5C%5C.apk%24%5C%22%2C%5C%22autoApkFilterByArch%5C%22%3Atrue%7D%22%2C%22overrideSource%22%3A%22GitHub%22%2C%22allowIdChange%22%3Afalse%7D"><img alt="Add to Obtainium" src="https://img.shields.io/badge/Add_to_Obtainium-6750A3?style=for-the-badge"></a>
@@ -139,7 +140,7 @@ AnyTLS、NaiveProxy 等路径仍按独立实机回归结果决定是否标记为
 
 ---
 
-## 0.9.4 构建链
+## 0.9.5 构建链
 
 Release CI 固定：
 
@@ -150,7 +151,7 @@ Release CI 固定：
 - Gradle `8.10.2`
 - Android API 35 / Build Tools 35.0.0
 
-CI 会编译 arm64 `libbox.aar` 与 HEV JNI，执行 Release 单元测试，构建签名 APK，并验证 package、version、ABI、native libs、SRS assets、签名与更新通道。
+CI 会编译 arm64 `libbox.aar` 与 HEV JNI，执行 Release 单元测试，构建签名 APK，并验证 package、version、ABI、native libs、SRS assets、签名、通知图标布局与更新通道。
 
 ## 项目定位
 
@@ -158,4 +159,4 @@ RRBOX 的优先级始终是：
 
 **数据面正确性 > 移动网络稳定性 > 可测量性能 > 功能数量。**
 
-0.9.4 继续沿用正式稳定发布线；实验性的 HEV 数据面仍会明确标注，不会把未经同机 A/B 验证的性能推断当作结论。
+0.9.5 继续沿用正式稳定发布线；实验性的 HEV 数据面仍会明确标注，不会把未经同机 A/B 验证的性能推断当作结论。
