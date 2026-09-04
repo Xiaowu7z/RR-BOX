@@ -14,17 +14,28 @@ import com.rr.client.traffic.TrafficSpeed
 
 class RRNotificationManager(private val context: Context) {
     companion object {
-        const val CHANNEL_ID = "rrbox_status_channel"
-        const val NOTIFICATION_ID = 1001
+        const val CHANNEL_ID = "rrbox_status_channel_096"
+        const val NOTIFICATION_ID = 1006
         const val ACTION_STOP_VPN = "com.rr.client.ACTION_STOP_VPN"
         const val ACTION_RESTART_VPN = "com.rr.client.ACTION_RESTART_VPN"
+
+        private const val LEGACY_CHANNEL_ID = "rrbox_status_channel"
+        private const val LEGACY_NOTIFICATION_ID = 1001
     }
 
     private val notificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     init {
+        clearLegacyNotificationIdentity()
         createNotificationChannel()
+    }
+
+    private fun clearLegacyNotificationIdentity() {
+        notificationManager.cancel(LEGACY_NOTIFICATION_ID)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching { notificationManager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
+        }
     }
 
     private fun createNotificationChannel() {
@@ -89,11 +100,8 @@ class RRNotificationManager(private val context: Context) {
         val expandedText = "节点: $nodeTag\n下行速率: ${speed.formattedDownSpeed}\n上行速率: ${speed.formattedUpSpeed}\n已连接: $durationFormatted"
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            // This is the icon shown on the LEFT of the notification card and in the status bar.
-            // Android small icons are system-tinted monochrome masks, so this drawable mirrors
-            // the current RRBOX launcher artwork as a dedicated R + portrait silhouette.
-            .setSmallIcon(R.drawable.ic_rrbox_status)
-            // Intentionally no setLargeIcon(): the right side of the notification card stays empty.
+            .setSmallIcon(R.drawable.ic_rrbox_status_096)
+            // No LargeIcon: the right side of the notification card must stay empty.
             .setContentTitle("RRBOX · $nodeTag")
             .setContentText(collapsedText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
@@ -112,7 +120,9 @@ class RRNotificationManager(private val context: Context) {
         speed: TrafficSpeed,
         durationSeconds: Long
     ) {
-        val notification = buildNotification(nodeTag, speed, durationSeconds)
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager.notify(
+            NOTIFICATION_ID,
+            buildNotification(nodeTag, speed, durationSeconds)
+        )
     }
 }

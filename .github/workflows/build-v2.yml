@@ -1,4 +1,4 @@
-name: RRBOX 0.9.5 Build & Release (arm64-v8a)
+name: RRBOX 0.9.6 Build & Release (arm64-v8a)
 
 on:
   push:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "95"
-  VERSION_NAME: "0.9.5"
-  OUTPUT_APK_NAME: RRBOX-0.9.5-arm64-v8a.apk
+  VERSION_CODE: "96"
+  VERSION_NAME: "0.9.6"
+  OUTPUT_APK_NAME: RRBOX-0.9.6-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RRBOX 0.9.5
+    name: Build signed RRBOX 0.9.6
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -257,8 +257,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          grep -q 'versionCode = 95' app/build.gradle.kts
-          grep -q 'versionName = "0.9.5"' app/build.gradle.kts
+          grep -q 'versionCode = 96' app/build.gradle.kts
+          grep -q 'versionName = "0.9.6"' app/build.gradle.kts
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
@@ -267,8 +267,17 @@ jobs:
           grep -q 'RRQuickTileController.connect' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
           grep -q 'android.permission.BIND_QUICK_SETTINGS_TILE' app/src/main/AndroidManifest.xml
           grep -q 'android.service.quicksettings.action.QS_TILE' app/src/main/AndroidManifest.xml
-          grep -q 'android:icon="@drawable/ic_rrbox_status"' app/src/main/AndroidManifest.xml
-          grep -q 'R.drawable.ic_rrbox_status' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+
+          test "$(grep -c 'android:icon="@drawable/ic_rrbox_launcher_096"' app/src/main/AndroidManifest.xml)" -ge 3
+          grep -q 'android:logo="@drawable/ic_rrbox_launcher_096"' app/src/main/AndroidManifest.xml
+          grep -A6 'android:name=".vpn.RRVpnService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_launcher_096"'
+          grep -A6 'android:name=".vpn.RRQuickTileService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_status_096"'
+          cmp app/src/main/res/drawable-nodpi/ic_rrbox_launcher.webp app/src/main/res/drawable-nodpi/ic_rrbox_launcher_096.webp
+
+          grep -q 'CHANNEL_ID = "rrbox_status_channel_096"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'NOTIFICATION_ID = 1006' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'R.drawable.ic_rrbox_status_096' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
+          grep -q 'deleteNotificationChannel(LEGACY_CHANNEL_ID)' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           if grep -q '\.setLargeIcon' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then
             echo "ERROR: notification card must not contain a LargeIcon" >&2
             exit 1
@@ -277,7 +286,8 @@ jobs:
             echo "ERROR: notification card image decoding must stay removed" >&2
             exit 1
           fi
-          test -s app/src/main/res/drawable/ic_rrbox_status.xml
+          test -s app/src/main/res/drawable/ic_rrbox_status_096.xml
+
           grep -q 'REPOSITORY = "RR-BOX"' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
           grep -q 'releases/latest' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
           grep -q 'isSupportedApkAsset' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
@@ -313,9 +323,10 @@ jobs:
             | tee dist/PACKAGE-REPORT.txt
 
           grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-          grep -q "versionCode='95'" dist/PACKAGE-REPORT.txt
-          grep -q "versionName='0.9.5'" dist/PACKAGE-REPORT.txt
+          grep -q "versionCode='96'" dist/PACKAGE-REPORT.txt
+          grep -q "versionName='0.9.6'" dist/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
+          grep -q "application: label='RRBOX' icon='res/" dist/PACKAGE-REPORT.txt
 
           unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
@@ -337,12 +348,12 @@ jobs:
           hev_size="$(unzip -l "$output_apk" | awk '/libhev-socks5-tunnel\.so/ {print $1; exit}')"
 
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.9.5 Stable Build Report
+          # RRBOX 0.9.6 Stable Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package: com.rr.client
-          - Version code: 95
-          - Version name: 0.9.5
+          - Version code: 96
+          - Version name: 0.9.6
           - ABI: arm64-v8a
           - APK: ${OUTPUT_APK_NAME}
           - APK size: ${apk_size} bytes
@@ -351,16 +362,15 @@ jobs:
           - sing-box: ${SING_BOX_TAG} / ${SING_BOX_COMMIT}
           - HEV: ${HEV_COMMIT}
           - HEV native APK entry size: ${hev_size} bytes
-          - Forwarding engines: System TUN + HEV native/lwIP TUN-to-SOCKS
-          - Quick Settings: RRBOX toggle tile registered
-          - Notification left Small Icon: RRBOX ring + R + portrait monochrome artwork
+          - Application/MainActivity/VpnService icon: refreshed RRBOX launcher artwork resource
+          - Notification left Small Icon: refreshed RRBOX monochrome resource
           - Notification right Large Icon: none
+          - Notification channel/id: refreshed to bypass stale SystemUI identity
           - App update source: GitHub releases/latest, official arm64 APK only
           - Obtainium source: Xiaowu7z/RR-BOX stable releases
-          - QR import: camera scanner + image-file QR decoding
-          - CI: unit tests, signed Release, package/version/ABI/native/rule/notification/update-channel validation passed
+          - CI: unit tests, signed Release, package/version/ABI/native/rule/icon/update-channel validation passed
 
-          RRBOX 0.9.5 is a stable notification-icon correction release. HEV remains an optional experimental data plane; System TUN is the stable baseline.
+          RRBOX 0.9.6 targets OEM/SystemUI icon caching and VPN service icon selection while preserving the exact RRBOX launcher artwork.
           EOF
 
           cp build-reports/LIBBOX-SHA256.txt dist/
@@ -374,57 +384,54 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.9.5-arm64-v8a
+          name: RRBOX-0.9.6-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
-      - name: Publish RRBOX 0.9.5 stable release
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.5') }}"
+      - name: Publish RRBOX 0.9.6 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.6') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.5
+          tag_name: v0.9.6
           target_commitish: ${{ github.sha }}
-          name: RRBOX 0.9.5 正式版
+          name: RRBOX 0.9.6 正式版
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body: |
-            ## RRBOX 0.9.5 正式版
+            ## RRBOX 0.9.6 正式版
 
-            0.9.5 修正通知卡片图标布局。
+            0.9.6 针对 OnePlus/OxygenOS/ColorOS 类 SystemUI 可能绕过 Notification Small Icon、改用应用或 VPN Service 图标的情况做强制刷新。
 
             ### 本版重点
-            - 删除通知卡片右侧新增的 Large Icon，右侧恢复为空白。
-            - 左侧 Small Icon 改用全新的 `ic_rrbox_status`，按 RRBOX 正式 App 图标的圆环 + R + 人像轮廓制作。
-            - 新资源名规避部分 Android / OxygenOS 对旧通知图标的缓存干扰。
-            - 快速设置磁贴同步使用新的 RRBOX 单色状态图标。
-            - App 内更新与 Obtainium 继续共同跟踪 `Xiaowu7z/RR-BOX` 正式 Release。
-            - CI 增加硬检查：通知代码中禁止 `.setLargeIcon` 与 `BitmapFactory`。
-
-            ### Android Small Icon 说明
-            Android 系统会把通知 Small Icon 作为单色蒙版渲染，因此无法显示桌面 App 图标的原始彩色效果；本版使用相同视觉结构的单色轮廓。
+            - RRBOX 正式 App 图标复制到全新资源 ID，视觉内容不变。
+            - Application、MainActivity、RRVpnService 显式绑定同一张新的 RRBOX 正式图标资源。
+            - 通知 Small Icon 同样改用全新资源 ID。
+            - 通知 Channel/Notification ID 全部刷新，并清理旧通知 Channel/ID，规避 SystemUI 缓存旧箭头。
+            - 右侧 Large Icon 继续保持完全移除。
+            - App 内更新与 Obtainium 继续共同跟踪正式 Release。
 
             ### 安装
-            下载 `RRBOX-0.9.5-arm64-v8a.apk`。Release 同时附带 SHA-256、签名报告、构建报告与 Obtainium 配置。
+            下载 `RRBOX-0.9.6-arm64-v8a.apk`。安装升级后请重新连接一次 VPN，让系统建立新的通知/VPN 服务图标身份。
           files: |
-            dist/RRBOX-0.9.5-arm64-v8a.apk
+            dist/RRBOX-0.9.6-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
             dist/obtainium.json
 
       - name: Verify App and Obtainium update channels
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.5') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.6') }}"
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          expected_tag="v0.9.5"
-          expected_apk="RRBOX-0.9.5-arm64-v8a.apk"
+          expected_tag="v0.9.6"
+          expected_apk="RRBOX-0.9.6-arm64-v8a.apk"
           latest_tag=""
 
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
