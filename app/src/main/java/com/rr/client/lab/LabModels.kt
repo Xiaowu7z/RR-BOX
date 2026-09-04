@@ -130,7 +130,7 @@ data class EngineBenchmarkSample(
 }
 
 data class EngineBenchmarkReport(
-    val benchmarkVersion: Int = 8,
+    val benchmarkVersion: Int = 9,
     val timestamp: Long = System.currentTimeMillis(),
     val nodeTag: String,
     val nodeServerMasked: String,
@@ -170,13 +170,16 @@ data class EngineHistoryStats(
     val httpsSuccessRounds: Int,
     val tlsMillis: MetricStats? = null,
     val cpuMillis: MetricStats? = null,
-    val pssDeltaKb: MetricStats? = null
+    val pssDeltaKb: MetricStats? = null,
+    val accountingWaitMillis: MetricStats? = null
 )
 
 data class BenchmarkHistoryStats(
     val runs: Int,
     val system: EngineHistoryStats,
-    val hev: EngineHistoryStats
+    val hev: EngineHistoryStats,
+    val systemFirstRuns: Int = 0,
+    val hevFirstRuns: Int = 0
 )
 
 fun calculateMetricStats(values: List<Long>): MetricStats? {
@@ -203,10 +206,10 @@ fun calculateMetricStats(values: List<Long>): MetricStats? {
 }
 
 fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHistoryStats? {
-    // v2.6 keeps the proven v2.5 traffic path but adds settled accounting and alternating engine
-    // order. Only v2.6+ records are mixed so the new memory/order methodology remains comparable.
+    // v2.7 changes restart timing to service-internal timestamps and bounds accounting wait, so only
+    // v2.7+ records are mixed for statistical comparison.
     val reports = history.filter { report ->
-        report.benchmarkVersion >= 8 &&
+        report.benchmarkVersion >= 9 &&
             report.system.proxyPathVerifiedCount >= 2 &&
             report.hev.proxyPathVerifiedCount >= 2 &&
             report.hev.nativePathVerifiedCount >= 2
@@ -224,6 +227,9 @@ fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHi
         val pssDeltas = samples
             .filter { it.baselinePssKb > 0 }
             .map { it.pssGrowthKb.toLong() }
+        val accountingWaits = https.mapNotNull { round ->
+            round.accountingSettleMillis.takeIf { it > 0L }
+        }
         return EngineHistoryStats(
             runs = samples.size,
             restart = calculateMetricStats(samples.map { it.restartMillis }),
@@ -237,14 +243,17 @@ fun summarizeBenchmarkHistory(history: List<EngineBenchmarkReport>): BenchmarkHi
             httpsSuccessRounds = https.size,
             tlsMillis = calculateMetricStats(https.mapNotNull { it.tlsMillis }),
             cpuMillis = calculateMetricStats(samples.map { it.processCpuMillis }),
-            pssDeltaKb = calculateMetricStats(pssDeltas)
+            pssDeltaKb = calculateMetricStats(pssDeltas),
+            accountingWaitMillis = calculateMetricStats(accountingWaits)
         )
     }
 
     return BenchmarkHistoryStats(
         runs = reports.size,
         system = summarize(reports.map { it.system }),
-        hev = summarize(reports.map { it.hev })
+        hev = summarize(reports.map { it.hev }),
+        systemFirstRuns = reports.count { it.executionOrder == "SYSTEM → HEV" },
+        hevFirstRuns = reports.count { it.executionOrder == "HEV → SYSTEM" }
     )
 }
 
@@ -271,8 +280,9 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
         return@buildString
     }
 
-    if (benchmarkVersion < 8) {
+    if (benchmarkVersion < 9) {
         val label = when {
+            benchmarkVersion >= 8 -> "v2.6"
             benchmarkVersion >= 7 -> "v2.5"
             benchmarkVersion >= 6 -> "v2.4"
             benchmarkVersion >= 5 -> "v2.3"
@@ -280,47 +290,49 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
             benchmarkVersion >= 3 -> "v2.1"
             else -> "v2"
         }
-        appendLine("RRBOX System vs HEV A/B $label 旧实验报告（不纳入 v2.6 统计）")
+        appendLine("RRBOX System vs HEV A/B $label 旧实验报告（不纳入 v2.7 统计）")
         appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
         appendLine("节点: $nodeTag ($nodeServerMasked)")
         appendLine("System 重建: ${system.restartMillis} ms")
         appendLine("HEV 重建: ${hev.restartMillis} ms")
-        appendLine("说明: v2.6 开始使用稳定落账、交替测试顺序和 PSS 基线/增量，因此旧记录仅保留查看。")
+        appendLine("说明: v2.7 开始使用 Service 内部精确重建计时和有上限的路径落账窗口，因此旧记录仅保留查看。")
         return@buildString
     }
 
-    appendLine("RRBOX System vs HEV A/B v2.6 实测报告")
+    appendLine("RRBOX System vs HEV A/B v2.7 实测报告")
     appendLine("时间: ${DateFormat.getDateTimeInstance().format(Date(timestamp))}")
     appendLine("节点: $nodeTag ($nodeServerMasked)")
     appendLine("原始引擎: $originalEngine")
-    appendLine("本轮顺序: ${executionOrder.orEmpty().ifBlank { "--" }}（成功的 v2.6 记录会自动交替顺序）")
-    appendLine("测速路径: ${helperPackage.ifBlank { "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + settled accounting" }}")
+    appendLine("本轮顺序: ${executionOrder.orEmpty().ifBlank { "--" }}（沿用 v2.6/v2.7 最近有效记录自动反转）")
+    appendLine("测速路径: ${helperPackage.ifBlank { "RRBOX UID natural VPN routing + fixed IPv4 bootstrap + bounded accounting" }}")
     appendLine("DNS: 启动前固定解析一次 IPv4，两套引擎复用同一目标；DNS 不参与 A/B 成绩")
     appendLine("HEV 测试态: 仅本轮临时纳入 RRBOX UID；不修改 127/8；sing-box 远端 socket 继续 protect(fd)")
-    appendLine("计数落账: HTTPS 完成后继续等待 sessionTraffic/native RX 稳定至少 1.4 秒，再进入下一轮")
+    appendLine("重建计时: 由 RRVpnService 内部从 launchCore 开始到数据面 READY 直接打点，不再包含 80ms 轮询误差")
+    appendLine("路径落账: HTTPS 完成后至少等待 1.2 秒；sessionTraffic/native RX 达到负载的 80% 即通过，最多等待 3.5 秒")
+    appendLine("说明: 路径计数只用于确认流量确实经过对应数据面，不作为精确 payload 字节计量")
     appendLine("代理路径预检: PASS（每个引擎先做 64 KiB；未通过不会生成本报告）")
     appendLine("HTTPS 固定下载: $probeTarget / 每轮 ${formatBytesForReport(system.downloadBytesPerRound)} × 3")
-    appendLine("UDP: v2.6 暂不纳入 A/B")
+    appendLine("UDP: v2.7 暂不纳入 A/B")
     appendLine()
 
     listOf(system, hev).forEach { sample ->
         appendLine("[${sample.engine}]")
-        appendLine("重建耗时: ${sample.restartMillis} ms")
+        appendLine("服务内数据面重建耗时: ${sample.restartMillis} ms")
         appendLine("HTTPS 成功: ${sample.httpsSuccessCount}/${sample.httpsAttemptCount}")
         appendLine("有效代理轮次: ${sample.proxyPathVerifiedCount}/${sample.httpsAttemptCount}")
         appendLine("应用侧 TCP connect 中位数: ${sample.httpsTcpMedianMillis?.let { "$it ms" } ?: "--"}（仅本地建连参考，不当作远端 RTT）")
         appendLine("TLS 中位数: ${sample.httpsTlsMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("HTTPS 首字节中位数: ${sample.httpsFirstByteMedianMillis?.let { "$it ms" } ?: "--"}")
         appendLine("固定下载中位数: ${sample.httpsDownloadMedianBps?.let(::formatRateForReport) ?: "--"}")
-        appendLine("sing-box 流量计数验证: ${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
+        appendLine("sing-box 路径验证: ${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount}")
         if (sample.engine.equals("HEV", ignoreCase = true)) {
             appendLine("HEV native TUN RX 验证: ${sample.nativePathVerifiedCount}/${sample.httpsSuccessCount}")
         }
         val baseline = if (sample.baselinePssKb > 0) sample.baselinePssKb else sample.processPssKb
         appendLine("RRBOX 进程 CPU: ${sample.processCpuMillis} ms")
         appendLine(
-            "PSS: ${formatPssMb(baseline)} → ${formatPssMb(sample.processPssKb)} " +
-                "(Δ ${formatSignedPssMb(sample.processPssKb - baseline)})"
+            "PSS 快照: ${formatPssMb(baseline)} → ${formatPssMb(sample.processPssKb)} " +
+                "(Δ ${formatSignedPssMb(sample.processPssKb - baseline)}；受 GC 影响，仅作参考)"
         )
 
         sample.httpsRounds.orEmpty().forEach { round ->
@@ -330,14 +342,14 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
                         "TCP=${round.tcpConnectMillis ?: -1}ms TLS=${round.tlsMillis ?: -1}ms " +
                         "TTFB=${round.firstByteMillis ?: -1}ms " +
                         "rate=${round.downloadBps?.let(::formatRateForReport) ?: "--"} " +
-                        "proxyCount=${formatAccounting(round.proxyAccountedDownloadBytes, round.bytesReceived)} " +
+                        "proxyPath=${formatAccounting(round.proxyAccountedDownloadBytes, round.bytesReceived)} " +
                         if (sample.engine.equals("HEV", ignoreCase = true)) {
                             "nativeRx=${formatAccounting(round.nativeAccountedDownloadBytes, round.bytesReceived)} " +
                                 "nativeVerified=${if (round.nativePathVerified) "yes" else "no"} "
                         } else {
                             ""
                         } +
-                        "settle=${round.accountingSettleMillis}ms " +
+                        "accountWait=${round.accountingSettleMillis}ms " +
                         "verified=${if (round.proxyPathVerified) "yes" else "no"}"
                 )
             } else {
@@ -350,9 +362,9 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
     }
 
     appendLine(
-        "说明: A/B v2.6 保留已通过真机验证的 v2.5 数据路径，只优化测量方法。System 按正常模式运行；HEV 实验态临时取消 RRBOX self-bypass，" +
-            "测试结束后强制恢复正常策略。每轮流量计数会等待状态流稳定后再落账，避免跨轮串账；成功的 v2.6 测试会交替 HEV→SYSTEM / SYSTEM→HEV 顺序，" +
-            "并记录 PSS 基线与测试后增量。单次报告仍可能受公网波动影响，建议至少完成 2 次交替顺序后再以历史中位数/P95 判断性能。"
+        "说明: A/B v2.7 保留已通过真机验证的 v2.5/v2.6 数据路径，只继续修正测量误差。" +
+            "Service 内部计时消除了 Runner 轮询粒度；有上限的路径落账避免全局后台流量让单轮等待延长到 4-6 秒。" +
+            "测试顺序继续自动交替，建议至少取得 SYSTEM→HEV 与 HEV→SYSTEM 各 1 次后，再看历史中位数/P95。"
     )
 }
 
