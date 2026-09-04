@@ -29,13 +29,11 @@ import kotlin.math.max
 import kotlin.math.roundToLong
 
 /**
- * Active probes used only by Network Lab A/B v2.7.
+ * Active probes used only by Network Lab A/B v2.8.
  *
- * The proven v2.5/v2.6 traffic topology is unchanged. v2.7 only changes accounting semantics:
- * sessionTraffic and HEV native RX are path validators, not byte-perfect payload meters. After the
- * HTTPS body completes we wait at least one status interval, then accept the round once both path
- * counters cover >=80% of payload. The wait is bounded so unrelated background traffic cannot keep
- * a round open for 4-6 seconds merely because the global counters keep moving.
+ * The proven v2.7 traffic and accounting topology is unchanged. v2.8 only changes the HEV
+ * benchmark arm's local SOCKS5 handshake profile; the probe itself stays identical so candidate
+ * results remain directly comparable with the v2.7 baseline.
  */
 internal object EngineBenchmarkProbe {
     const val HTTPS_HOST = "speed.cloudflare.com"
@@ -128,7 +126,7 @@ internal object EngineBenchmarkProbe {
         val pinnedDns = object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {
                 if (!hostname.equals(HTTPS_HOST, ignoreCase = true)) {
-                    throw UnknownHostException("v2.7 不允许测速重定向到其他主机: $hostname")
+                    throw UnknownHostException("v2.8 不允许测速重定向到其他主机: $hostname")
                 }
                 return listOf(target.address)
             }
@@ -151,7 +149,7 @@ internal object EngineBenchmarkProbe {
         val nonce = "${SystemClock.elapsedRealtimeNanos()}-$engine-$attempt-$downloadBytes"
         val request = Request.Builder()
             .url("https://$HTTPS_HOST/__down?bytes=$downloadBytes&rrbox=$nonce")
-            .header("User-Agent", "RRBOX-Network-Lab/2.7")
+            .header("User-Agent", "RRBOX-Network-Lab/2.8")
             .header("Accept-Encoding", "identity")
             .header("Cache-Control", "no-cache")
             .header("Connection", "close")
