@@ -54,8 +54,9 @@ class EngineBenchmarkRunner(
 
             RRLogStore.record(
                 "BENCH",
-                "开始 A/B v2.7: node=${node.tag}, original=$originalEngine, order=$orderLabel, " +
-                    "transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}, target=${target.label}"
+                "开始 A/B v2.8 latency candidate: node=${node.tag}, original=$originalEngine, order=$orderLabel, " +
+                    "transport=${EngineBenchmarkProbe.PROBE_TRANSPORT}, target=${target.label}, " +
+                    "hevCandidate=SOCKS5-pipeline+client-TFO"
             )
 
             val samples = mutableMapOf<String, EngineBenchmarkSample>()
@@ -70,13 +71,13 @@ class EngineBenchmarkRunner(
             val system = samples.getValue(PreferencesManager.TUN_ENGINE_SYSTEM)
             val hev = samples.getValue(PreferencesManager.TUN_ENGINE_HEV)
             EngineBenchmarkReport(
-                benchmarkVersion = 9,
+                benchmarkVersion = 10,
                 nodeTag = node.tag,
                 nodeServerMasked = maskHost(node.server),
                 originalEngine = originalEngine,
                 probeTarget = EngineBenchmarkProbe.HTTPS_HOST,
-                helperPackage = "${EngineBenchmarkProbe.PROBE_TRANSPORT} · ${target.label}",
-                udpTarget = "disabled-v2.7",
+                helperPackage = "${EngineBenchmarkProbe.PROBE_TRANSPORT} · ${target.label} · HEV candidate=SOCKS5 pipeline + client TFO",
+                udpTarget = "disabled-v2.8",
                 executionOrder = orderLabel,
                 system = system,
                 hev = hev
@@ -84,9 +85,9 @@ class EngineBenchmarkRunner(
                 BenchmarkHistoryStore.save(appContext, it)
                 RRLogStore.record(
                     "BENCH",
-                    "A/B v2.7 完成: order=$orderLabel target=${target.addressText} " +
+                    "A/B v2.8 完成: order=$orderLabel target=${target.addressText} " +
                         "System TTFB=${system.httpsFirstByteMedianMillis ?: -1}ms " +
-                        "HEV TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
+                        "HEV-candidate TTFB=${hev.httpsFirstByteMedianMillis ?: -1}ms"
                 )
             }
         } finally {
@@ -96,7 +97,7 @@ class EngineBenchmarkRunner(
                     .onFailure {
                         RRLogStore.record("BENCH", "恢复原始引擎失败: ${it.message.orEmpty()}")
                     }
-                onProgress("A/B v2.7 已结束")
+                onProgress("A/B v2.8 已结束")
             }
         }
     }
@@ -108,7 +109,7 @@ class EngineBenchmarkRunner(
     ): EngineBenchmarkSample {
         onProgress(
             if (includeSelfForHevBenchmark) {
-                "$engine · 正在重建 A/B 临时测试路由"
+                "$engine · 正在重建 v2.8 latency candidate"
             } else {
                 "$engine · 正在按正常模式重建引擎"
             }
@@ -201,12 +202,13 @@ class EngineBenchmarkRunner(
 
         RRLogStore.record(
             "BENCH",
-            "$engine v2.7 sample: internalRestart=${sample.restartMillis}ms " +
+            "$engine v2.8 sample: internalRestart=${sample.restartMillis}ms " +
                 "https=${sample.httpsSuccessCount}/${sample.httpsAttemptCount} " +
                 "ttfb=${sample.httpsFirstByteMedianMillis ?: -1}ms " +
                 "verified=${sample.proxyPathVerifiedCount}/${sample.httpsSuccessCount} " +
                 "nativeVerified=${sample.nativePathVerifiedCount} " +
-                "pss=${sample.baselinePssKb}->${sample.processPssKb}KB(delta=${sample.pssGrowthKb}KB)"
+                "pss=${sample.baselinePssKb}->${sample.processPssKb}KB(delta=${sample.pssGrowthKb}KB)" +
+                if (engine == PreferencesManager.TUN_ENGINE_HEV) " candidate=pipeline+tfo" else ""
         )
         return sample
     }
