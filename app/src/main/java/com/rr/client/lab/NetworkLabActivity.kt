@@ -36,11 +36,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.rr.client.RRApplication
-import com.rr.client.core.ConfigBuilder
 import com.rr.client.core.model.ProxyNode
-import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.storage.PreferencesManager
-import com.rr.client.subscription.SubscriptionParser
 import com.rr.client.subscription.model.SubProfile
 import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSampler
@@ -54,7 +51,6 @@ import com.rr.client.ui.theme.RRClientTheme
 import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
 import com.rr.client.vpn.RRVpnService
-import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -100,6 +96,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var diagnostics by remember { mutableStateOf<DiagnosticReport?>(null) }
     var diagnosticBusy by remember { mutableStateOf(false) }
+    var recoveryDrillBusy by remember { mutableStateOf(false) }
     var benchmark by remember { mutableStateOf<EngineBenchmarkReport?>(null) }
     var benchmarkBusy by remember { mutableStateOf(false) }
     var benchmarkProgress by remember { mutableStateOf<String?>(null) }
@@ -108,10 +105,14 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
     var showRawDialog by remember { mutableStateOf(false) }
     var rawValidation by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
+    suspend fun reloadProfiles() {
         profiles = withContext(Dispatchers.IO) {
             RRApplication.instance.database.profileDao().getAllProfiles().map { SubProfile.fromEntity(it) }
         }
+    }
+
+    LaunchedEffect(Unit) {
+        reloadProfiles()
         if (StartupSelfCheck.report.value == null) StartupSelfCheck.schedule(context)
     }
 
@@ -208,6 +209,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                     sessionTraffic = sessionTraffic,
                     diagnostics = diagnostics,
                     diagnosticBusy = diagnosticBusy,
+                    recoveryDrillBusy = recoveryDrillBusy,
                     selfCheck = selfCheck,
                     benchmark = benchmark,
                     benchmarkBusy = benchmarkBusy,
@@ -216,6 +218,26 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                     benchmarkHistory = benchmarkHistory,
                     rawValidation = rawValidation,
                     onRefreshDiagnostics = ::refreshDiagnostics,
+                    onRunRecoveryDrill = {
+                        if (!recoveryDrillBusy) {
+                            recoveryDrillBusy = true
+                            scope.launch {
+                                NetworkContinuityObserver.runRecoveryDrill(context)
+                                    .onSuccess { message ->
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    }
+                                    .onFailure { error ->
+                                        Toast.makeText(
+                                            context,
+                                            "恢复演练失败：${error.message ?: error.javaClass.simpleName}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                recoveryDrillBusy = false
+                                refreshDiagnostics()
+                            }
+                        }
+                    },
                     onRunBenchmark = {
                         val node = selectedNode
                         if (node != null && !benchmarkBusy) {
@@ -275,8 +297,18 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
             validation = rawValidation,
             onDismiss = { showRawDialog = false },
             onValidate = { raw ->
+                rawValidation = "正在校验并导入…"
                 scope.launch {
-                    rawValidation = withContext(Dispatchers.Default) { validateRawOutbound(raw) }
+                    val result = RawLocalNodeImporter.import(raw)
+                    rawValidation = result.fold(
+                        onSuccess = { summary ->
+                            reloadProfiles()
+                            summary.message()
+                        },
+                        onFailure = { error ->
+                            "导入失败：${error.message ?: error.javaClass.simpleName}"
+                        }
+                    )
                 }
             }
         )
@@ -293,6 +325,7 @@ private fun LabDashboard(
     sessionTraffic: SessionTraffic,
     diagnostics: DiagnosticReport?,
     diagnosticBusy: Boolean,
+    recoveryDrillBusy: Boolean,
     selfCheck: SelfCheckReport?,
     benchmark: EngineBenchmarkReport?,
     benchmarkBusy: Boolean,
@@ -301,6 +334,7 @@ private fun LabDashboard(
     benchmarkHistory: List<EngineBenchmarkReport>,
     rawValidation: String?,
     onRefreshDiagnostics: () -> Unit,
+    onRunRecoveryDrill: () -> Unit,
     onRunBenchmark: () -> Unit,
     onCopyDiagnostics: () -> Unit,
     onShareDiagnostics: () -> Unit,
@@ -361,6 +395,18 @@ private fun LabDashboard(
                     Text("导出")
                 }
             }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRunRecoveryDrill,
+                enabled = isRunning && !isStarting && !recoveryDrillBusy
+            ) {
+                Text(if (recoveryDrillBusy) "恢复演练中…" else "运行自动恢复演练")
+            }
+            Text(
+                "演练只临时暂停 RRBOX 本地数据面，不清除节点/配置/连接意图；随后走与真实切网异常完全相同的缓存恢复链。",
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelSmall
+            )
         }
 
         LabCard(title = "System vs HEV A/B v2.8 · latency candidate", icon = { Icon(Icons.Default.Science, null, tint = CyanPrimary) }) {
@@ -483,12 +529,12 @@ private fun LabDashboard(
 
         LabCard(title = "Raw sing-box Outbound", icon = { Icon(Icons.Default.Description, null, tint = CyanPrimary) }) {
             Text(
-                "RRBOX 的节点导入器支持单个 outbound JSON、outbound 数组和完整 sing-box config。这里提供高级预校验；验证通过后可在节点页用同一导入链保存，不改稳定 ConfigBuilder 路径。",
+                "支持单个 outbound、outbounds[] 和完整 sing-box config。现在会先逐个通过 sing-box 1.14 校验；全部通过后直接写入「本地节点」，重复节点自动跳过。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
             Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onOpenRawValidator) { Text("打开 Raw Outbound 校验器") }
+            OutlinedButton(onClick = onOpenRawValidator) { Text("Raw 校验并导入") }
             rawValidation?.let { Text(it, color = TextSecondary, style = MaterialTheme.typography.bodySmall) }
         }
 
@@ -697,7 +743,7 @@ private fun RawOutboundDialog(
     var raw by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Raw sing-box Outbound 校验") },
+        title = { Text("Raw sing-box 校验并导入") },
         text = {
             Column {
                 OutlinedTextField(
@@ -715,35 +761,10 @@ private fun RawOutboundDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onValidate(raw) }, enabled = raw.isNotBlank()) { Text("校验") }
+            Button(onClick = { onValidate(raw) }, enabled = raw.isNotBlank()) { Text("校验并导入") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
     )
-}
-
-private fun validateRawOutbound(raw: String): String {
-    if (raw.isBlank()) return "请输入 JSON"
-    val parsed = SubscriptionParser.parseContent(raw, SubProfile.LOCAL_PROFILE_ID, SubProfile.LOCAL_PROFILE_NAME)
-    if (parsed.isEmpty()) return "未识别到 outbound；请检查 JSON 中是否有 type/server/server_port。"
-    val valid = parsed.count { node ->
-        runCatching {
-            val config = ConfigBuilder.buildSingBoxConfig(
-                selectedNode = node,
-                allNodes = listOf(node),
-                appRoutes = emptyList(),
-                smartRouting = false,
-                perAppMode = PerAppPolicyResolver.MODE_ALL,
-                fastForwarding = false
-            )
-            Libbox.checkConfig(config)
-        }.isSuccess
-    }
-    RRLogStore.record("RAW", "Raw outbound 校验: parsed=${parsed.size}, valid=$valid")
-    return if (valid == parsed.size) {
-        "校验通过：$valid/${parsed.size} 个 outbound 可进入 RRBOX 现有 ConfigBuilder。可到节点页直接保存。"
-    } else {
-        "部分失败：$valid/${parsed.size} 个通过 sing-box 配置校验。"
-    }
 }
 
 private fun formatDuration(seconds: Long): String {
