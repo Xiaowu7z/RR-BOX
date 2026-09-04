@@ -1,4 +1,4 @@
-name: RRBOX 0.9.7 Build & Release (arm64-v8a)
+name: RRBOX 0.9.8 Build & Release (arm64-v8a)
 
 on:
   push:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "97"
-  VERSION_NAME: "0.9.7"
-  OUTPUT_APK_NAME: RRBOX-0.9.7-arm64-v8a.apk
+  VERSION_CODE: "98"
+  VERSION_NAME: "0.9.8"
+  OUTPUT_APK_NAME: RRBOX-0.9.8-arm64-v8a.apk
 
 jobs:
   build:
-    name: Build signed RRBOX 0.9.7
+    name: Build signed RRBOX 0.9.8
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -174,33 +174,35 @@ jobs:
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          grep -q 'versionCode = 97' app/build.gradle.kts
-          grep -q 'versionName = "0.9.7"' app/build.gradle.kts
+          grep -q 'versionCode = 98' app/build.gradle.kts
+          grep -q 'versionName = "0.9.8"' app/build.gradle.kts
           grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
           grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
+          grep -q 'pipeline: true' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
+          grep -q 'tcp-fastopen: true' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
+          grep -q 'TRANSPORT_WIFI' app/src/main/java/com/rr/client/lab/NetworkDiagnostics.kt
+          grep -q 'TRANSPORT_CELLULAR' app/src/main/java/com/rr/client/lab/NetworkDiagnostics.kt
           grep -q 'class RRQuickTileService' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
           grep -q 'android.permission.BIND_QUICK_SETTINGS_TILE' app/src/main/AndroidManifest.xml
 
+          # Icon/notification resources are intentionally unchanged from the validated 0.9.7 set.
           test "$(grep -c 'android:icon="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml)" -ge 3
           grep -q 'android:logo="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml
           grep -q 'android:roundIcon="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml
           grep -A6 'android:name=".vpn.RRVpnService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@mipmap/ic_rrbox_app_097"'
           grep -A6 'android:name=".vpn.RRQuickTileService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_status_097"'
           cmp app/src/main/res/drawable-nodpi/ic_rrbox_launcher.webp app/src/main/res/drawable-nodpi/ic_rrbox_launcher_097.webp
-
           test -s app/src/main/res/mipmap-anydpi-v26/ic_rrbox_app_097.xml
           test -s app/src/main/res/mipmap-anydpi-v33/ic_rrbox_app_097.xml
           grep -q '<monochrome android:drawable="@drawable/ic_rrbox_monochrome_097"' app/src/main/res/mipmap-anydpi-v33/ic_rrbox_app_097.xml
           grep -q '<monochrome android:drawable="@drawable/ic_rrbox_monochrome_097"' app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
           grep -q '@drawable/ic_rrbox_adaptive_foreground_097' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
           test -s app/src/main/res/drawable/ic_rrbox_monochrome_097.xml
-
           grep -q 'CHANNEL_ID = "rrbox_status_channel_097"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'NOTIFICATION_ID = 1007' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           grep -q 'R.drawable.ic_rrbox_status_097' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'PREVIOUS_CHANNEL_ID = "rrbox_status_channel_096"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
           if grep -q '\.setLargeIcon' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then exit 1; fi
           if grep -q 'BitmapFactory' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then exit 1; fi
 
@@ -225,8 +227,8 @@ jobs:
           "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
           "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
           grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-          grep -q "versionCode='97'" dist/PACKAGE-REPORT.txt
-          grep -q "versionName='0.9.7'" dist/PACKAGE-REPORT.txt
+          grep -q "versionCode='98'" dist/PACKAGE-REPORT.txt
+          grep -q "versionName='0.9.8'" dist/PACKAGE-REPORT.txt
           grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
           unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
           grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
@@ -239,74 +241,74 @@ jobs:
           apk_size="$(stat -c '%s' "$output_apk")"
           certificate_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' dist/SIGNATURE-REPORT.txt | head -n 1)"
           cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 0.9.7 Stable Build Report
+          # RRBOX 0.9.8 Stable Build Report
 
           - Source commit: $(git rev-parse HEAD)
           - Package: com.rr.client
-          - Version code: 97
-          - Version name: 0.9.7
+          - Version code: 98
+          - Version name: 0.9.8
           - ABI: arm64-v8a
           - APK: ${OUTPUT_APK_NAME}
           - APK size: ${apk_size} bytes
           - APK SHA-256: ${apk_sha256}
           - Signing certificate SHA-256: ${certificate_sha256}
-          - App icon: adaptive RRBOX artwork + Android 13+ monochrome layer
-          - System/OEM fallback launcher resources: RRBOX adaptive artwork
-          - VPN Service icon: RRBOX adaptive app icon
-          - Notification Small Icon: RRBOX monochrome status resource
-          - Notification Large Icon: none
+          - System engine: sing-box system TUN stable baseline
+          - HEV engine: native/lwIP + mapped DNS + SOCKS5 pipeline + best-effort client TFO
+          - Network Lab: live physical network refresh with Wi-Fi priority over cellular when both are validated
+          - App/notification icon resources: unchanged from validated 0.9.7 resources
           - Update channels: GitHub releases/latest + Obtainium
           EOF
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-0.9.7-arm64-v8a
+          name: RRBOX-0.9.8-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
-      - name: Publish RRBOX 0.9.7 stable release
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.7') }}"
+      - name: Publish RRBOX 0.9.8 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.8') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.7
+          tag_name: v0.9.8
           target_commitish: ${{ github.sha }}
-          name: RRBOX 0.9.7 正式版
+          name: RRBOX 0.9.8 正式版
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body: |
-            ## RRBOX 0.9.7 正式版
+            ## RRBOX 0.9.8 正式版
 
-            本版继续处理 OnePlus/OxygenOS 16 通知左侧仍显示旧双向箭头的问题。
+            本版完成 Network Lab 双数据面实机 A/B 研究阶段的收口，并修复 VPN 保持连接时 Wi-Fi / 蜂窝网络切换后的物理网络识别刷新问题。
 
             ### 本版重点
-            - Application、MainActivity、RRVpnService 改为标准 Android Adaptive App Icon。
-            - Android 13+ Adaptive Icon 增加 RRBOX 专用 monochrome layer。
-            - 系统常见 `mipmap/ic_launcher` / `ic_launcher_round` 同步为 RRBOX 正式图标，覆盖 OEM 绕过 Manifest 的取图路径。
-            - 通知 Small Icon、Channel、Notification ID 再次刷新。
-            - 右侧 Large Icon 继续完全移除。
+            - System TUN 继续作为默认稳定基线，不改变现有稳定路径。
+            - HEV 极速模式固化经实机 A/B 验证的高性能握手配置：SOCKS5 pipeline + best-effort client TCP Fast Open。
+            - HEV 保留 8500 MTU、mapped DNS 与 native/lwIP 数据面，并继续保留 System 一键回退。
+            - Network Lab 的 A/B 测试加入固定 IPv4、路径字节交叉验证、HEV native RX 验证、服务内重建计时与交替测试顺序。
+            - 修复 VPN 已连接时 Wi-Fi / 移动网络切换后诊断仍显示旧物理出口的问题；当 Wi-Fi 与蜂窝都有效时优先识别 Wi-Fi，Wi-Fi 不可用时回退蜂窝。
+            - 图标、状态栏 Small Icon 与通知资源沿用已经实机验证通过的 0.9.7 资源，不做无关改动。
             - App 内更新与 Obtainium 继续跟踪正式 Release。
 
-            安装后断开并重新连接一次 VPN，让 OxygenOS 重新建立通知图标身份。
+            当前正式 APK 仅发布 arm64-v8a。
           files: |
-            dist/RRBOX-0.9.7-arm64-v8a.apk
+            dist/RRBOX-0.9.8-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
             dist/obtainium.json
 
       - name: Verify App and Obtainium update channels
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.7') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 0.9.8') }}"
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          expected_tag="v0.9.7"
-          expected_apk="RRBOX-0.9.7-arm64-v8a.apk"
+          expected_tag="v0.9.8"
+          expected_apk="RRBOX-0.9.8-arm64-v8a.apk"
           latest_tag=""
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
