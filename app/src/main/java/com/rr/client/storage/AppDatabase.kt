@@ -14,6 +14,24 @@ interface ProfileDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProfile(profile: ProfileEntity)
 
+    @Query("UPDATE profiles SET name = :name WHERE id = :id")
+    suspend fun renameProfile(id: String, name: String): Int
+
+    // A refresh updates network content only. A simultaneous user rename must
+    // survive, and a deleted profile must not be recreated from an old snapshot.
+    @Query("""UPDATE profiles SET nodesJson = :nodesJson, lastUpdated = :lastUpdated,
+        uploadBytes = :uploadBytes, downloadBytes = :downloadBytes,
+        totalBytes = :totalBytes, expireTime = :expireTime WHERE id = :id""")
+    suspend fun updateSubscriptionContent(
+        id: String,
+        nodesJson: String,
+        lastUpdated: Long,
+        uploadBytes: Long,
+        downloadBytes: Long,
+        totalBytes: Long,
+        expireTime: Long
+    ): Int
+
     @Delete
     suspend fun deleteProfile(profile: ProfileEntity)
 }

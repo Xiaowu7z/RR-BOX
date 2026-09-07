@@ -1,55 +1,48 @@
 package com.rr.client.lab
 
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
-import org.junit.Assert.assertEquals
-import org.junit.After
-import org.junit.Test
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
+import com.rr.client.security.SecretRedactor
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
+import org.junit.After
+import org.junit.Assert.*
+import org.junit.Test
 
 class RRLogStoreTest {
-    @After fun resetStore() {
-        RRLogStore.setConnectionLoggingActive(false)
-        RRLogStore.clear()
-    }
+    private val store = PersistentLogStore(flushDelayMillis = 60_000)
+    @After fun closeStore() = store.closeForTests()
 
-    @Test
-    fun redactRemovesCommonSecrets() {
+    @Test fun redactRemovesCommonSecrets() {
         val raw = "uuid=123e4567-e89b-12d3-a456-426614174000 password=hello token=abc123 https://user:pass@example.com/path?key=secret"
-        val redacted = RRLogStore.redact(raw)
-
-        assertFalse(redacted.contains("123e4567-e89b-12d3-a456-426614174000"))
-        assertFalse(redacted.contains("hello"))
-        assertFalse(redacted.contains("abc123"))
-        assertFalse(redacted.contains("user:pass@"))
-        assertFalse(redacted.contains("key=secret"))
-        assertTrue(redacted.contains("<redacted>") || redacted.contains("<uuid>"))
+        val redacted = SecretRedactor.redact(raw)
+        listOf("123e4567-e89b-12d3-a456-426614174000", "hello", "abc123", "user:pass@", "key=secret")
+            .forEach { assertFalse(redacted.contains(it)) }
     }
 
-    @Test fun connectionBurstIsBoundedAndReportsDroppedRecords() = runBlocking {
-        RRLogStore.clear()
-        RRLogStore.setConnectionLoggingActive(true)
-        val timestamp = System.currentTimeMillis()
-        RRLogStore.recordConnections((0..699).map { ConnectionRouteMessage(timestamp, "connection-$it") })
-        val entries = withTimeout(3_000) { RRLogStore.entries.first { it.isNotEmpty() } }
-        assertEquals(600, entries.size)
-        assertTrue(entries.any { it.message == "connection-699" })
-        assertFalse(entries.any { it.message == "connection-0" })
-        assertTrue(entries.any { it.message.contains("省略 100 条") })
+    @Test fun sevenHundredConnectionsRetainedBeyondTheRecentUiCache() = runBlocking {
+        store.setConnectionLoggingActive(true)
+        store.recordConnections((0..699).map { ConnectionRouteMessage(1_700_000_000_000L, "connection-$it") })
+        val page = store.query(RRLogFilter(), null, 200)
+        assertEquals(700L, page.filteredCount)
+        assertEquals(600, store.entries.value.size)
+        assertEquals("connection-699", page.entries.first().message)
+        assertNull(store.state.value.error)
     }
 
-    @Test fun disablingCollectionCancelsPendingAndRejectsNewRecords() = runBlocking {
-        RRLogStore.clear()
-        RRLogStore.setConnectionLoggingActive(true)
-        val message = ConnectionRouteMessage(System.currentTimeMillis(), "must-not-be-retained")
-        RRLogStore.recordConnections(listOf(message))
-        RRLogStore.setConnectionLoggingActive(false)
-        RRLogStore.recordConnections(listOf(message))
-        RRLogStore.record(ConnectionRouteLog.CHANNEL, message.message)
-        delay(650)
-        assertTrue(RRLogStore.entries.value.isEmpty())
+    @Test fun ingressOverflowIsSeparateFromRetentionAndExplicitlyReported() = runBlocking {
+        store.setConnectionLoggingActive(true)
+        store.recordConnections((0..2999).map { ConnectionRouteMessage(1_700_000_000_000L, "connection-$it") })
+        val page = store.query(RRLogFilter(), null, 200)
+        assertEquals(2000L, page.filteredCount)
+        assertTrue(page.entries.any { it.message == "connection-2999" })
+        assertTrue(page.entries.any { it.message.contains("省略 952 条") })
+        assertTrue(store.state.value.error.orEmpty().contains("待写队列上限 2048"))
+    }
+
+    @Test fun disablingCollectionPreservesAcceptedTailAndRejectsNewRecords() = runBlocking {
+        store.setConnectionLoggingActive(true)
+        store.recordConnections(listOf(ConnectionRouteMessage(1, "accepted-before-stop")))
+        store.setConnectionLoggingActive(false)
+        store.recordConnections(listOf(ConnectionRouteMessage(2, "new-after-stop")))
+        store.record(ConnectionRouteLog.CHANNEL, "new-after-stop")
+        assertEquals(listOf("accepted-before-stop"), store.query(RRLogFilter(), null, 200).entries.map { it.message })
     }
 }

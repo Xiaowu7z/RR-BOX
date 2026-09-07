@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -75,6 +76,11 @@ import com.rr.client.qr.QrImageDecoder
 import com.rr.client.qr.QrScanActivity
 import com.rr.client.subscription.TrafficInfoDisplay
 import com.rr.client.subscription.TrafficInfoNode
+import com.rr.client.sharing.SharePayload
+import com.rr.client.sharing.SharePayloadBuilder
+import com.rr.client.sharing.SharePayloadResult
+import com.rr.client.ui.components.RenameSubscriptionDialog
+import com.rr.client.ui.components.SharePayloadDialog
 import com.rr.client.ui.theme.BlueContainer
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
@@ -92,7 +98,8 @@ data class NodeGroupUi(
     val id: String,
     val name: String,
     val nodes: List<ProxyNode>,
-    val isLocal: Boolean = false
+    val isLocal: Boolean = false,
+    val subscriptionUrl: String = ""
 )
 
 @Composable
@@ -111,7 +118,8 @@ fun NodeListScreen(
     onImportText: (String) -> Unit,
     onImportClipboard: (String) -> Unit,
     onCreateManualNode: (ProtocolType) -> Unit,
-    onGoToSubscription: () -> Unit
+    onGoToSubscription: () -> Unit,
+    onRenameProfile: (String, String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -119,6 +127,22 @@ fun NodeListScreen(
     var showImportMethods by remember { mutableStateOf(false) }
     var showTextImport by remember { mutableStateOf(false) }
     var showManualProtocols by remember { mutableStateOf(false) }
+    var sharePayload by remember { mutableStateOf<SharePayload?>(null) }
+    var renameGroup by remember { mutableStateOf<NodeGroupUi?>(null) }
+
+    fun showShare(result: SharePayloadResult) {
+        when (result) {
+            is SharePayloadResult.Success -> sharePayload = result.payload
+            is SharePayloadResult.Failure -> Toast.makeText(context, result.reason, Toast.LENGTH_LONG).show()
+        }
+    }
+    sharePayload?.let { SharePayloadDialog(it) { sharePayload = null } }
+    renameGroup?.let { group ->
+        RenameSubscriptionDialog(group.name, onDismiss = { renameGroup = null }) { name ->
+            renameGroup = null
+            onRenameProfile(group.id, name)
+        }
+    }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.trim()?.takeIf(String::isNotEmpty)?.let(onImportText)
@@ -207,7 +231,9 @@ fun NodeListScreen(
                         GroupHeader(
                             group = group,
                             expanded = expanded[group.id] == true,
-                            onToggle = { expanded[group.id] = !(expanded[group.id] ?: false) }
+                            onToggle = { expanded[group.id] = !(expanded[group.id] ?: false) },
+                            onRename = { renameGroup = group },
+                            onShare = { showShare(SharePayloadBuilder.subscription(group.name, group.subscriptionUrl)) }
                         )
                     }
                     if (expanded[group.id] == true) {
@@ -223,7 +249,12 @@ fun NodeListScreen(
                                 onRenameNode = { name -> onRenameNode(node, name) },
                                 onEditNode = { onEditNode(node) },
                                 onResetNodeEdit = { onResetNodeEdit(node) },
-                                onDeleteLocalNode = { onDeleteLocalNode(node) }
+                                onDeleteLocalNode = { onDeleteLocalNode(node) },
+                                onShareNode = {
+                                    scope.launch {
+                                        showShare(withContext(Dispatchers.Default) { SharePayloadBuilder.node(node) })
+                                    }
+                                }
                             )
                         }
                     }
@@ -289,8 +320,15 @@ fun NodeListScreen(
 }
 
 @Composable
-private fun GroupHeader(group: NodeGroupUi, expanded: Boolean, onToggle: () -> Unit) {
+private fun GroupHeader(
+    group: NodeGroupUi,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRename: () -> Unit,
+    onShare: () -> Unit
+) {
     val accent = if (group.isLocal) CyanSecondary else CyanPrimary
+    var menuExpanded by remember(group.id) { mutableStateOf(false) }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -316,6 +354,25 @@ private fun GroupHeader(group: NodeGroupUi, expanded: Boolean, onToggle: () -> U
                     color = TextSecondary,
                     style = MaterialTheme.typography.labelSmall
                 )
+            }
+            if (!group.isLocal) {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "订阅分组操作", tint = TextSecondary)
+                    }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text("重命名分组") },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = { menuExpanded = false; onRename() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("分享订阅") },
+                            leadingIcon = { Icon(Icons.Default.Share, null) },
+                            onClick = { menuExpanded = false; onShare() }
+                        )
+                    }
+                }
             }
             Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -344,7 +401,8 @@ private fun NodeCard(
     onRenameNode: (String) -> Unit,
     onEditNode: () -> Unit,
     onResetNodeEdit: () -> Unit,
-    onDeleteLocalNode: () -> Unit
+    onDeleteLocalNode: () -> Unit,
+    onShareNode: () -> Unit
 ) {
     var menuExpanded by remember(node.id) { mutableStateOf(false) }
     var showRenameDialog by remember(node.id) { mutableStateOf(false) }
@@ -409,6 +467,11 @@ private fun NodeCard(
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                     if (trafficInfo == null) {
+                        DropdownMenuItem(
+                            text = { Text("分享节点") },
+                            leadingIcon = { Icon(Icons.Default.Share, null) },
+                            onClick = { menuExpanded = false; onShareNode() }
+                        )
                         DropdownMenuItem(
                             text = { Text("测试 Ping") },
                             leadingIcon = { Icon(Icons.Default.Speed, null) },

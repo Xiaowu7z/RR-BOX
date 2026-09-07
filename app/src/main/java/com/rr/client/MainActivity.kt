@@ -135,6 +135,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.rr.client.sharing.ShareDocumentExporter.install(this)
         updateBackgroundProtectionState()
 
         val prefs = RRApplication.instance.preferencesManager
@@ -272,7 +273,8 @@ class MainActivity : ComponentActivity() {
                             id = profile.id,
                             name = profile.name,
                             nodes = profile.nodes.mapNotNull { resolved[it.id] },
-                            isLocal = false
+                            isLocal = false,
+                            subscriptionUrl = profile.url
                         )
                     )
                 }
@@ -566,6 +568,25 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        fun renameProfile(profileId: String, requestedName: String) {
+            val name = requestedName.trim()
+            if (name.isEmpty() || name.length > 80) {
+                toast("订阅分组名称请输入 1–80 个字符")
+                return
+            }
+            if (subProfiles.none { it.id == profileId && !it.isLocal }) return
+            lifecycleScope.launch {
+                try {
+                    val changed = withContext(Dispatchers.IO) { db.profileDao().renameProfile(profileId, name) }
+                    toast(if (changed > 0) "已重命名为「$name」" else "订阅已被移除")
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    toast("分组名称保存失败，请重试")
+                }
+            }
+        }
+
         fun refreshProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
             if (profileId in refreshingIds) return
@@ -576,7 +597,24 @@ class MainActivity : ComponentActivity() {
                     val (newNodes, userInfo) = SubscriptionFetcher().fetchSubscription(existing.url, existing.id, existing.name).getOrThrow()
                     val reconciled = SubscriptionNodeReconciler.reconcile(existing.nodes, newNodes)
                     val updated = existing.copy(lastUpdated = System.currentTimeMillis(), nodes = reconciled, userInfo = userInfo)
-                    withContext(Dispatchers.IO) { db.profileDao().insertProfile(updated.toEntity()) }
+                    val entity = updated.toEntity()
+                    val changed = withContext(Dispatchers.IO) {
+                        // A concurrent rename must survive an in-flight subscription download.
+                        // Updating existing content also cannot resurrect a deleted group.
+                        db.profileDao().updateSubscriptionContent(
+                            id = entity.id,
+                            nodesJson = entity.nodesJson,
+                            lastUpdated = entity.lastUpdated,
+                            uploadBytes = entity.uploadBytes,
+                            downloadBytes = entity.downloadBytes,
+                            totalBytes = entity.totalBytes,
+                            expireTime = entity.expireTime
+                        )
+                    }
+                    if (changed == 0) {
+                        toast("订阅已被移除，未保存本次更新")
+                        return@launch
+                    }
                     val retained = reconciled.mapTo(hashSetOf()) { it.id }
                     existing.nodes.filterNot { it.id in retained }.forEach { prefs.clearNodeOverride(it.id) }
                     toast("「${existing.name}」更新成功：${newNodes.size} 个节点")
@@ -718,6 +756,7 @@ class MainActivity : ComponentActivity() {
                         onPingAll = ::pingAllNodes,
                         onPingNode = ::pingNode,
                         onRenameNode = ::renameNode,
+                        onRenameProfile = ::renameProfile,
                         onEditNode = { node -> editingNode = node },
                         onResetNodeEdit = { node ->
                             lifecycleScope.launch {
@@ -776,6 +815,7 @@ class MainActivity : ComponentActivity() {
                         adding = addingProfile,
                         onAddProfile = { name, url -> addProfile(name, url) },
                         onRefreshProfile = { id -> refreshProfile(id) },
+                        onRenameProfile = ::renameProfile,
                         onDeleteProfile = { id -> deleteProfile(id) }
                     )
 

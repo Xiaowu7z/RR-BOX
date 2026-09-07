@@ -5,104 +5,53 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
 object RRLogStore {
-    private const val MAX_LINES = 600
-    private const val MAX_MESSAGE_LENGTH = 4096
-    private val routeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val pendingRoutes = ArrayDeque<LabLogEntry>()
-    private var pendingDropped = 0
-    private var publishJob: Job? = null
-    private val _connectionLoggingActive = MutableStateFlow(false)
-    val connectionLoggingActive: StateFlow<Boolean> = _connectionLoggingActive.asStateFlow()
-    private val _entries = MutableStateFlow<List<LabLogEntry>>(emptyList())
-    val entries: StateFlow<List<LabLogEntry>> = _entries.asStateFlow()
+    private val store = PersistentLogStore()
+    val state = store.state
+    /** Compatibility cache only: use query/export for the complete retained history. */
+    val entries = store.entries
+    val connectionLoggingActive = store.connectionLoggingActive
 
-    @Synchronized
-    fun record(channel: String, message: String) {
-        if (channel == ConnectionRouteLog.CHANNEL && !_connectionLoggingActive.value) return
-        val cleaned = redact(message.take(MAX_MESSAGE_LENGTH)).trim()
-        if (cleaned.isBlank()) return
-        val next = _entries.value + LabLogEntry(channel = channel, message = cleaned)
-        _entries.value = if (next.size > MAX_LINES) next.takeLast(MAX_LINES) else next
+    fun initialize(context: android.content.Context) {
+        val app = context.applicationContext
+        store.initialize(
+            factory = { SqliteLogStorage(java.io.File(app.noBackupFilesDir, "log-history")) },
+            stagingDirectory = { java.io.File(app.noBackupFilesDir, "log-history/exports") }
+        )
     }
 
-    @Synchronized
-    fun setConnectionLoggingActive(active: Boolean) {
-        _connectionLoggingActive.value = active
-        if (!active) {
-            publishJob?.cancel()
-            publishJob = null
-            pendingRoutes.clear()
-            pendingDropped = 0
-        }
-    }
+    fun record(channel: String, message: String) = store.record(channel, message)
+    fun recordConnections(messages: List<ConnectionRouteMessage>) = store.recordConnections(messages)
+    fun setConnectionLoggingActive(active: Boolean) = store.setConnectionLoggingActive(active)
 
-    /** No disk writes and no per-packet logs. Publish at most twice per second to Compose. */
-    @Synchronized
-    fun recordConnections(messages: List<ConnectionRouteMessage>) {
-        if (!_connectionLoggingActive.value || messages.isEmpty()) return
-        messages.forEach { message ->
-            val cleaned = redact(message.message.take(MAX_MESSAGE_LENGTH)).trim()
-            if (cleaned.isNotBlank()) {
-                if (pendingRoutes.size >= MAX_LINES) {
-                    pendingRoutes.removeFirst()
-                    pendingDropped++
-                }
-                pendingRoutes.addLast(LabLogEntry(
-                    timestamp = message.timestamp,
-                    channel = ConnectionRouteLog.CHANNEL,
-                    message = cleaned
-                ))
-            }
-        }
-        if (publishJob?.isActive != true) {
-            publishJob = routeScope.launch {
-                delay(500)
-                publishConnections()
-            }
-        }
-    }
+    suspend fun query(
+        filter: RRLogFilter = RRLogFilter(),
+        beforeId: Long? = null,
+        limit: Int = 200
+    ): RRLogPage = store.query(filter, beforeId, limit)
 
-    @Synchronized
-    private fun publishConnections() {
-        if (_connectionLoggingActive.value && pendingRoutes.isNotEmpty()) {
-            val batch = pendingRoutes.toMutableList()
-            if (pendingDropped > 0) batch.add(LabLogEntry(
-                channel = ConnectionRouteLog.CHANNEL,
-                message = "连接突发过多，本批省略 $pendingDropped 条较早记录；保留最近 $MAX_LINES 条。"
-            ))
-            _entries.value = (_entries.value + batch).sortedBy { it.timestamp }.takeLast(MAX_LINES)
-        }
-        pendingRoutes.clear()
-        pendingDropped = 0
-        publishJob = null
-    }
+    suspend fun export(output: java.io.OutputStream, filter: RRLogFilter = RRLogFilter()): Long =
+        store.export(output, filter)
 
-    @Synchronized
-    fun clear() {
-        _entries.value = emptyList()
-        pendingRoutes.clear()
-        pendingDropped = 0
-    }
+    suspend fun setRetentionLimit(limit: Int) = store.setRetentionLimit(limit)
+    suspend fun clearHistory() = store.clearHistory()
+    fun clear() { store.clear() }
 
+    /** Small selection copy retained for callers; TXT export uses the complete persistent snapshot. */
     fun exportText(selectedEntries: List<LabLogEntry> = entries.value): String = buildString {
         appendLine("RRBOX 日志中心（已自动脱敏）")
+        val date = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS XXX", java.util.Locale.ROOT)
         selectedEntries.forEach { entry ->
-            appendLine("${entry.timestamp}\t${entry.channel}\t${entry.message}")
+            appendLine("${date.format(java.util.Date(entry.timestamp))}\t${entry.timestamp}\t${redact(entry.channel)}\t${redact(entry.message)}")
         }
     }
 
     internal fun redact(input: String): String = com.rr.client.security.SecretRedactor.redact(input)
-
 }
 
 object RRLogCapture {

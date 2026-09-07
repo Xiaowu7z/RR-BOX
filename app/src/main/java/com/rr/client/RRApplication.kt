@@ -3,6 +3,7 @@ package com.rr.client
 import android.app.Application
 import android.util.Log
 import com.rr.client.lab.NetworkContinuityObserver
+import com.rr.client.lab.RRLogStore
 import com.rr.client.lab.StartupSelfCheck
 import com.rr.client.storage.AppDatabase
 import com.rr.client.storage.PreferencesManager
@@ -20,6 +21,9 @@ class RRApplication : Application() {
         super.onCreate()
         instance = this
 
+        // Start asynchronous local log storage before observers emit their first entries.
+        RRLogStore.initialize(this)
+
         initializeLibbox()
 
         database = AppDatabase.getDatabase(this)
@@ -27,7 +31,7 @@ class RRApplication : Application() {
 
         // Observability only. These collectors never participate in packet forwarding.
         // Process logcat is collected only while the lab is visible. Route metadata has its
-        // own bounded service collector and remains available while testing other apps.
+        // own service collector; history is persisted independently of the visible lab page.
         StartupSelfCheck.schedule(this)
         NetworkContinuityObserver.start(this)
     }

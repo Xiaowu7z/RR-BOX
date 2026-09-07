@@ -1,5 +1,6 @@
 package com.rr.client.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -12,15 +13,24 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rr.client.subscription.model.SubProfile
+import com.rr.client.sharing.SharePayload
+import com.rr.client.sharing.SharePayloadBuilder
+import com.rr.client.sharing.SharePayloadResult
+import com.rr.client.ui.components.RenameSubscriptionDialog
+import com.rr.client.ui.components.SharePayloadDialog
 import com.rr.client.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -32,12 +42,24 @@ fun SubscriptionScreen(
     adding: Boolean,
     onAddProfile: (name: String, url: String) -> Unit,
     onRefreshProfile: (String) -> Unit,
-    onDeleteProfile: (String) -> Unit
+    onDeleteProfile: (String) -> Unit,
+    onRenameProfile: (String, String) -> Unit
 ) {
+    val context = LocalContext.current
     var showAddForm by remember { mutableStateOf(profiles.isEmpty()) }
     var nameInput by remember { mutableStateOf("") }
     var urlInput by remember { mutableStateOf("") }
     var deleteCandidate by remember { mutableStateOf<SubProfile?>(null) }
+    var renameCandidate by remember { mutableStateOf<SubProfile?>(null) }
+    var sharePayload by remember { mutableStateOf<SharePayload?>(null) }
+
+    sharePayload?.let { SharePayloadDialog(it) { sharePayload = null } }
+    renameCandidate?.let { profile ->
+        RenameSubscriptionDialog(profile.name, onDismiss = { renameCandidate = null }) { name ->
+            renameCandidate = null
+            onRenameProfile(profile.id, name)
+        }
+    }
 
     deleteCandidate?.let { candidate ->
         AlertDialog(
@@ -199,7 +221,14 @@ fun SubscriptionScreen(
                         profile = profile,
                         busy = profile.id in busyIds,
                         onRefresh = { onRefreshProfile(profile.id) },
-                        onDelete = { deleteCandidate = profile }
+                        onDelete = { deleteCandidate = profile },
+                        onRename = { renameCandidate = profile },
+                        onShare = {
+                            when (val result = SharePayloadBuilder.subscription(profile.name, profile.url)) {
+                                is SharePayloadResult.Success -> sharePayload = result.payload
+                                is SharePayloadResult.Failure -> Toast.makeText(context, result.reason, Toast.LENGTH_LONG).show()
+                            }
+                        }
                     )
                 }
             }
@@ -212,9 +241,12 @@ private fun SubscriptionCard(
     profile: SubProfile,
     busy: Boolean,
     onRefresh: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRename: () -> Unit,
+    onShare: () -> Unit
 ) {
     val dateFmt = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
+    var menuExpanded by remember(profile.id) { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -248,6 +280,23 @@ private fun SubscriptionCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = CyanPrimary
                     )
+                }
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "订阅操作", tint = TextSecondary)
+                    }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text("重命名分组") },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = { menuExpanded = false; onRename() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("分享订阅") },
+                            leadingIcon = { Icon(Icons.Default.Share, null) },
+                            onClick = { menuExpanded = false; onShare() }
+                        )
+                    }
                 }
             }
 
