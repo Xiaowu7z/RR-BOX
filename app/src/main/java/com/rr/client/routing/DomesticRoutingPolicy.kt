@@ -7,6 +7,10 @@ package com.rr.client.routing
  * tiktok,alibaba,jd,pinduoduo,meituan,eleme,amap,baidu,didi,bilibili,bilibili-cdn,
  * xiaohongshu,kuaishou,zhihu,sina,netease,tencent-tme,unionpay,ctrip,google,youtube,openai,telegram,twitter}.
  * https://github.com/v2fly/domain-list-community/tree/9ff2d61d76ce28edb513920a2727f222793041c0/data
+ * Additional first-party supplements use the same revision's data/{deepseek,doubao,fqnovel,
+ * icbc,ccb,boc,citic,chinamobile,xiaomi-iot,huawei,tencent-games,kugou,facebook,instagram,
+ * whatsapp,threads,reddit,github,xai,vk,steam,bytedance-ai-!cn}. No installed-app inventory
+ * is embedded here: this is a generic service-domain policy, not a list of personal packages.
  *
  * These are domain-boundary suffixes, never substring/keyword or whole-package matches.
  * Do not add public cloud roots (myqcloud.com, aliyuncs.com, cloudfront.net, etc.), or all
@@ -65,9 +69,26 @@ object DomesticRoutingPolicy {
                 "telegram-cdn.org", "cdn-telegram.org", "t.me", "telegra.ph", "telesco.pe",
                 "x.com", "twitter.com", "t.co", "twimg.com", "tweetdeck.com",
                 "chat.com", "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com",
-                "sora.com"
+                "sora.com", "coze.com", "marscode.com", "trae.ai",
+                // International social / messaging / developer services.
+                "facebook.com", "facebook.net", "fb.com", "fb.me", "fb.watch", "fbcdn.net",
+                "fbsbx.com", "instagram.com", "cdninstagram.com", "ig.me", "igcdn.com",
+                "whatsapp.com", "whatsapp.net", "wa.me", "threads.com", "threads.net",
+                "reddit.com", "redd.it", "redditmedia.com", "redditstatic.com", "redditspace.com",
+                "github.com", "githubusercontent.com", "githubassets.com", "githubapp.com",
+                "github.dev", "github.io", "ghcr.io", "grok.com", "x.ai", "grokipedia.com",
+                "vk.com", "vk.ru", "vk.me", "vk.cc", "vkontakte.com", "vkontakte.ru",
+                "userapi.com", "userapi.ru", "vk-cdn.net", "vk-cdn.me", "vkuseraudio.net",
+                "vkuseraudio.com", "vkuserlive.com", "vkuservideo.net", "vkuservideo.com",
+                // Store/community/login only: leave regional Steam download endpoints to CN/IP rules.
+                "steamcommunity.com", "steampowered.com", "steamstatic.com", "steam-chat.com",
+                "steam-api.com", "steamusercontent.com", "s.team"
             ),
-            domains = listOf("wetv.qq.com")
+            domains = listOf(
+                "wetv.qq.com", "fbcdn-a.akamaihd.net", "reddit.map.fastly.net",
+                "github-cloud.s3.amazonaws.com", "github-production-release-asset-2e65be.s3.amazonaws.com",
+                "steamcommunity-a.akamaihd.net", "steamstore-a.akamaihd.net", "steammobile.akamaized.net"
+            )
         ),
         DomainRule(
             id = "wechat",
@@ -127,6 +148,38 @@ object DomesticRoutingPolicy {
                 "163.com", "126.com", "126.net", "127.net", "netease.com", "yeah.net",
                 "95516.com", "unionpay.com", "unionpay.net", "unionpaysecure.com",
                 "ctrip.com", "c-ctrip.com", "qunar.com", "qunarcdn.com", "qunarzz.com"
+            )
+        ),
+        DomainRule(
+            id = "mainland-ai-reading-music",
+            destination = Destination.DIRECT,
+            suffixes = listOf(
+                "deepseek.com", "deepseeksvc.com", "doubao.com", "doubaocdn.com", "coze.cn",
+                "qishui.com", "qishui.cn", "qishui.com.cn", "qishuimusic.cn", "qishuimusic.com.cn",
+                "fanqienovel.com", "fanqieopen.com", "fanqieopenpic.com", "fanqieopenstatic.com",
+                "fanqieopenvod.com", "fqnovel.com", "fqnovelpic.com", "fqnovelstatic.com",
+                "fqnovelvod.com", "novelfm.com", "novelfmpic.com", "novelfmstatic.com", "novelfmvod.com",
+                "kugou.com", "kugou.net", "kgimg.com", "kugouaudio.com", "kugouipv6.com"
+            ),
+            domains = listOf("p3-novel.byteimg.com", "p6-novel.byteimg.com")
+        ),
+        DomainRule(
+            id = "mainland-banking-carrier-home",
+            destination = Destination.DIRECT,
+            suffixes = listOf(
+                "95588.com", "icbc.com.cn", "ccb.com", "ccb.com.cn", "ccbcos.com",
+                "boc.cn", "ecitic.com", "citicbank.com",
+                // Bank-owned domain confirmed by https://www.gdnybank.com/IntDpContactUs/
+                "gdnybank.com", "10086.cn", "139.com", "cmpassport.com", "cmpay.com",
+                // Government identity and TP-LINK domestic platform; no global cloud-root bypass.
+                // https://tyrz.gd.gov.cn/ and https://open.tp-link.com.cn/
+                "gd.gov.cn", "gdzwfw.gov.cn", "tp-link.com.cn",
+                "miot-spec.org", "huaweistatic.com", "dbankcdn.com",
+                "qqgameapp.com", "wegame.com", "anticheatexpert.com", "17roco.com"
+            ),
+            domains = listOf(
+                // data/xiaomi-iot identifies these actual account and domestic IoT endpoints.
+                "account.xiaomi.com", "cn-ha.mqtt.io.mi.com", "ha.api.io.mi.com"
             )
         ),
         // Always available offline, even before/without a downloaded China domain list.

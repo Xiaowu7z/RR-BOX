@@ -129,7 +129,9 @@ class ConfigBuilderTest {
                 tag.asString == "geoip-cn"
             } == true
         })
-        assertFalse(rules.any { it.asJsonObject.get("type")?.asString == "logical" })
+        val chinaRules = rules.map { it.asJsonObject }.filter { it.has("rule_set") }
+        assertEquals(2, chinaRules.size)
+        assertTrue(chinaRules.all { it.get("outbound").asString == "direct" && !it.has("type") })
     }
 
     @Test

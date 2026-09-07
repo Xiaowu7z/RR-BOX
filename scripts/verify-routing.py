@@ -92,10 +92,12 @@ def check_socks_reply(sock):
 
 def tcp_exchange(port, host, target_port, payload, dns=False):
     with connect_socks(port) as sock:
-        # Pipeline the payload so sing-box sniffing never waits for a client that
-        # is itself waiting for the SOCKS handshake to finish.
-        sock.sendall(b"\x05\x01\x00" + address(host, target_port) + payload)
+        # Complete CONNECT before sending application bytes. The pinned server's
+        # buffered handshake reader does not preserve a pipelined payload. Its
+        # LazyConn.Read sends success before sniffing, so this cannot deadlock sniff.
+        sock.sendall(b"\x05\x01\x00" + address(host, target_port))
         check_socks_reply(sock)
+        sock.sendall(payload)
         if dns:
             return receive(sock, struct.unpack("!H", receive(sock, 2))[0])
         return receive(sock, 7)  # Both observer labels have six bytes plus newline.
@@ -320,6 +322,14 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def save_report(path, report):
+    report["check_count"] = sum(len(item["checks"]) for item in report["variants"])
+    report["failure_count"] = sum(not check["passed"] for variant in report["variants"] for check in variant["checks"])
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    temporary.replace(path)
+
+
 def expected_outbound(meta, group):
     if not meta["smart"] or group.get("bundled_only") and meta["rules"] != "bundled":
         return "proxy"
@@ -357,20 +367,40 @@ def tls_hello(host):
     raise AssertionError("Unexpected completed in-memory TLS handshake")
 
 
-def run_variant(binary, original, meta, cases, directory, report, observers, dns_servers):
+def run_variant(binary, original, meta, cases, directory, report, observers, dns_servers, report_path):
     port = available_port()
     config = instrument(original, port, observers, dns_servers)
     variant = {"name": meta["file"], "engine": meta["engine"], "rules": meta["rules"], "checks": [], "passed": False}
     report["variants"].append(variant)
+    consecutive_transport_errors = 0
+    transport_errors_by_kind = {}
 
     def verify(kind, host, expected, callback, group):
+        nonlocal consecutive_transport_errors
         entry = {"kind": kind, "host": host, "group": group, "expected": expected}
         variant["checks"].append(entry)
         try:
             entry["actual"] = callback()
             entry["passed"] = entry["actual"] == expected
+            consecutive_transport_errors = 0
+            transport_errors_by_kind[kind] = 0
         except Exception as error:
             entry["passed"], entry["error"] = False, str(error)
+            if isinstance(error, (OSError, EOFError)):
+                consecutive_transport_errors += 1
+                transport_errors_by_kind[kind] = transport_errors_by_kind.get(kind, 0) + 1
+            else:
+                consecutive_transport_errors = 0
+                transport_errors_by_kind[kind] = 0
+            save_report(report_path, report)
+            print(json.dumps({"variant": variant["name"], **entry}, ensure_ascii=False), flush=True)
+            # TCP and UDP probes alternate: successful UDP must not mask a broken
+            # TCP harness (or the reverse) and cause hundreds of five-second waits.
+            if consecutive_transport_errors >= 3 or transport_errors_by_kind[kind] >= 3:
+                variant["aborted"] = True
+                variant["error"] = f"Three consecutive transport errors overall or for {kind}; gate aborted without skipping failures"
+                save_report(report_path, report)
+                raise RuntimeError(f"{variant['name']}: {variant['error']}") from error
 
     with running_core(binary, config, directory, pathlib.Path(meta["file"]).stem):
         for group in cases["groups"]:
@@ -431,6 +461,7 @@ def run_variant(binary, original, meta, cases, directory, report, observers, dns
         verify("same-answer-ip-form-control", "223.5.5.5", expected_ip,
                lambda: udp_exchange(port, "223.5.5.5", 443, b"RRBOX opaque IP probe").decode().strip(), "documented-no-auto-resolve-boundary")
     variant["passed"] = all(item["passed"] for item in variant["checks"])
+    save_report(report_path, report)
     print(f"{variant['name']}: {sum(item['passed'] for item in variant['checks'])}/{len(variant['checks'])} passed", flush=True)
 
 
@@ -498,16 +529,14 @@ def main():
                         report["rule_sets"].append({"variant": meta["file"], "tag": rule["tag"], "sha256": sha256(path), "bytes": path.stat().st_size})
                     if "srs_full_decode" not in report:
                         verify_srs_decode(binary, [pathlib.Path(item["path"]) for item in original["route"]["rule_set"]], directory, report)
-                run_variant(binary, original, meta, cases, directory, report, observers, dns_servers)
+                run_variant(binary, original, meta, cases, directory, report, observers, dns_servers, args.report)
         report["passed"] = bool(report["variants"]) and all(item["passed"] for item in report["variants"])
     except Exception as error:
         report["error"] = str(error)
         if isinstance(error, subprocess.CalledProcessError):
             report["stderr"] = error.stderr
     finally:
-        report["check_count"] = sum(len(item["checks"]) for item in report["variants"])
-        report["failure_count"] = sum(not check["passed"] for variant in report["variants"] for check in variant["checks"])
-        args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+        save_report(args.report, report)
     if not report["passed"]:
         for variant in report["variants"]:
             for check in variant["checks"]:

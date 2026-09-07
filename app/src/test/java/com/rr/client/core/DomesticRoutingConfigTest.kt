@@ -160,7 +160,7 @@ class DomesticRoutingConfigTest {
         val rules = hev.getAsJsonObject("route").getAsJsonArray("rules")
         assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "resolve" })
         assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "reject" })
-        assertFalse(rules.any { it.asJsonObject.has("package_name") || it.asJsonObject.has("network") })
+        assertFalse(rules.any { it.asJsonObject.has("network") })
         assertEquals("proxy", hev.getAsJsonObject("route").get("final").asString)
     }
 }

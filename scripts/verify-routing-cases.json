@@ -16,6 +16,31 @@
     {
       "url": "https://github.com/v2fly/domain-list-community/blob/master/data/tiktok",
       "git_blob": "dd1c8d43f569b6dfaf831d320305ac79f94c0532"
+    },
+    {
+      "url": "https://github.com/v2fly/domain-list-community/tree/9ff2d61d76ce28edb513920a2727f222793041c0/data",
+      "revision": "9ff2d61d76ce28edb513920a2727f222793041c0",
+      "files": [
+        "deepseek",
+        "doubao",
+        "fqnovel",
+        "kugou",
+        "icbc",
+        "ccb",
+        "boc",
+        "citic",
+        "chinamobile",
+        "xiaomi-iot",
+        "facebook",
+        "instagram",
+        "whatsapp",
+        "threads",
+        "reddit",
+        "github",
+        "xai",
+        "vk",
+        "steam"
+      ]
     }
   ],
   "note": "Domain suffix coverage probes, including representative/synthetic subdomains. These are not captured application sessions or a complete endpoint inventory.",
@@ -200,6 +225,48 @@
         "tos-cn.bytetos.com",
         "webcast.snssdk.com",
         "wxcloudrun.com"
+      ]
+    },
+    {
+      "name": "mainland-ai-banking-home",
+      "outbound": "direct",
+      "domains": [
+        "chat.deepseek.com",
+        "api.deepseek.com",
+        "www.doubao.com",
+        "coze.cn",
+        "fanqienovel.com",
+        "webfs.kugou.com",
+        "95588.com",
+        "ibsbjstar.ccb.com",
+        "www.boc.cn",
+        "bank.ecitic.com",
+        "cmpassport.com",
+        "www.139.com",
+        "account.xiaomi.com",
+        "cn-ha.mqtt.io.mi.com",
+        "ha.api.io.mi.com"
+      ]
+    },
+    {
+      "name": "international-social-developer-and-boundaries",
+      "outbound": "proxy",
+      "domains": [
+        "www.facebook.com",
+        "cdninstagram.com",
+        "whatsapp.net",
+        "threads.net",
+        "www.reddit.com",
+        "api.github.com",
+        "raw.githubusercontent.com",
+        "grok.com",
+        "api.x.ai",
+        "vk.com",
+        "store.steampowered.com",
+        "steamcommunity.com",
+        "deepseek.com.evil.invalid",
+        "notccb.com",
+        "account.xiaomi.com.evil.invalid"
       ]
     }
   ]

@@ -11,6 +11,7 @@ import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.PerAppPolicyResolver
+import com.rr.client.routing.TikTokAppPolicy
 
 /** Stable sing-box 1.14 runtime configuration. */
 object ConfigBuilder {
@@ -92,6 +93,26 @@ object ConfigBuilder {
                     }
 
                     if (smartRouting) {
+                        // Android System can identify these clients even on a shared CDN/IP.
+                        // Do not apply the guard to local device traffic. HEV has no original
+                        // app identity and therefore continues through the domain rules below.
+                        add(JsonObject().apply {
+                            addProperty("type", "logical")
+                            addProperty("mode", "and")
+                            add("rules", JsonArray().apply {
+                                add(JsonObject().apply {
+                                    add("package_name", JsonArray().apply {
+                                        TikTokAppPolicy.proxyPackages.forEach(::add)
+                                    })
+                                })
+                                add(JsonObject().apply {
+                                    addProperty("ip_is_private", true)
+                                    addProperty("invert", true)
+                                })
+                            })
+                            addProperty("action", "route")
+                            addProperty("outbound", TAG_PROXY)
+                        })
                         addDomainRoutingRules(this)
 
                         add(JsonObject().apply {
