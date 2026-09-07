@@ -1,5 +1,6 @@
 package com.rr.client.core
 
+import com.rr.client.vpn.NetworkContinuityMonitor
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.VpnService
@@ -51,8 +52,10 @@ class BoxServiceWrapper(
     private var tunPfd: ParcelFileDescriptor? = null
     private var vpnService: VpnService? = null
     private var lastConfigJson: String? = null
-    private var isRunning = false
-    private var isStopping = false
+    @Volatile private var isRunning = false
+    @Volatile private var isStopping = false
+
+    private var interfaceMonitor: NetworkContinuityMonitor? = null
 
     private val recentLogs = ArrayDeque<String>()
 
@@ -60,7 +63,8 @@ class BoxServiceWrapper(
     var lastError: String? = null
         private set
 
-    private fun recordLog(line: String) {
+    private fun recordLog(rawLine: String) {
+        val line = com.rr.client.security.SecretRedactor.redact(rawLine)
         synchronized(recentLogs) {
             recentLogs.addLast(line)
             while (recentLogs.size > 12) recentLogs.removeFirst()
@@ -135,6 +139,8 @@ class BoxServiceWrapper(
         if (isStopping) return
         isStopping = true
         isRunning = false
+        interfaceMonitor?.stop()
+        interfaceMonitor = null
 
         runCatching { commandClient?.disconnect() }
             .onFailure { Log.w(TAG, "disconnect command client failed", it) }
@@ -282,53 +288,35 @@ class BoxServiceWrapper(
     }
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        interfaceMonitor?.stop()
         val vpn = vpnService
         if (vpn == null) {
             listener.updateDefaultInterface("", -1, false, false)
             return
         }
-
-        val connectivity = vpn.getSystemService(ConnectivityManager::class.java)
-
-        fun isUsablePhysicalNetwork(network: android.net.Network): Boolean {
-            val capabilities = connectivity.getNetworkCapabilities(network) ?: return false
-            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-        }
-
-        val activePhysical = connectivity.activeNetwork?.takeIf(::isUsablePhysicalNetwork)
-        val network = activePhysical
-            ?: connectivity.allNetworks.firstOrNull { candidate ->
-                val capabilities = connectivity.getNetworkCapabilities(candidate)
-                isUsablePhysicalNetwork(candidate) &&
-                    capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-            }
-            ?: connectivity.allNetworks.firstOrNull(::isUsablePhysicalNetwork)
-
-        val linkProperties = network?.let(connectivity::getLinkProperties)
-        val interfaceName = linkProperties?.interfaceName.orEmpty()
-        val networkInterface = runCatching {
-            interfaceName.takeIf(String::isNotBlank)?.let(JavaNetworkInterface::getByName)
-        }.getOrNull()
-
-        if (networkInterface == null) {
-            Log.w(TAG, "No physical default interface available")
-            listener.updateDefaultInterface("", -1, false, false)
-            return
-        }
-
-        val capabilities = network?.let(connectivity::getNetworkCapabilities)
-        val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
-        listener.updateDefaultInterface(
-            networkInterface.name,
-            networkInterface.index,
-            metered,
-            false
-        )
-        recordLog("默认物理出口：${networkInterface.name} (${networkInterface.index})")
+        // libbox needs ongoing interface updates, not just a startup snapshot.
+        // Reuse the same physical-network policy as the continuity guard.
+        interfaceMonitor = NetworkContinuityMonitor(vpn) { path ->
+            runCatching {
+                val networkInterface = path?.interfaceName?.takeUnless { it == "--" }
+                    ?.let { runCatching { JavaNetworkInterface.getByName(it) }.getOrNull() }
+                if (path == null || networkInterface == null) {
+                    listener.updateDefaultInterface("", -1, false, false)
+                } else {
+                    val capabilities = vpn.getSystemService(ConnectivityManager::class.java)
+                        .getNetworkCapabilities(path.network)
+                    val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
+                    listener.updateDefaultInterface(networkInterface.name, networkInterface.index, metered, false)
+                    recordLog("默认物理出口：${networkInterface.name} (${networkInterface.index})")
+                }
+            }.onFailure { Log.w(TAG, "Default interface notification failed", it) }
+        }.also { it.start() }
     }
 
-    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) = Unit
+    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        interfaceMonitor?.stop()
+        interfaceMonitor = null
+    }
 
     override fun getInterfaces(): NetworkInterfaceIterator {
         val vpn = vpnService

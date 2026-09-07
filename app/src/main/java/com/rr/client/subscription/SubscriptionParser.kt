@@ -48,6 +48,7 @@ object SubscriptionParser {
         profileId: String,
         profileName: String
     ): List<ProxyNode> {
+        require(rawContent.length <= ImportLimits.MAX_BYTES) { "导入内容过大，最多允许 8 MiB" }
         val trimmed = rawContent.trim().removePrefix("\uFEFF")
         if (trimmed.isBlank()) return emptyList()
 
@@ -180,6 +181,7 @@ object SubscriptionParser {
         }
 
         val password = objString(obj, "password")
+            .ifBlank { objString(obj, "psk") }
             .ifBlank { objString(obj, "auth_str") }
             .ifBlank { objString(obj, "private_key") }
         val uuid = objString(obj, "uuid")
@@ -202,6 +204,7 @@ object SubscriptionParser {
             host = objString(headers, "Host").ifBlank { objString(headers, "host") },
             alpn = alpn,
             tlsEnabled = tls != null && (!tls.has("enabled") || objBoolean(tls, "enabled")),
+            allowInsecure = objBoolean(tls, "insecure"),
             ssMethod = objString(obj, "method"),
             obfs = objString(obfsObject, "type").ifBlank { objString(obj, "obfs") },
             obfsPassword = objString(obfsObject, "password")
@@ -266,6 +269,7 @@ object SubscriptionParser {
             host = uri.getQueryParameter("host").orEmpty(),
             alpn = uri.getQueryParameter("alpn").orEmpty(),
             tlsEnabled = isReality || security.equals("tls", true),
+            allowInsecure = queryBoolean(uri, "insecure") || queryBoolean(uri, "allowInsecure") || queryBoolean(uri, "skip-cert-verify"),
             profileId = profileId,
             profileName = profileName
         )
@@ -288,6 +292,7 @@ object SubscriptionParser {
             obfs = uri.getQueryParameter("obfs").orEmpty(),
             obfsPassword = uri.getQueryParameter("obfs-password") ?: uri.getQueryParameter("obfsPassword") ?: "",
             hoppingPorts = hopping,
+            allowInsecure = queryBoolean(uri, "insecure") || queryBoolean(uri, "allowInsecure") || queryBoolean(uri, "skip-cert-verify"),
             profileId = profileId,
             profileName = profileName
         )
@@ -330,6 +335,7 @@ object SubscriptionParser {
             extraPassword = password,
             sni = uri.getQueryParameter("sni") ?: host,
             alpn = uri.getQueryParameter("alpn").orEmpty(),
+            allowInsecure = queryBoolean(uri, "insecure") || queryBoolean(uri, "allowInsecure") || queryBoolean(uri, "skip-cert-verify"),
             profileId = profileId,
             profileName = profileName
         )
@@ -350,6 +356,7 @@ object SubscriptionParser {
             path = uri.getQueryParameter("path").orEmpty(),
             host = uri.getQueryParameter("host").orEmpty(),
             alpn = uri.getQueryParameter("alpn").orEmpty(),
+            allowInsecure = queryBoolean(uri, "insecure") || queryBoolean(uri, "allowInsecure") || queryBoolean(uri, "skip-cert-verify"),
             profileId = profileId,
             profileName = profileName
         )
@@ -538,6 +545,7 @@ object SubscriptionParser {
             host = objString(obj, "host"),
             alpn = objString(obj, "alpn"),
             tlsEnabled = objString(obj, "tls").equals("tls", true),
+            allowInsecure = objBoolean(obj, "allowInsecure") || objBoolean(obj, "insecure"),
             profileId = profileId,
             profileName = profileName
         )

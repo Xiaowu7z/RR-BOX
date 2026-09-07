@@ -118,7 +118,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
 
     val baseNodes = remember(profiles) { profiles.flatMap { it.nodes } }
     val resolvedNodes = remember(baseNodes, nodeOverrides) {
-        baseNodes.map { nodeOverrides[it.id] ?: it }
+        baseNodes.map { com.rr.client.core.NodeOverridePatcher.resolve(it, nodeOverrides[it.id]) }
     }
     val selectedNode = resolvedNodes.firstOrNull { it.id == selectedNodeId } ?: resolvedNodes.firstOrNull()
 

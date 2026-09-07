@@ -11,6 +11,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.core.NodeOverridePatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -185,6 +186,21 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun resetPinFailures() {
         context.dataStore.edit { it[PIN_FAILED_ATTEMPTS] = 0 }
+    }
+
+    suspend fun migrateNameOnlyOverrides(baseNodes: List<ProxyNode>) {
+        context.dataStore.edit { preferences ->
+            val current = decodeNodeOverrides(preferences[NODE_OVERRIDES_JSON]).toMutableMap()
+            var changed = false
+            baseNodes.forEach { base ->
+                val override = current[base.id]
+                if (override != null && !override.nameOverrideOnly && NodeOverridePatcher.isNameOnlyEdit(base, override)) {
+                    current[base.id] = override.copy(nameOverrideOnly = true)
+                    changed = true
+                }
+            }
+            if (changed) preferences[NODE_OVERRIDES_JSON] = gson.toJson(current)
+        }
     }
 
     suspend fun setNodeOverride(node: ProxyNode) {

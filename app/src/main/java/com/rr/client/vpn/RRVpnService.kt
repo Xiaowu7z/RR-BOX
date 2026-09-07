@@ -42,7 +42,7 @@ class RRVpnService : VpnService() {
     private var startJob: Job? = null
     private var stopping = false
     private var sessionPersisted = false
-    private var requestGeneration = 0L
+    @Volatile private var requestGeneration = 0L
 
     /** Always the canonical stable system-TUN config, never the HEV-adapted config. */
     private var activeConfigJson: String? = null
@@ -83,6 +83,7 @@ class RRVpnService : VpnService() {
 
         private var serviceRef: WeakReference<RRVpnService>? = null
 
+        const val EXTRA_RECOVERY_REQUEST = "EXTRA_RECOVERY_REQUEST"
         const val EXTRA_CONFIG_JSON = "EXTRA_CONFIG_JSON"
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
@@ -118,7 +119,11 @@ class RRVpnService : VpnService() {
             onLogReceived = { line -> Log.d(TAG, line) },
             onStatusUpdate = { status ->
                 if (status.trafficAvailable) {
-                    handleRealTrafficStatus(status.uplinkTotal, status.downlinkTotal)
+                    val up = status.uplinkTotal
+                    val down = status.downlinkTotal
+                    serviceScope.launch {
+                        if (_isRunning.value && !_isStarting.value && !stopping) handleRealTrafficStatus(up, down)
+                    }
                 }
             }
         )
@@ -149,6 +154,8 @@ class RRVpnService : VpnService() {
                 if (config.isNullOrBlank()) {
                     _lastError.value = "没有当前运行配置可供切换转发引擎"
                     Log.e(TAG, _lastError.value.orEmpty())
+                    ensureForeground("RRBOX · 无可用运行配置")
+                    stopVpn(persistTraffic = false)
                     return START_NOT_STICKY
                 }
                 VpnConnectionIntentStore.setDesiredRunning(this, true)
@@ -168,6 +175,14 @@ class RRVpnService : VpnService() {
             }
 
             RRNotificationManager.ACTION_RESTART_VPN -> {
+                if (intent.getBooleanExtra(EXTRA_RECOVERY_REQUEST, false) &&
+                    !VpnConnectionIntentStore.isDesiredRunning(this)) {
+                    if (!_isRunning.value && !_isStarting.value) {
+                        ensureForeground("RRBOX · 已取消恢复")
+                        stopVpn(persistTraffic = false)
+                    }
+                    return START_NOT_STICKY
+                }
                 intent.getStringExtra(EXTRA_CONFIG_JSON)?.takeIf(String::isNotBlank)?.let {
                     activeConfigJson = it
                 }
@@ -183,6 +198,8 @@ class RRVpnService : VpnService() {
                 if (config.isNullOrBlank()) {
                     _lastError.value = "没有当前运行配置可供重启"
                     Log.e(TAG, _lastError.value.orEmpty())
+                    ensureForeground("RRBOX · 无可用运行配置")
+                    stopVpn(persistTraffic = false)
                     return START_NOT_STICKY
                 }
 
@@ -203,7 +220,7 @@ class RRVpnService : VpnService() {
 
         val hasLiveDataPlane = _isRunning.value || _isStarting.value ||
             boxCore?.isCoreRunning() == true || hevEngine?.isRunning == true
-        val duplicateEquivalentStart = hasLiveDataPlane &&
+        val duplicateEquivalentStart = !stopping && hasLiveDataPlane &&
             !configJson.isNullOrBlank() &&
             configJson == activeConfigJson
 
@@ -332,8 +349,10 @@ class RRVpnService : VpnService() {
                     success = true,
                     engine = activeEngine
                 )
+                val cacheNodeTag = activeNodeTag
+                val cacheNodeId = activeNodeId
                 serviceScope.launch(Dispatchers.IO) {
-                    refreshRuntimeCache(stableConfigJson)
+                    refreshRuntimeCache(stableConfigJson, cacheNodeTag, cacheNodeId, generation)
                 }
                 Log.i(
                     TAG,
@@ -378,7 +397,7 @@ class RRVpnService : VpnService() {
         }
     }
 
-    private suspend fun refreshRuntimeCache(stableConfigJson: String) {
+    private suspend fun refreshRuntimeCache(stableConfigJson: String, nodeTag: String, nodeId: String, generation: Long) {
         runCatching {
             val prefs = RRApplication.instance.preferencesManager
             val perAppMode = prefs.perAppMode.first()
@@ -387,11 +406,12 @@ class RRVpnService : VpnService() {
                 PerAppPolicyResolver.MODE_DISALLOW_LIST -> prefs.bypassSelectedAppPackages.first()
                 else -> emptySet()
             }
+            if (generation != requestGeneration) return
             VpnRuntimeStateStore(this).save(
                 VpnRuntimeState(
                     configJson = stableConfigJson,
-                    nodeTag = activeNodeTag,
-                    nodeId = activeNodeId,
+                    nodeTag = nodeTag,
+                    nodeId = nodeId,
                     perAppMode = perAppMode,
                     selectedPackages = selectedPackages,
                     smartRouting = prefs.smartRouting.first(),
@@ -438,7 +458,9 @@ class RRVpnService : VpnService() {
         startJob = null
         serviceScope.launch {
             withContext(Dispatchers.IO) {
-                coreMutex.withLock { stopDataPlane() }
+                coreMutex.withLock {
+                    if (generation == requestGeneration) stopDataPlane()
+                }
             }
             if (generation != requestGeneration) return@launch
             _isStarting.value = false
@@ -556,7 +578,7 @@ class RRVpnService : VpnService() {
     private fun stopVpn(persistTraffic: Boolean) {
         if (stopping) return
         stopping = true
-        ++requestGeneration
+        val generation = ++requestGeneration
         startJob?.cancel()
         startJob = null
 
@@ -564,10 +586,13 @@ class RRVpnService : VpnService() {
         serviceScope.launch {
             withContext(Dispatchers.IO) {
                 coreMutex.withLock {
+                    if (generation != requestGeneration) return@withLock
                     if (persistTraffic) persistSessionOnce(finalSession)
+                    if (generation != requestGeneration) return@withLock
                     stopDataPlane()
                 }
             }
+            if (generation != requestGeneration) return@launch
             activeConfigJson = null
             activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             _isStarting.value = false

@@ -68,6 +68,7 @@ object AnyTlsLinkParser {
             sni = sni,
             alpn = alpnValues.joinToString(","),
             tlsEnabled = true,
+            allowInsecure = insecure,
             profileId = profileId,
             profileName = profileName,
             rawJson = outbound.toString()
@@ -117,7 +118,7 @@ object AnyTlsLinkParser {
         else -> false
     }
 
-    private fun percentDecode(value: String): String = runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8.name()) }.getOrDefault(value)
+    private fun percentDecode(value: String): String = runCatching { URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8.name()) }.getOrDefault(value)
 
     private fun decodeBase64Payload(raw: String): String? {
         val compact = raw.filterNot(Char::isWhitespace)

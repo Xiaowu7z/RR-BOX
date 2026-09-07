@@ -49,29 +49,25 @@ object RawLocalNodeImporter {
             }
 
             val app = RRApplication.instance
-            val profiles = app.database.profileDao().getAllProfiles().map { SubProfile.fromEntity(it) }
-            val existing = profiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
-            val identities = existing.map(::identity).toMutableSet()
-
-            val additions = parsed.mapNotNull { candidate ->
-                val normalized = candidate.copy(
-                    id = "local-${UUID.randomUUID()}",
-                    profileId = SubProfile.LOCAL_PROFILE_ID,
-                    profileName = SubProfile.LOCAL_PROFILE_NAME
-                )
-                normalized.takeIf { identities.add(identity(it)) }
-            }
-
-            if (additions.isNotEmpty()) {
-                app.database.profileDao().insertProfile(
-                    SubProfile.local(existing + additions).toEntity()
-                )
+            var added = 0
+            com.rr.client.storage.LocalProfileStore.update(app.database) { existing ->
+                val identities = existing.map(com.rr.client.core.NodeIdentity::key).toMutableSet()
+                val additions = parsed.mapNotNull { candidate ->
+                    val normalized = candidate.copy(
+                        id = "local-${UUID.randomUUID()}",
+                        profileId = SubProfile.LOCAL_PROFILE_ID,
+                        profileName = SubProfile.LOCAL_PROFILE_NAME
+                    )
+                    normalized.takeIf { identities.add(com.rr.client.core.NodeIdentity.key(it)) }
+                }
+                added = additions.size
+                existing + additions
             }
 
             val result = RawLocalImportResult(
                 parsed = parsed.size,
-                added = additions.size,
-                duplicates = parsed.size - additions.size
+                added = added,
+                duplicates = parsed.size - added
             )
             RRLogStore.record(
                 "RAW",
@@ -92,9 +88,6 @@ object RawLocalNodeImporter {
         )
         Libbox.checkConfig(config)
     }.isSuccess
-
-    private fun identity(node: ProxyNode): String = node.rawJson.takeIf(String::isNotBlank)
-        ?: "${node.type}|${node.server}|${node.serverPort}|${node.uuidOrPassword}|${node.extraPassword}"
 
     private const val MAX_IMPORT_NODES = 256
 }

@@ -1,6 +1,6 @@
 # RRBOX 1.0 技术验证记录
 
-本文只记录可以由源码、CI 或真实设备日志支撑的工程事实。
+本文保留项目在 1.0 封板前登记的设备测量，并区分本次源码审查与历史实测。原始设备日志不随本仓库完整归档；本次没有重新开展实机 A/B。
 
 ## 双数据面
 
@@ -39,7 +39,7 @@
 
 ## Quick Settings
 
-快捷开关命中 Runtime Cache 后，跳过数据库扫描、应用枚举和完整规则构建。真实设备记录过 4 ms、11 ms、13 ms、14 ms、21 ms 的配置准备时间；完整 VPN 数据面启动仍受 Android VpnService 与核心启动时间影响。
+历史快捷缓存实现记录过 4–21 ms 的配置准备时间，不代表完整 VPN 启动，也不代表本次修复构建的性能。本次优先修正旧配置复用：快捷开关读取当前节点 / 设置并重建待比较配置，只有与已验证缓存一致才复用；不再枚举应用列表。该检查路径尚未重新测量准备耗时。
 
 ## 协议 / Raw
 
@@ -47,4 +47,8 @@
 
 ## Release 验证
 
-正式 CI 固定核心 commit、Go、NDK、Gradle 与 Android API，重新构建 arm64 `libbox.so` 和 `libhev-socks5-tunnel.so`，执行单元测试，并验证 package/version/ABI、APK v2 签名、native libs、中国 SRS 规则资产、Adaptive/monochrome/notification icon 资源、App 内更新与 Obtainium 正式通道。
+正式 CI 固定核心 commit、Go、NDK、Gradle 与 Android API，重新构建 arm64 `libbox.so` 和 `libhev-socks5-tunnel.so`，执行全部 Release 单元测试与 Android Lint，并验证 package/version/ABI、APK v2 签名、native libs、中国 SRS 规则资产、Adaptive/monochrome/notification icon 资源、App 内更新与 Obtainium 正式通道。
+
+## 本次源码检查
+
+范围、修复与未覆盖边界见 [CODE-AUDIT.md](CODE-AUDIT.md)。CI 测试成功不代表所有设备上的网络连续性已验证。

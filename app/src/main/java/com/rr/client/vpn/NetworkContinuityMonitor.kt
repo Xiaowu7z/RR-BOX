@@ -17,7 +17,7 @@ import android.util.Log
  */
 class NetworkContinuityMonitor(
     context: Context,
-    private val onPreferredPathChanged: (PhysicalPath) -> Unit
+    private val onPreferredPathChanged: (PhysicalPath?) -> Unit
 ) {
     data class PhysicalPath(
         val network: Network,
@@ -31,8 +31,9 @@ class NetworkContinuityMonitor(
         .getSystemService(ConnectivityManager::class.java)
     private val candidates = linkedMapOf<Network, Candidate>()
     private val lock = Any()
-    private var registered = false
+    @Volatile private var registered = false
     private var lastSignature: String? = null
+    private var hasPublished = false
 
     private data class Candidate(
         val network: Network,
@@ -80,9 +81,9 @@ class NetworkContinuityMonitor(
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
+        registered = true
         runCatching {
             manager.registerNetworkCallback(request, callback)
-            registered = true
 
             // Seed the complete current snapshot first, then publish only the final preferred path.
             // Publishing one network at a time here could falsely count app startup as a handoff when
@@ -96,15 +97,19 @@ class NetworkContinuityMonitor(
                 }
             }
             publishPreferredIfChanged()
-        }.onFailure { Log.w(TAG, "Unable to register physical network monitor", it) }
+        }.onFailure {
+            registered = false
+            runCatching { manager.unregisterNetworkCallback(callback) }
+            synchronized(lock) { candidates.clear(); lastSignature = null; hasPublished = false }
+            Log.w(TAG, "Unable to register physical network monitor", it)
+        }
     }
 
     fun stop() {
         if (!registered) return
-        runCatching { connectivity.unregisterNetworkCallback(callback) }
         registered = false
-        synchronized(lock) { candidates.clear() }
-        lastSignature = null
+        runCatching { connectivity.unregisterNetworkCallback(callback) }
+        synchronized(lock) { candidates.clear(); lastSignature = null; hasPublished = false }
     }
 
     private fun refresh(network: Network) {
@@ -121,12 +126,23 @@ class NetworkContinuityMonitor(
     }
 
     private fun publishPreferredIfChanged() {
+        if (!registered) return
         val best = synchronized(lock) {
             candidates.values.maxWithOrNull(
                 compareBy<Candidate> { score(it.capabilities, it.linkProperties) }
                     .thenBy { it.linkProperties?.interfaceName.orEmpty() }
             )
-        } ?: return
+        }
+        if (best == null) {
+            val changed = synchronized(lock) {
+                val changed = !hasPublished || lastSignature != null
+                lastSignature = null
+                hasPublished = true
+                changed
+            }
+            if (changed && registered) onPreferredPathChanged(null)
+            return
+        }
 
         val link = best.linkProperties
         val caps = best.capabilities
@@ -137,11 +153,16 @@ class NetworkContinuityMonitor(
             ?.sorted()
             .orEmpty()
         val dns = link?.dnsServers?.mapNotNull { it.hostAddress }?.sorted().orEmpty()
-        val signature = listOf(transport, interfaceName, addresses.joinToString(","), dns.joinToString(","))
+        val signature = listOf(best.network.networkHandle.toString(), transport, interfaceName,
+            addresses.joinToString(","), dns.joinToString(","),
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED).toString(),
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED).toString())
             .joinToString("|")
-        if (signature == lastSignature) return
-        lastSignature = signature
-
+        synchronized(lock) {
+            if (signature == lastSignature || !registered) return
+            lastSignature = signature
+            hasPublished = true
+        }
         onPreferredPathChanged(
             PhysicalPath(
                 network = best.network,

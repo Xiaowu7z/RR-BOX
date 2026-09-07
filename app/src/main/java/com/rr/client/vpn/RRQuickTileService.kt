@@ -1,6 +1,7 @@
 package com.rr.client.vpn
 
 import android.content.Intent
+import android.app.PendingIntent
 import android.net.VpnService
 import android.os.Build
 import android.os.SystemClock
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 class RRQuickTileService : TileService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var lastClickAt = 0L
+    private var connecting = false
 
     override fun onTileAdded() {
         super.onTileAdded()
@@ -31,6 +33,7 @@ class RRQuickTileService : TileService() {
     override fun onClick() {
         super.onClick()
 
+        if (connecting) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastClickAt < 300L) return
         lastClickAt = now
@@ -53,42 +56,53 @@ class RRQuickTileService : TileService() {
 
         if (VpnService.prepare(this) != null) {
             setTileState(Tile.STATE_INACTIVE, "需要 VPN 授权")
-            startActivityAndCollapse(
-                Intent(this, RRQuickTilePermissionActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            )
+            val intent = Intent(this, RRQuickTilePermissionActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startActivityAndCollapse(PendingIntent.getActivity(
+                    this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                ))
+            } else {
+                @Suppress("DEPRECATION")
+                startActivityAndCollapse(intent)
+            }
             return
         }
 
         // Match mature VPN tiles: visual feedback is immediate; config/service work happens after it.
         setTileState(Tile.STATE_ACTIVE, "正在连接")
+        connecting = true
         scope.launch {
-            val result = RRQuickTileController.connect(this@RRQuickTileService)
-            result.onFailure { error ->
-                setTileState(Tile.STATE_INACTIVE, "连接失败")
-                Toast.makeText(
-                    this@RRQuickTileService,
-                    "快速连接失败：${error.message ?: error.javaClass.simpleName}",
-                    Toast.LENGTH_LONG
-                ).show()
-                return@launch
-            }
-
-            repeat(60) {
-                when {
-                    RRVpnService.isRunning.value -> {
-                        setTileState(Tile.STATE_ACTIVE, "已连接")
-                        return@launch
-                    }
-                    !RRVpnService.isStarting.value && !RRVpnService.lastError.value.isNullOrBlank() -> {
-                        setTileState(Tile.STATE_INACTIVE, "连接失败")
-                        return@launch
-                    }
+            try {
+                val result = RRQuickTileController.connect(this@RRQuickTileService)
+                result.onFailure { error ->
+                    setTileState(Tile.STATE_INACTIVE, "连接失败")
+                    Toast.makeText(
+                        this@RRQuickTileService,
+                        "快速连接失败：${error.message ?: error.javaClass.simpleName}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@launch
                 }
-                delay(50L)
+
+                repeat(60) {
+                    when {
+                        RRVpnService.isRunning.value -> {
+                            setTileState(Tile.STATE_ACTIVE, "已连接")
+                            return@launch
+                        }
+                        !RRVpnService.isStarting.value && !RRVpnService.lastError.value.isNullOrBlank() -> {
+                            setTileState(Tile.STATE_INACTIVE, "连接失败")
+                            return@launch
+                        }
+                    }
+                    delay(50L)
+                }
+                refreshTile()
+            } finally {
+                connecting = false
             }
-            refreshTile()
         }
     }
 

@@ -341,6 +341,7 @@ object ConfigBuilder {
             if (node.tlsEnabled || node.type == ProtocolType.VLESS_REALITY) {
                 add("tls", JsonObject().apply {
                     addProperty("enabled", true)
+                    addProperty("insecure", node.allowInsecure)
                     if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
                     addAlpn(this, node.alpn)
                     if (node.type == ProtocolType.VLESS_REALITY) {
@@ -377,7 +378,7 @@ object ConfigBuilder {
             add("tls", JsonObject().apply {
                 addProperty("enabled", true)
                 if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
-                addProperty("insecure", true)
+                addProperty("insecure", node.allowInsecure)
                 addAlpn(this, node.alpn.ifBlank { "h3" })
             })
         }
@@ -397,7 +398,7 @@ object ConfigBuilder {
             add("tls", JsonObject().apply {
                 addProperty("enabled", true)
                 if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
-                addProperty("insecure", true)
+                addProperty("insecure", node.allowInsecure)
                 addAlpn(this, node.alpn.ifBlank { "h3" })
             })
         }
@@ -415,6 +416,7 @@ object ConfigBuilder {
             if (node.tlsEnabled) {
                 add("tls", JsonObject().apply {
                     addProperty("enabled", true)
+                    addProperty("insecure", node.allowInsecure)
                     if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
                     add("utls", JsonObject().apply {
                         addProperty("enabled", true)
@@ -436,6 +438,7 @@ object ConfigBuilder {
             addTransport(this, node)
             add("tls", JsonObject().apply {
                 addProperty("enabled", true)
+                addProperty("insecure", node.allowInsecure)
                 if (node.sni.isNotBlank()) addProperty("server_name", node.sni)
                 addAlpn(this, node.alpn)
             })

@@ -8,6 +8,9 @@ interface ProfileDao {
     @Query("SELECT * FROM profiles ORDER BY lastUpdated DESC")
     suspend fun getAllProfiles(): List<ProfileEntity>
 
+    @Query("SELECT * FROM profiles ORDER BY lastUpdated DESC")
+    fun observeProfiles(): kotlinx.coroutines.flow.Flow<List<ProfileEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProfile(profile: ProfileEntity)
 

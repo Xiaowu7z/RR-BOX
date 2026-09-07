@@ -7,11 +7,13 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.rr.client.RRApplication
 import com.rr.client.core.ConfigBuilder
-import com.rr.client.routing.AppManager
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.subscription.model.SubProfile
 import io.nekohasekai.libbox.Libbox
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -37,25 +39,6 @@ object RRQuickTileController {
 
             val store = VpnRuntimeStateStore(context)
             val cached = store.load()
-            if (cached != null && QuickTileRuntimePolicy.matches(
-                    state = cached,
-                    selectedNodeId = storedId,
-                    smartRouting = smartRouting,
-                    fastForwarding = fastForwarding,
-                    perAppMode = perAppMode,
-                    selectedPackages = selectedPackages
-                )
-            ) {
-                startRuntime(context, cached)
-                val elapsed = SystemClock.elapsedRealtime() - startedAt
-                Log.i(TAG, "Quick tile fast path: cached runtime · node=${cached.nodeTag} · prepare=${elapsed}ms")
-                return@runCatching QuickConnectResult(
-                    nodeTag = cached.nodeTag,
-                    usedCachedRuntime = true,
-                    prepareMillis = elapsed
-                )
-            }
-
             val profiles = app.database.profileDao()
                 .getAllProfiles()
                 .map { entity -> SubProfile.fromEntity(entity) }
@@ -63,14 +46,13 @@ object RRQuickTileController {
             val overrides = prefs.nodeOverrides.first()
             val allNodes = profiles
                 .flatMap { it.nodes }
-                .map { node -> overrides[node.id] ?: node }
+                .map { node -> com.rr.client.core.NodeOverridePatcher.resolve(node, overrides[node.id]) }
 
             require(allNodes.isNotEmpty()) {
                 "还没有可用节点，请先在 RRBOX 中添加节点或订阅"
             }
 
             val targetNode = allNodes.firstOrNull { it.id == storedId } ?: allNodes.first()
-            val apps = AppManager(context).getInstalledApps(includeSystem = false)
             val ruleSets = if (smartRouting) {
                 ChinaRuleSetManager.ensureBundled(context).getOrNull()
             } else {
@@ -80,13 +62,37 @@ object RRQuickTileController {
             val configJson = ConfigBuilder.buildSingBoxConfig(
                 selectedNode = targetNode,
                 allNodes = allNodes,
-                appRoutes = apps,
+                appRoutes = emptyList(),
                 smartRouting = smartRouting,
                 perAppMode = perAppMode,
                 selectedPackages = selectedPackages,
                 fastForwarding = fastForwarding,
                 ruleSets = ruleSets
             )
+            // Validate against CURRENT persisted nodes/settings before using a cached runtime.
+            // ConfigBuilder does not need installed-app enumeration for per-app include/exclude.
+            if (cached != null && QuickTileRuntimePolicy.matches(
+                    state = cached,
+                    selectedNodeId = storedId,
+                    smartRouting = smartRouting,
+                    fastForwarding = fastForwarding,
+                    perAppMode = perAppMode,
+                    selectedPackages = selectedPackages,
+                    expectedConfigJson = configJson
+                )
+            ) {
+                currentCoroutineContext().ensureActive()
+                val current = cached.copy(nodeTag = targetNode.tag)
+                startRuntime(context, current)
+                val elapsed = SystemClock.elapsedRealtime() - startedAt
+                Log.i(TAG, "Quick tile fast path: cached runtime · node=${current.nodeTag} · prepare=${elapsed}ms")
+                return@runCatching QuickConnectResult(
+                    nodeTag = current.nodeTag,
+                    usedCachedRuntime = true,
+                    prepareMillis = elapsed
+                )
+            }
+
             Libbox.checkConfig(configJson)
 
             prefs.setSelectedNodeId(targetNode.id)
@@ -100,6 +106,7 @@ object RRQuickTileController {
                 fastForwarding = fastForwarding
             )
             store.save(runtime)
+            currentCoroutineContext().ensureActive()
             startRuntime(context, runtime)
 
             val elapsed = SystemClock.elapsedRealtime() - startedAt
@@ -109,7 +116,7 @@ object RRQuickTileController {
                 usedCachedRuntime = false,
                 prepareMillis = elapsed
             )
-        }
+        }.onFailure { if (it is CancellationException) throw it }
     }
 
     /**
@@ -118,12 +125,14 @@ object RRQuickTileController {
      */
     suspend fun recoverLastRuntime(context: Context): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
+            check(VpnConnectionIntentStore.isDesiredRunning(context)) { "用户已断开，跳过恢复" }
             val cached = VpnRuntimeStateStore(context).load()
                 ?: error("没有可恢复的最近运行配置")
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, RRVpnService::class.java).apply {
                     action = RRNotificationManager.ACTION_RESTART_VPN
+                    putExtra(RRVpnService.EXTRA_RECOVERY_REQUEST, true)
                     putExtra(RRVpnService.EXTRA_CONFIG_JSON, cached.configJson)
                     putExtra(RRVpnService.EXTRA_NODE_TAG, cached.nodeTag)
                     putExtra(RRVpnService.EXTRA_NODE_ID, cached.nodeId)
@@ -134,6 +143,7 @@ object RRQuickTileController {
     }
 
     fun stop(context: Context) {
+        VpnConnectionIntentStore.setDesiredRunning(context, false)
         context.startService(
             Intent(context, RRVpnService::class.java).apply {
                 action = RRNotificationManager.ACTION_STOP_VPN

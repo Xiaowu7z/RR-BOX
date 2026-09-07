@@ -187,7 +187,7 @@ fun NodeListScreen(
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
                     ) {
-                        Text("添加本地节点", color = DarkBackground, fontWeight = FontWeight.Bold)
+                        Text("添加节点或订阅", color = DarkBackground, fontWeight = FontWeight.Bold)
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(onClick = onGoToSubscription) { Text("去添加订阅") }
@@ -246,7 +246,7 @@ fun NodeListScreen(
             onClipboard = {
                 showImportMethods = false
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
                 onImportClipboard(text)
             },
             onText = {
@@ -475,7 +475,7 @@ private fun NodeImportMethodDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加本地节点") },
+        title = { Text("添加节点或订阅") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onQr, modifier = Modifier.fillMaxWidth()) {
@@ -501,7 +501,7 @@ private fun NodeTextImportDialog(onDismiss: () -> Unit, onImport: (String) -> Un
     var text by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("导入节点") },
+        title = { Text("导入节点或订阅") },
         text = {
             OutlinedTextField(
                 value = text,
@@ -509,7 +509,7 @@ private fun NodeTextImportDialog(onDismiss: () -> Unit, onImport: (String) -> Un
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 5,
                 maxLines = 10,
-                label = { Text("分享链接 / Base64 / sing-box JSON / Clash YAML") }
+                label = { Text("订阅地址 / 分享链接 / Base64 / JSON / YAML") }
             )
         },
         confirmButton = { Button(onClick = { onImport(text) }, enabled = text.isNotBlank()) { Text("导入") } },

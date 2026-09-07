@@ -1,6 +1,8 @@
 package com.rr.client.update
 
 import com.google.gson.JsonParser
+import com.rr.client.subscription.ImportLimits
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -27,7 +29,9 @@ object AppUpdateChecker {
     private val client = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
+        .followSslRedirects(false)
         .build()
 
     suspend fun check(currentVersion: String): Result<AppUpdateResult> = withContext(Dispatchers.IO) {
@@ -43,10 +47,13 @@ object AppUpdateChecker {
                     error("暂未找到公开的 RRBOX 正式版 Release")
                 }
                 require(response.isSuccessful) { "GitHub 返回 HTTP ${response.code}" }
-                val body = response.body?.string().orEmpty()
+                val body = response.body?.byteStream()?.use { ImportLimits.readUtf8(it) }.orEmpty()
                 require(body.isNotBlank()) { "GitHub Release 响应为空" }
 
                 val root = JsonParser.parseString(body).asJsonObject
+                require(root.get("draft")?.asBoolean != true && root.get("prerelease")?.asBoolean != true) {
+                    "更新通道不是正式版"
+                }
                 val tag = root.get("tag_name")?.asString.orEmpty()
                 val name = root.get("name")?.asString.orEmpty().ifBlank { tag }
                 require(tag.isNotBlank()) { "Release 信息不完整" }
@@ -56,7 +63,7 @@ object AppUpdateChecker {
                         val asset = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                         val assetName = asset.get("name")?.asString.orEmpty()
                         val url = asset.get("browser_download_url")?.asString.orEmpty()
-                        if (isSupportedApkAsset(assetName) && url.isNotBlank()) url else null
+                        if (isSupportedApkAsset(assetName) && ReleaseAssetPolicy.isTrustedDownload(url, assetName)) url else null
                     }
                     ?.firstOrNull()
 
@@ -72,7 +79,7 @@ object AppUpdateChecker {
                     updateAvailable = compareVersions(tag, currentVersion) > 0
                 )
             }
-        }
+        }.onFailure { if (it is CancellationException) throw it }
     }
 
     internal fun isSupportedApkAsset(name: String): Boolean = releaseApkPattern.matches(name)

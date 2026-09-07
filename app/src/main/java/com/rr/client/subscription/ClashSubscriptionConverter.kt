@@ -3,6 +3,8 @@ package com.rr.client.subscription
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.LoaderOptions
+import org.yaml.snakeyaml.constructor.SafeConstructor
 
 /**
  * Converts the mainstream Clash/Mihomo `proxies:` section into sing-box outbounds.
@@ -10,8 +12,16 @@ import org.yaml.snakeyaml.Yaml
  */
 object ClashSubscriptionConverter {
     fun convert(rawYaml: String): String? {
-        val root = runCatching { Yaml().load<Any>(rawYaml) }.getOrNull() as? Map<*, *> ?: return null
+        if (rawYaml.length > ImportLimits.MAX_BYTES) return null
+        val options = LoaderOptions().apply {
+            codePointLimit = ImportLimits.MAX_BYTES
+            maxAliasesForCollections = 50
+            nestingDepthLimit = 50
+        }
+        val root = runCatching { Yaml(SafeConstructor(options)).load<Any>(rawYaml) }
+            .getOrNull() as? Map<*, *> ?: return null
         val proxies = root["proxies"] as? List<*> ?: return null
+        if (proxies.size > ImportLimits.MAX_NODES) return null
         val outbounds = JsonArray()
         proxies.forEach { entry ->
             val proxy = entry as? Map<*, *> ?: return@forEach

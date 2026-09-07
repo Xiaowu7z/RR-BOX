@@ -38,26 +38,8 @@ object RRLogStore {
         }
     }
 
-    internal fun redact(input: String): String {
-        var text = UUID_REGEX.replace(input, "<uuid>")
-        text = QUERY_SECRET_REGEX.replace(text) { match -> "${match.groupValues[1]}<redacted>" }
-        text = KEY_VALUE_SECRET_REGEX.replace(text) { match ->
-            "${match.groupValues[1]}${match.groupValues[2]}<redacted>"
-        }
-        text = USERINFO_URL_REGEX.replace(text) { match -> "${match.groupValues[1]}<redacted>@" }
-        return text
-    }
+    internal fun redact(input: String): String = com.rr.client.security.SecretRedactor.redact(input)
 
-    private val UUID_REGEX = Regex(
-        "(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b"
-    )
-    private val QUERY_SECRET_REGEX = Regex(
-        "(?i)([?&](?:token|key|auth|password|passwd|secret|private_key)=)[^&\\s]+"
-    )
-    private val KEY_VALUE_SECRET_REGEX = Regex(
-        """(?i)(password|passwd|token|secret|private_key|auth|uuid)(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,\s}]+)"""
-    )
-    private val USERINFO_URL_REGEX = Regex("(?i)(://)[^/@\\s]+@")
 }
 
 object RRLogCapture {

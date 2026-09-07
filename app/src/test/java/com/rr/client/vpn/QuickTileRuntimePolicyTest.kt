@@ -25,7 +25,8 @@ class QuickTileRuntimePolicyTest {
                 smartRouting = true,
                 fastForwarding = false,
                 perAppMode = PerAppPolicyResolver.MODE_ALL,
-                selectedPackages = emptySet()
+                selectedPackages = emptySet(),
+                expectedConfigJson = base.configJson
             )
         )
     }
@@ -39,7 +40,8 @@ class QuickTileRuntimePolicyTest {
                 smartRouting = true,
                 fastForwarding = false,
                 perAppMode = PerAppPolicyResolver.MODE_ALL,
-                selectedPackages = emptySet()
+                selectedPackages = emptySet(),
+                expectedConfigJson = base.configJson
             )
         )
         assertFalse(
@@ -49,23 +51,31 @@ class QuickTileRuntimePolicyTest {
                 smartRouting = false,
                 fastForwarding = false,
                 perAppMode = PerAppPolicyResolver.MODE_ALL,
-                selectedPackages = emptySet()
+                selectedPackages = emptySet(),
+                expectedConfigJson = base.configJson
             )
         )
     }
 
     @Test
-    fun legacyCacheWithoutNewFlagsIsAcceptedOnce() {
+    fun legacyCacheWithoutNewFlagsIsRebuilt() {
         val legacy = base.copy(smartRouting = null, fastForwarding = null)
-        assertTrue(
+        assertFalse(
             QuickTileRuntimePolicy.matches(
                 state = legacy,
                 selectedNodeId = "node-1",
                 smartRouting = false,
                 fastForwarding = true,
                 perAppMode = PerAppPolicyResolver.MODE_ALL,
-                selectedPackages = emptySet()
+                selectedPackages = emptySet(),
+                expectedConfigJson = base.configJson
             )
         )
     }
+    @Test
+    fun changedNodeCredentialsInvalidatesEvenWithSameNodeId() {
+        assertFalse(QuickTileRuntimePolicy.matches(base, "node-1", true, false,
+            PerAppPolicyResolver.MODE_ALL, emptySet(), "{\"outbounds\":[{\"password\":\"changed\"}]}"))
+    }
+
 }

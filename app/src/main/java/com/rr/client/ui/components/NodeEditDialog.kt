@@ -55,6 +55,7 @@ fun NodeEditDialog(
     var obfsPassword by remember(node.id) { mutableStateOf(node.obfsPassword) }
     var ssMethod by remember(node.id) { mutableStateOf(node.ssMethod) }
     var tlsEnabled by remember(node.id) { mutableStateOf(node.tlsEnabled) }
+    var allowInsecure by remember(node.id) { mutableStateOf(node.allowInsecure) }
     var rawJson by remember(node.id) { mutableStateOf(node.rawJson) }
     var rawMode by remember(node.id) { mutableStateOf(false) }
     var validationError by remember(node.id) { mutableStateOf<String?>(null) }
@@ -168,6 +169,13 @@ fun NodeEditDialog(
                     )
                 }
 
+                if (!rawMode && node.type !in setOf(ProtocolType.SHADOWSOCKS, ProtocolType.SOCKS, ProtocolType.SSH)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("跳过 TLS 证书校验（不安全）", modifier = Modifier.weight(1f))
+                        Switch(checked = allowInsecure, onCheckedChange = { allowInsecure = it })
+                    }
+                }
+
                 OutlinedButton(
                     onClick = {
                         rawMode = !rawMode
@@ -222,6 +230,9 @@ fun NodeEditDialog(
                     credential.isBlank() && node.type !in setOf(
                         ProtocolType.NAIVE_H2,
                         ProtocolType.NAIVE_H3,
+                        ProtocolType.SOCKS,
+                        ProtocolType.HTTP,
+                        ProtocolType.SSH,
                         ProtocolType.CUSTOM
                     ) -> "认证信息不能为空"
                     else -> null
@@ -246,7 +257,9 @@ fun NodeEditDialog(
                             obfs = obfs.trim(),
                             obfsPassword = obfsPassword,
                             ssMethod = ssMethod.trim(),
-                            tlsEnabled = tlsEnabled
+                            tlsEnabled = tlsEnabled,
+                            allowInsecure = allowInsecure,
+                            nameOverrideOnly = false
                         )
                     )
                 }

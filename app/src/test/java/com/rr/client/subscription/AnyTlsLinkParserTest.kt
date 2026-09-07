@@ -50,4 +50,11 @@ class AnyTlsLinkParserTest {
         assertEquals(443, node.serverPort)
         assertEquals("example.com", node.sni)
     }
+    @Test
+    fun preservesLiteralPlusInPassword() {
+        val node = AnyTlsLinkParser.parseLink("anytls://p+a%2Bss@example.com:443?insecure=1", "p", "Test")!!
+        org.junit.Assert.assertEquals("p+a+ss", node.uuidOrPassword)
+        org.junit.Assert.assertTrue(node.allowInsecure)
+    }
+
 }

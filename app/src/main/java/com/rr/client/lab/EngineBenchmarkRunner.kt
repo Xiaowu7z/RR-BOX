@@ -10,6 +10,7 @@ import com.google.gson.reflect.TypeToken
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.vpn.RRVpnService
+import com.rr.client.vpn.VpnConnectionIntentStore
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -222,6 +223,7 @@ class EngineBenchmarkRunner(
         engine: String,
         includeSelfForHevBenchmark: Boolean = false
     ): Long {
+        check(VpnConnectionIntentStore.isDesiredRunning(appContext)) { "用户已断开，停止 A/B" }
         preferences.setTunEngine(engine)
         RRVpnService.clearLastError()
         val previousSerial = RRVpnService.engineRestartMeasurement.value.serial
@@ -251,6 +253,7 @@ class EngineBenchmarkRunner(
 
     private suspend fun restoreEngine(originalEngine: String) {
         preferences.setTunEngine(originalEngine)
+        if (!VpnConnectionIntentStore.isDesiredRunning(appContext)) return
         RRVpnService.clearLastError()
         val previousSerial = RRVpnService.engineRestartMeasurement.value.serial
         ContextCompat.startForegroundService(

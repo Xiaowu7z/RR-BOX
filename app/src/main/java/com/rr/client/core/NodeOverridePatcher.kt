@@ -11,6 +11,23 @@ import com.rr.client.core.model.ProxyNode
  * that RRBOX does not model yet.
  */
 object NodeOverridePatcher {
+    fun resolve(base: ProxyNode, override: ProxyNode?): ProxyNode = when {
+        override == null -> base
+        override.nameOverrideOnly -> apply(base, base.copy(tag = override.tag))
+        else -> override.copy(id = base.id, profileId = base.profileId, profileName = base.profileName)
+    }
+
+    fun isNameOnlyEdit(base: ProxyNode, override: ProxyNode): Boolean =
+        apply(base, base.copy(tag = override.tag)) == override.copy(nameOverrideOnly = false)
+
+    fun renameOverride(base: ProxyNode, override: ProxyNode?, newName: String): ProxyNode {
+        require(newName.isNotBlank()) { "节点名称不能为空" }
+        val current = resolve(base, override)
+        return apply(current, current.copy(tag = newName.trim())).copy(
+            nameOverrideOnly = override == null || override.nameOverrideOnly || isNameOnlyEdit(base, override)
+        )
+    }
+
     fun apply(original: ProxyNode, edited: ProxyNode): ProxyNode {
         // Raw advanced mode already reparses the outbound into a normalized ProxyNode. When the raw
         // payload changed, it is authoritative and must not be overwritten with patches from the
@@ -34,11 +51,26 @@ object NodeOverridePatcher {
                     outbound.addProperty("uuid", edited.uuidOrPassword)
                 }
             }
-            "hysteria2", "hy2", "trojan", "anytls", "naive" -> {
+            "hysteria2", "hy2", "trojan", "anytls", "naive", "shadowsocks", "ss", "socks", "http", "shadowtls" -> {
                 if (edited.uuidOrPassword != original.uuidOrPassword) {
                     outbound.addProperty("password", edited.uuidOrPassword)
                 }
             }
+        }
+
+        if (edited.uuidOrPassword != original.uuidOrPassword) {
+            when (type) {
+                "hysteria" -> outbound.addProperty("auth_str", edited.uuidOrPassword)
+                "snell" -> outbound.addProperty("psk", edited.uuidOrPassword)
+                "wireguard" -> outbound.addProperty("private_key", edited.uuidOrPassword)
+                "ssh" -> outbound.addProperty(
+                    if (outbound.has("private_key") && !outbound.has("password")) "private_key" else "password",
+                    edited.uuidOrPassword
+                )
+            }
+        }
+        if (type in setOf("shadowsocks", "ss") && edited.ssMethod != original.ssMethod) {
+            outbound.addProperty("method", edited.ssMethod)
         }
 
         if (edited.type == ProtocolType.TUIC_V5 && edited.extraPassword != original.extraPassword) {
@@ -56,12 +88,14 @@ object NodeOverridePatcher {
     private fun patchTls(outbound: JsonObject, original: ProxyNode, edited: ProxyNode) {
         val tlsRelevant = edited.sni != original.sni ||
             edited.alpn != original.alpn ||
-            edited.tlsEnabled != original.tlsEnabled
+            edited.tlsEnabled != original.tlsEnabled ||
+            edited.allowInsecure != original.allowInsecure
         if (!tlsRelevant) return
 
         val tls = outbound.get("tls")?.takeIf { it.isJsonObject }?.asJsonObject
             ?: JsonObject().also { outbound.add("tls", it) }
         tls.addProperty("enabled", edited.tlsEnabled)
+        tls.addProperty("insecure", edited.allowInsecure)
         setOrRemove(tls, "server_name", edited.sni)
 
         if (edited.alpn.isBlank()) {

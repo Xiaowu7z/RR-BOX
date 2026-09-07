@@ -1,66 +1,49 @@
 package com.rr.client.subscription
 
-/**
- * Accept the forms users commonly paste from panels:
- *   https://example.com/sub
- *   http://1.2.3.4:8080/sub
- *   1.2.3.4:8080/sub
- *   example.com/sub
- *   [2001:db8::1]:8080/sub
- *
- * Scheme-less input tries HTTPS first and HTTP second. The HTTP fallback is
- * intentional for private/self-hosted panels that expose subscriptions by IP.
- */
+import java.net.URI
+
+/** URL classification only; never performs DNS/network requests or decodes tokens. */
 object SubscriptionUrlNormalizer {
+    fun clean(raw: String): String = raw.trim().removePrefix("\uFEFF").trim()
+
     fun candidates(raw: String): List<String> {
-        val input = raw.trim()
+        val input = clean(raw)
         require(input.isNotEmpty()) { "订阅地址不能为空" }
-        require(!input.contains('\n') && !input.contains('\r')) { "订阅地址不能包含换行" }
-
-        val lower = input.lowercase()
-        if (lower.startsWith("https://") || lower.startsWith("http://")) {
-            return listOf(input)
+        require(httpUri(input) != null) { "请输入有效的 HTTP/HTTPS 订阅地址（IPv6 请使用方括号）" }
+        return when {
+            input.startsWith("https://", true) || input.startsWith("http://", true) -> listOf(input)
+            else -> {
+                val body = input.removePrefix("//")
+                listOf("https://$body", "http://$body")
+            }
         }
-        if (input.startsWith("//")) {
-            val body = input.removePrefix("//")
-            return listOf("https://$body", "http://$body")
-        }
-        if (SCHEME_REGEX.containsMatchIn(input)) {
-            throw IllegalArgumentException("订阅地址只支持 HTTP/HTTPS")
-        }
-
-        return listOf("https://$input", "http://$input")
     }
 
     fun looksLikeSubscriptionAddress(raw: String): Boolean {
-        val input = raw.trim()
-        if (input.isEmpty() || input.contains('\n') || input.contains('\r')) return false
+        val uri = httpUri(clean(raw)) ?: return false
+        return uri.rawUserInfo == null && hasResource(uri)
+    }
 
-        val lower = input.lowercase()
-        if (SCHEME_REGEX.containsMatchIn(input) &&
-            !lower.startsWith("https://") &&
-            !lower.startsWith("http://")
-        ) return false
+    /** A root HTTP URL can be a subscription or proxy. Ask instead of silently guessing. */
+    fun isAmbiguousHttpAddress(raw: String): Boolean {
+        val uri = httpUri(clean(raw)) ?: return false
+        return (uri.rawUserInfo == null && !hasResource(uri)) ||
+            (uri.rawUserInfo != null && hasResource(uri))
+    }
 
-        val body = when {
-            lower.startsWith("https://") -> input.substring(8)
-            lower.startsWith("http://") -> input.substring(7)
-            input.startsWith("//") -> input.substring(2)
-            else -> input
-        }
-        val authority = body.substringBefore('/').substringBefore('?')
-        if (authority.isBlank() || authority.any(Char::isWhitespace) || '@' in authority) return false
+    private fun hasResource(uri: URI): Boolean =
+        (!uri.rawPath.isNullOrEmpty() && uri.rawPath != "/") || uri.rawQuery != null
 
-        val validHost = if (authority.startsWith("[") && authority.contains("]")) {
-            true
-        } else {
-            val host = authority.substringBefore(':')
-            host.equals("localhost", ignoreCase = true) || host.contains('.')
-        }
-        if (!validHost) return false
-
-        val remainder = body.removePrefix(authority)
-        return remainder.isNotBlank() && remainder != "/"
+    private fun httpUri(input: String): URI? {
+        if (input.isEmpty() || input.any { it.isWhitespace() || it.isISOControl() }) return null
+        val explicit = SCHEME_REGEX.containsMatchIn(input)
+        val candidate = if (explicit) input else "https://${input.removePrefix("//")}"
+        val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("http", true) && !uri.scheme.equals("https", true)) return null
+        val host = uri.host ?: return null
+        if (host.isBlank() || uri.port !in -1..65535 || uri.port == 0) return null
+        if (!explicit && !host.contains('.') && !host.contains(':') && !host.equals("localhost", true)) return null
+        return uri
     }
 
     private val SCHEME_REGEX = Regex("^[A-Za-z][A-Za-z0-9+.-]*://")

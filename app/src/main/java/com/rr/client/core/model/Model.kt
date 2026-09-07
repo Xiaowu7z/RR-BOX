@@ -67,6 +67,10 @@ data class ProxyNode(
     val alpn: String = "",
     /** TLS 是否启用（vless/vmess/trojan 无 TLS 变体时置 false） */
     val tlsEnabled: Boolean = true,
+    /** Must be explicitly opted into; old records deserialize to false. */
+    val allowInsecure: Boolean = false,
+    /** Display-name-only override; never freezes subscription credentials/transport. */
+    val nameOverrideOnly: Boolean = false,
     /** Shadowsocks 加密方式 */
     val ssMethod: String = "",
     /** Hysteria2 obfs 类型（如 salamander） */

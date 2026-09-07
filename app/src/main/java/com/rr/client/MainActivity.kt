@@ -42,6 +42,11 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
+import kotlinx.coroutines.CancellationException
+import com.rr.client.subscription.ImportLimits
+import com.rr.client.subscription.SubscriptionNodeReconciler
+import com.rr.client.storage.LocalProfileStore
+import com.rr.client.core.NodeIdentity
 import com.rr.client.core.LocalNodeDeletionPolicy
 import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.NodeLatencyTester
@@ -239,7 +244,7 @@ class MainActivity : ComponentActivity() {
 
         val baseNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
         val allNodes = remember(baseNodes, nodeOverrides) {
-            baseNodes.map { base -> nodeOverrides[base.id] ?: base }
+            baseNodes.map { base -> NodeOverridePatcher.resolve(base, nodeOverrides[base.id]) }
         }
         val subscriptionProfiles = remember(subProfiles) { subProfiles.filterNot { it.isLocal } }
         val nodeGroups = remember(subProfiles, allNodes) {
@@ -281,6 +286,18 @@ class MainActivity : ComponentActivity() {
             RRVpnService.clearLastError()
         }
 
+        fun refreshFromProfiles(updated: List<SubProfile>) {
+            subProfiles = updated
+            val nodesNow = updated.flatMap { it.nodes }
+            val current = selectedNodeId
+            val resolved = if (nodesNow.any { it.id == current }) current else nodesNow.firstOrNull()?.id
+            if (resolved != current) {
+                selectedNodeId = resolved
+                if (resolved != null) lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
+            }
+            latencyStates = latencyStates.filterKeys { id -> nodesNow.any { it.id == id } }
+        }
+
         LaunchedEffect(Unit) {
             requestNotificationPermissionIfNeeded()
 
@@ -304,32 +321,25 @@ class MainActivity : ComponentActivity() {
             val appMgr = AppManager(this@MainActivity)
             apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
             withContext(Dispatchers.IO) { ChinaRuleSetManager.ensureBundled(this@MainActivity) }
-        }
-
-        fun refreshFromProfiles(updated: List<SubProfile>) {
-            subProfiles = updated
-            val nodesNow = updated.flatMap { it.nodes }
-            val current = selectedNodeId
-            val resolved = if (nodesNow.any { it.id == current }) current else nodesNow.firstOrNull()?.id
-            if (resolved != current) {
-                selectedNodeId = resolved
-                if (resolved != null) lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
+            db.profileDao().observeProfiles().collect { entities ->
+                refreshFromProfiles(entities.map { SubProfile.fromEntity(it) })
             }
-            latencyStates = latencyStates.filterKeys { id -> nodesNow.any { it.id == id } }
         }
 
         fun toast(text: String) = Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
         fun currentTargetNode(): ProxyNode? = selectedNode ?: allNodes.firstOrNull()
 
-        fun orderedProfilesWithLocal(local: SubProfile): List<SubProfile> =
-            listOf(local) + subProfiles.filterNot { it.isLocal }
-
-        fun persistLocalNodes(nodes: List<ProxyNode>, message: String? = null) {
+        fun persistLocalNodes(transform: (List<ProxyNode>) -> List<ProxyNode>, message: String? = null) {
             lifecycleScope.launch {
-                val local = SubProfile.local(nodes, System.currentTimeMillis())
-                withContext(Dispatchers.IO) { db.profileDao().insertProfile(local.toEntity()) }
-                refreshFromProfiles(orderedProfilesWithLocal(local))
-                message?.let(::toast)
+                try {
+                    withContext(Dispatchers.IO) { LocalProfileStore.update(db, transform) }
+                    // Room's observation refreshes every screen from committed data.
+                    message?.let(::toast)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    toast("本地节点保存失败，请重试")
+                }
             }
         }
 
@@ -340,7 +350,13 @@ class MainActivity : ComponentActivity() {
             }
             lifecycleScope.launch {
                 val parsed = withContext(Dispatchers.Default) {
-                    SubscriptionParser.parseContent(raw, SubProfile.LOCAL_PROFILE_ID, SubProfile.LOCAL_PROFILE_NAME)
+                    runCatching {
+                        SubscriptionParser.parseContent(raw, SubProfile.LOCAL_PROFILE_ID, SubProfile.LOCAL_PROFILE_NAME)
+                    }.getOrDefault(emptyList())
+                }
+                if (parsed.size > ImportLimits.MAX_NODES) {
+                    toast("一次最多导入 ${ImportLimits.MAX_NODES} 个节点")
+                    return@launch
                 }
                 if (parsed.isEmpty()) {
                     toast("没有识别到支持的节点；可粘贴分享链接、sing-box JSON 或 Clash YAML")
@@ -373,14 +389,10 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
 
-                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
-                val keys = existing.map(::nodeIdentity).toMutableSet()
-                val newNodes = valid.filter { keys.add(nodeIdentity(it)) }
-                if (newNodes.isEmpty()) {
-                    toast("这些节点已经存在于「${SubProfile.LOCAL_PROFILE_NAME}」")
-                    return@launch
-                }
-                persistLocalNodes(existing + newNodes, "已加入 ${newNodes.size} 个本地节点")
+                persistLocalNodes({ latest ->
+                    val keys = latest.map(NodeIdentity::key).toMutableSet()
+                    latest + valid.filter { keys.add(NodeIdentity.key(it)) }
+                }, "导入完成，重复节点已自动跳过")
             }
         }
 
@@ -399,8 +411,7 @@ class MainActivity : ComponentActivity() {
             }
             lifecycleScope.launch {
                 prefs.clearNodeOverride(node.id)
-                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
-                persistLocalNodes(existing.filterNot { it.id == node.id }, "已删除本地节点「${node.tag}」")
+                persistLocalNodes({ latest -> latest.filterNot { it.id == node.id } }, "已删除本地节点「${node.tag}」")
             }
         }
 
@@ -412,29 +423,29 @@ class MainActivity : ComponentActivity() {
                 return
             }
             if (newName == node.tag) return
-
-            val renamed = NodeOverridePatcher.apply(node, node.copy(tag = newName))
             if (node.profileId == SubProfile.LOCAL_PROFILE_ID) {
-                val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
-                if (existing.none { it.id == node.id }) {
-                    toast("没有找到要重命名的本地节点")
-                    return
-                }
-                val normalized = renamed.copy(
-                    profileId = SubProfile.LOCAL_PROFILE_ID,
-                    profileName = SubProfile.LOCAL_PROFILE_NAME
-                )
-                persistLocalNodes(
-                    existing.map { if (it.id == node.id) normalized else it },
-                    "已重命名为「$newName」"
-                )
+                persistLocalNodes({ latest ->
+                    require(latest.any { it.id == node.id }) { "节点已被移除" }
+                    latest.map {
+                        if (it.id == node.id) NodeOverridePatcher.apply(it, it.copy(tag = newName)) else it
+                    }
+                }, "已重命名为「$newName」")
             } else {
                 lifecycleScope.launch {
-                    prefs.setNodeOverride(renamed)
-                    toast("已重命名为「$newName」")
+                    val base = baseNodes.firstOrNull { it.id == node.id } ?: return@launch
+                    val override = prefs.nodeOverrides.first()[node.id]
+                    try {
+                        prefs.setNodeOverride(NodeOverridePatcher.renameOverride(base, override, newName))
+                        toast("已重命名为「$newName」")
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        toast("重命名保存失败，请重试")
+                    }
                 }
             }
         }
+
         fun scheduleRoutingRestart(
             mode: String,
             packages: Set<String>,
@@ -466,71 +477,94 @@ class MainActivity : ComponentActivity() {
         }
 
         fun addProfile(name: String, url: String) {
-            val trimmedUrl = url.trim()
-            if (trimmedUrl.isEmpty()) {
-                toast("请填写订阅链接")
+            if (addingProfile) {
+                toast("订阅正在同步，请稍候")
+                return
+            }
+            val trimmedUrl = SubscriptionUrlNormalizer.clean(url)
+            val candidates = runCatching { SubscriptionUrlNormalizer.candidates(trimmedUrl) }.getOrNull()
+            if (candidates == null) {
+                toast("请填写有效的 HTTP/HTTPS 订阅地址")
+                return
+            }
+            if (subscriptionProfiles.any { it.url == trimmedUrl }) {
+                toast("该订阅已存在，请直接点击更新")
                 return
             }
             addingProfile = true
-            val profileId = UUID.randomUUID().toString().substring(0, 8)
+            val profileId = UUID.randomUUID().toString()
             val profileName = name.trim().ifEmpty {
                 "订阅 ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())}"
             }
             lifecycleScope.launch {
-                val result = SubscriptionFetcher().fetchSubscription(trimmedUrl, profileId, profileName)
-                addingProfile = false
-                result.onSuccess { (newNodes, userInfo) ->
-                    val profile = SubProfile(
-                        id = profileId,
-                        name = profileName,
-                        url = trimmedUrl,
-                        lastUpdated = System.currentTimeMillis(),
-                        nodes = newNodes,
-                        userInfo = userInfo
-                    )
+                try {
+                    val (newNodes, userInfo) = SubscriptionFetcher().fetchSubscription(trimmedUrl, profileId, profileName).getOrThrow()
+                    val profile = SubProfile(profileId, profileName, trimmedUrl, System.currentTimeMillis(), newNodes, userInfo)
                     withContext(Dispatchers.IO) { db.profileDao().insertProfile(profile.toEntity()) }
-                    refreshFromProfiles(subProfiles + profile)
                     toast("「$profileName」同步成功：${newNodes.size} 个节点")
-                }.onFailure { error -> toast("添加订阅失败：${error.message ?: "网络错误"}") }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    toast("添加订阅失败：${com.rr.client.lab.RRLogStore.redact(error.message ?: "网络或存储错误")}")
+                } finally {
+                    addingProfile = false
+                }
             }
         }
-
 
         fun importClipboardContent(raw: String) {
-            val trimmed = raw.trim()
-            if (trimmed.isEmpty()) {
-                importLocalNodes(raw)
-                return
-            }
-            if (SubscriptionUrlNormalizer.looksLikeSubscriptionAddress(trimmed)) {
+            val trimmed = SubscriptionUrlNormalizer.clean(raw)
+            fun importSubscription() {
                 selectedTab = 3
-                toast("已识别订阅地址，正在同步")
                 addProfile("", trimmed)
-            } else {
-                importLocalNodes(raw)
+            }
+            when {
+                SubscriptionUrlNormalizer.looksLikeSubscriptionAddress(trimmed) -> importSubscription()
+                SubscriptionUrlNormalizer.isAmbiguousHttpAddress(trimmed) -> {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("识别到 HTTP/HTTPS 地址")
+                        .setMessage("此地址可能是订阅，也可能是 HTTP 代理节点，请选择导入方式。")
+                        .setPositiveButton("作为订阅") { _, _ -> importSubscription() }
+                        .setNegativeButton("作为节点") { _, _ ->
+                            importLocalNodes(SubscriptionUrlNormalizer.candidates(trimmed).first())
+                        }
+                        .setNeutralButton("取消", null)
+                        .show()
+                }
+                else -> importLocalNodes(trimmed)
             }
         }
+
         fun refreshProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
+            if (profileId in refreshingIds) return
             refreshingIds = refreshingIds + profileId
             lifecycleScope.launch {
-                val result = SubscriptionFetcher().fetchSubscription(existing.url, existing.id, existing.name)
-                refreshingIds = refreshingIds - profileId
-                result.onSuccess { (newNodes, userInfo) ->
-                    val updated = existing.copy(
-                        lastUpdated = System.currentTimeMillis(),
-                        nodes = newNodes,
-                        userInfo = userInfo
-                    )
+                try {
+                    prefs.migrateNameOnlyOverrides(existing.nodes)
+                    val (newNodes, userInfo) = SubscriptionFetcher().fetchSubscription(existing.url, existing.id, existing.name).getOrThrow()
+                    val reconciled = SubscriptionNodeReconciler.reconcile(existing.nodes, newNodes)
+                    val updated = existing.copy(lastUpdated = System.currentTimeMillis(), nodes = reconciled, userInfo = userInfo)
                     withContext(Dispatchers.IO) { db.profileDao().insertProfile(updated.toEntity()) }
-                    refreshFromProfiles(subProfiles.map { if (it.id == profileId) updated else it })
+                    val retained = reconciled.mapTo(hashSetOf()) { it.id }
+                    existing.nodes.filterNot { it.id in retained }.forEach { prefs.clearNodeOverride(it.id) }
                     toast("「${existing.name}」更新成功：${newNodes.size} 个节点")
-                }.onFailure { error -> toast("「${existing.name}」更新失败：${error.message ?: "网络错误"}") }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    toast("订阅更新未完成，请重试：${com.rr.client.lab.RRLogStore.redact(error.message ?: "网络或存储错误")}")
+                } finally {
+                    refreshingIds = refreshingIds - profileId
+                }
             }
         }
 
         fun deleteProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
+            if (profileId in refreshingIds) {
+                toast("订阅正在更新，请完成后再删除")
+                return
+            }
             if (isVpnRunning || isVpnStarting) {
                 toast("请先断开连接再删除订阅")
                 return
@@ -659,7 +693,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onDeleteLocalNode = ::deleteLocalNode,
-                        onImportText = ::importLocalNodes,
+                        onImportText = ::importClipboardContent,
                         onImportClipboard = ::importClipboardContent,
                         onCreateManualNode = { protocol ->
                             editingNode = manualNodeTemplate(protocol)
@@ -799,22 +833,38 @@ class MainActivity : ComponentActivity() {
                 node = original,
                 onDismiss = { editingNode = null },
                 onSave = { edited ->
-                    val patched = NodeOverridePatcher.apply(original, edited)
+                    val patched = NodeOverridePatcher.apply(original, edited).copy(nameOverrideOnly = false)
                     lifecycleScope.launch {
-                        if (original.profileId == SubProfile.LOCAL_PROFILE_ID) {
-                            val existing = subProfiles.firstOrNull { it.isLocal }?.nodes.orEmpty()
-                            val normalized = patched.copy(
-                                profileId = SubProfile.LOCAL_PROFILE_ID,
-                                profileName = SubProfile.LOCAL_PROFILE_NAME
-                            )
-                            val next = if (existing.any { it.id == original.id }) {
-                                existing.map { if (it.id == original.id) normalized else it }
+                        val valid = withContext(Dispatchers.IO) {
+                            runCatching {
+                                Libbox.checkConfig(ConfigBuilder.buildSingBoxConfig(
+                                    patched, listOf(patched), emptyList(), smartRouting = false
+                                ))
+                            }.isSuccess
+                        }
+                        if (!valid) {
+                            toast("节点未通过 sing-box 配置校验，未保存；请检查参数或使用 Raw 模式")
+                            return@launch
+                        }
+                        try {
+                            if (original.profileId == SubProfile.LOCAL_PROFILE_ID) {
+                                val normalized = patched.copy(
+                                    profileId = SubProfile.LOCAL_PROFILE_ID,
+                                    profileName = SubProfile.LOCAL_PROFILE_NAME
+                                )
+                                withContext(Dispatchers.IO) { LocalProfileStore.update(db) { latest ->
+                                    if (latest.any { it.id == original.id }) {
+                                        latest.map { if (it.id == original.id) normalized else it }
+                                    } else latest + normalized
+                                } }
                             } else {
-                                existing + normalized
+                                prefs.setNodeOverride(patched)
                             }
-                            persistLocalNodes(next)
-                        } else {
-                            prefs.setNodeOverride(patched)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            toast("保存失败，原节点未修改，请重试")
+                            return@launch
                         }
                         editingNode = null
                         toast(
@@ -890,9 +940,6 @@ class MainActivity : ComponentActivity() {
         profileId = SubProfile.LOCAL_PROFILE_ID,
         profileName = SubProfile.LOCAL_PROFILE_NAME
     )
-
-    private fun nodeIdentity(node: ProxyNode): String = node.rawJson.takeIf(String::isNotBlank)
-        ?: "${node.type}|${node.server}|${node.serverPort}|${node.uuidOrPassword}|${node.extraPassword}"
 
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -993,6 +1040,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendStopVpn() {
+        routingRestartJob?.cancel()
+        com.rr.client.vpn.VpnConnectionIntentStore.setDesiredRunning(this, false)
         startService(Intent(this, RRVpnService::class.java).apply {
             action = RRNotificationManager.ACTION_STOP_VPN
         })

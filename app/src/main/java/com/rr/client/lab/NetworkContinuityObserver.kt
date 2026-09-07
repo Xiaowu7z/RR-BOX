@@ -40,9 +40,16 @@ object NetworkContinuityObserver {
     fun start(context: Context) {
         if (monitor != null) return
         val appContext = context.applicationContext
+        var hasSeenPath = false
         monitor = NetworkContinuityMonitor(appContext) { path ->
+            if (path == null) {
+                _state.value = _state.value.copy(interfaceName = "--", validated = false,
+                    healthy = false, lastEvent = "物理网络已断开，等待网络恢复")
+                return@NetworkContinuityMonitor
+            }
             val previous = _state.value
-            val hadPath = previous.interfaceName != "--"
+            val hadPath = hasSeenPath
+            hasSeenPath = true
             val switchCount = previous.switchCount + if (hadPath) 1L else 0L
             val vpnWasActive = RRVpnService.isRunning.value || RRVpnService.isStarting.value
             val now = System.currentTimeMillis()
