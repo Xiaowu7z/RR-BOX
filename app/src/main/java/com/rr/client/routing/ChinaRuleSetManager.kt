@@ -144,8 +144,9 @@ object ChinaRuleSetManager {
                 },
                 directorySync = { path ->
                     // Android's Java FileChannel may reject directories with EISDIR.
+                    require(path.isDirectory) { "规则集同步目标必须是目录" }
                     val descriptor = Os.open(path.absolutePath,
-                        OsConstants.O_RDONLY or OsConstants.O_DIRECTORY or OsConstants.O_CLOEXEC, 0)
+                        OsConstants.O_RDONLY or OsConstants.O_CLOEXEC, 0)
                     try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
                 }
             )
