@@ -674,7 +674,7 @@ private fun BenchmarkSampleCard(sample: EngineBenchmarkSample) {
             val baseline = if (sample.baselinePssKb > 0) sample.baselinePssKb else sample.processPssKb
             StatusRow(
                 "PSS 基线→结束",
-                String.format(
+                String.format(java.util.Locale.US,
                     "%.1f → %.1f MB (Δ %+.1f)",
                     baseline / 1024.0,
                     sample.processPssKb / 1024.0,
@@ -710,13 +710,13 @@ private fun HistoryStatsCard(label: String, stats: EngineHistoryStats) {
             stats.pssKb?.let {
                 StatusRow(
                     "PSS 基线",
-                    "中位 ${String.format("%.1f", it.median / 1024.0)} MB · P95 ${String.format("%.1f", it.p95 / 1024.0)} MB"
+                    "中位 ${String.format(java.util.Locale.US, "%.1f", it.median / 1024.0)} MB · P95 ${String.format(java.util.Locale.US, "%.1f", it.p95 / 1024.0)} MB"
                 )
             }
             stats.pssDeltaKb?.let {
                 StatusRow(
                     "PSS 增量",
-                    "中位 ${String.format("%+.1f", it.median / 1024.0)} MB · P95 ${String.format("%+.1f", it.p95 / 1024.0)} MB"
+                    "中位 ${String.format(java.util.Locale.US, "%+.1f", it.median / 1024.0)} MB · P95 ${String.format(java.util.Locale.US, "%+.1f", it.p95 / 1024.0)} MB"
                 )
             }
             StatusRow("代理路径验证", "${stats.proxyVerifiedRounds}/${stats.httpsSuccessRounds}")
@@ -728,7 +728,7 @@ private fun HistoryStatsCard(label: String, stats: EngineHistoryStats) {
 }
 
 private fun metricMillis(stats: MetricStats): String =
-    "中位 ${stats.median.roundToLong()} ms · P95 ${stats.p95.roundToLong()} · σ ${String.format("%.1f", stats.stdDev)}"
+    "中位 ${stats.median.roundToLong()} ms · P95 ${stats.p95.roundToLong()} · σ ${String.format(java.util.Locale.US, "%.1f", stats.stdDev)}"
 
 private fun metricSpeed(stats: MetricStats): String =
     "中位 ${TrafficSampler.formatSpeed(stats.median.roundToLong())} · P95 ${TrafficSampler.formatSpeed(stats.p95.roundToLong())}"

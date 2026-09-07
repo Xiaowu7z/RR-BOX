@@ -378,26 +378,26 @@ fun EngineBenchmarkReport.toPlainText(): String = buildString {
 private fun medianLong(values: List<Long>): Long? = calculateMetricStats(values)?.median?.roundToLong()
 
 private fun formatRateForReport(bytesPerSecond: Long): String = when {
-    bytesPerSecond >= 1024L * 1024L -> String.format("%.2f MB/s", bytesPerSecond / (1024.0 * 1024.0))
-    bytesPerSecond >= 1024L -> String.format("%.1f KB/s", bytesPerSecond / 1024.0)
+    bytesPerSecond >= 1024L * 1024L -> String.format(java.util.Locale.US, "%.2f MB/s", bytesPerSecond / (1024.0 * 1024.0))
+    bytesPerSecond >= 1024L -> String.format(java.util.Locale.US, "%.1f KB/s", bytesPerSecond / 1024.0)
     else -> "$bytesPerSecond B/s"
 }
 
 private fun formatBytesForReport(bytes: Long): String = when {
-    bytes >= 1024L * 1024L -> String.format("%.2f MiB", bytes / (1024.0 * 1024.0))
-    bytes >= 1024L -> String.format("%.1f KiB", bytes / 1024.0)
+    bytes >= 1024L * 1024L -> String.format(java.util.Locale.US, "%.2f MiB", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> String.format(java.util.Locale.US, "%.1f KiB", bytes / 1024.0)
     else -> "$bytes B"
 }
 
 private fun formatAccounting(bytes: Long, payloadBytes: Long): String {
     if (payloadBytes <= 0L) return formatBytesForReport(bytes)
     val percent = bytes.toDouble() * 100.0 / payloadBytes.toDouble()
-    return "${formatBytesForReport(bytes)} (${String.format("%.0f", percent)}%)"
+    return "${formatBytesForReport(bytes)} (${String.format(java.util.Locale.US, "%.0f", percent)}%)"
 }
 
-private fun formatPssMb(kb: Int): String = String.format("%.1f MB", kb / 1024.0)
+private fun formatPssMb(kb: Int): String = String.format(java.util.Locale.US, "%.1f MB", kb / 1024.0)
 
 private fun formatSignedPssMb(kb: Int): String {
     val mb = kb / 1024.0
-    return if (mb >= 0.0) String.format("+%.1f MB", mb) else String.format("%.1f MB", mb)
+    return if (mb >= 0.0) String.format(java.util.Locale.US, "+%.1f MB", mb) else String.format(java.util.Locale.US, "%.1f MB", mb)
 }

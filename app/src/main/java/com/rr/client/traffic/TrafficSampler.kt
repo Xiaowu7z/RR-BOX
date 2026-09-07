@@ -129,15 +129,15 @@ class TrafficSampler(
         fun formatBytes(bytes: Long): String {
             val safeBytes = bytes.coerceAtLeast(0L)
             return when {
-                safeBytes >= 1024L * 1024L * 1024L -> String.format(
+                safeBytes >= 1024L * 1024L * 1024L -> String.format(java.util.Locale.US,
                     "%.2f GB",
                     safeBytes / (1024.0 * 1024.0 * 1024.0)
                 )
-                safeBytes >= 1024L * 1024L -> String.format(
+                safeBytes >= 1024L * 1024L -> String.format(java.util.Locale.US,
                     "%.2f MB",
                     safeBytes / (1024.0 * 1024.0)
                 )
-                safeBytes >= 1024L -> String.format("%.1f KB", safeBytes / 1024.0)
+                safeBytes >= 1024L -> String.format(java.util.Locale.US, "%.1f KB", safeBytes / 1024.0)
                 else -> "$safeBytes B"
             }
         }

@@ -46,7 +46,7 @@ object NetworkDiagnostics {
         val snapshot = NetworkSnapshot(
             transport = transportLabel(capsForSnapshot),
             activeInterface = physicalLink?.interfaceName ?: activeLink?.interfaceName ?: "--",
-            mtu = (physicalLink?.mtu ?: activeLink?.mtu ?: 0).coerceAtLeast(0),
+            mtu = readLinkMtu(linkForAddresses),
             ipv4Addresses = linkForAddresses.addressesV4(),
             ipv6Addresses = linkForAddresses.addressesV6(),
             dnsServers = linkForAddresses?.dnsServers?.mapNotNull { it.hostAddress }?.distinct().orEmpty(),
@@ -246,6 +246,18 @@ object NetworkDiagnostics {
         ?.mapNotNull { link -> link.address.hostAddress?.substringBefore('%')?.takeIf { it.contains(':') } }
         ?.distinct()
         .orEmpty()
+
+    private fun readLinkMtu(link: LinkProperties?): Int {
+        if (link == null) return 0
+        // LinkProperties.getMtu only became public in API 29. Read the same
+        // physical interface through java.net on Android 8/9 or default MTU=0.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            link.mtu.takeIf { it > 0 }?.let { return it }
+        }
+        val name = link.interfaceName?.takeIf(String::isNotBlank) ?: return 0
+        return runCatching { NetworkInterface.getByName(name)?.mtu ?: 0 }
+            .getOrDefault(0).coerceAtLeast(0)
+    }
 
     private fun privateDnsLabel(link: LinkProperties?): String? {
         if (link == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null

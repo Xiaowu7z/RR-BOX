@@ -99,7 +99,7 @@ class RRNotificationManager(private val context: Context) {
         val hours = durationSeconds / 3600
         val minutes = (durationSeconds % 3600) / 60
         val seconds = durationSeconds % 60
-        val durationFormatted = String.format("%02d:%02d:%02d", hours, minutes, seconds)
+        val durationFormatted = String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
 
         val expandedText = "节点: $nodeTag\n下行速率: ${speed.formattedDownSpeed}\n上行速率: ${speed.formattedUpSpeed}\n已连接: $durationFormatted"
 

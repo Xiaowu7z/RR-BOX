@@ -2,6 +2,8 @@ package com.rr.client.vpn
 
 import android.content.Intent
 import android.app.PendingIntent
+import androidx.core.service.quicksettings.PendingIntentActivityWrapper
+import androidx.core.service.quicksettings.TileServiceCompat
 import android.net.VpnService
 import android.os.Build
 import android.os.SystemClock
@@ -59,14 +61,12 @@ class RRQuickTileService : TileService() {
             val intent = Intent(this, RRQuickTilePermissionActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startActivityAndCollapse(PendingIntent.getActivity(
-                    this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                ))
-            } else {
-                @Suppress("DEPRECATION")
-                startActivityAndCollapse(intent)
-            }
+            // AndroidX selects the API-34 PendingIntent overload and keeps
+            // the legacy Intent overload confined to older Android versions.
+            TileServiceCompat.startActivityAndCollapse(
+                this, PendingIntentActivityWrapper(this, 0, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT, false)
+            )
             return
         }
 
