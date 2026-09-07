@@ -21,9 +21,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -58,6 +60,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,6 +73,9 @@ import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.friendlyLabel
 import com.rr.client.qr.QrImageDecoder
 import com.rr.client.qr.QrScanActivity
+import com.rr.client.subscription.TrafficInfoDisplay
+import com.rr.client.subscription.TrafficInfoNode
+import com.rr.client.ui.theme.BlueContainer
 import com.rr.client.ui.theme.CardBorder
 import com.rr.client.ui.theme.CyanPrimary
 import com.rr.client.ui.theme.CyanSecondary
@@ -288,9 +295,9 @@ private fun GroupHeader(group: NodeGroupUi, expanded: Boolean, onToggle: () -> U
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onToggle),
-        color = accent.copy(alpha = if (expanded) 0.18f else 0.12f),
+        color = if (expanded) BlueContainer else DarkSurface,
         shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.68f))
+        border = BorderStroke(1.dp, if (expanded) accent.copy(alpha = 0.55f) else CardBorder)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
@@ -306,7 +313,7 @@ private fun GroupHeader(group: NodeGroupUi, expanded: Boolean, onToggle: () -> U
                 )
                 Text(
                     text = if (group.isLocal) "本机单独添加 · ${group.nodes.size} 个" else "订阅节点 · ${group.nodes.size} 个",
-                    color = accent.copy(alpha = 0.78f),
+                    color = TextSecondary,
                     style = MaterialTheme.typography.labelSmall
                 )
             }
@@ -342,14 +349,17 @@ private fun NodeCard(
     var menuExpanded by remember(node.id) { mutableStateOf(false) }
     var showRenameDialog by remember(node.id) { mutableStateOf(false) }
     var renameInput by remember(node.id) { mutableStateOf(node.tag) }
+    val trafficInfo = remember(node) { TrafficInfoNode.parse(node) }
+    val selected = isSelected && trafficInfo == null
+    val clipboard = LocalClipboardManager.current
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onSelectNode),
+            .clickable(enabled = trafficInfo == null, onClick = onSelectNode),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = if (isSelected) DarkSurfaceVariant else DarkSurface),
-        border = BorderStroke(1.dp, if (isSelected) CyanPrimary else CardBorder)
+        colors = CardDefaults.cardColors(containerColor = if (selected) DarkSurfaceVariant else DarkSurface),
+        border = BorderStroke(1.dp, if (selected) CyanPrimary else CardBorder)
     ) {
         Row(
             modifier = Modifier
@@ -357,62 +367,77 @@ private fun NodeCard(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = node.tag,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = "${maskNodeAddress(node.server)}:${node.serverPort}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(Modifier.width(8.dp))
-            Column(horizontalAlignment = Alignment.End) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    ProtocolBadge(node)
-                    if (isSelected) {
-                        Spacer(modifier = Modifier.width(7.dp))
-                        Icon(Icons.Default.Check, contentDescription = "已选择", tint = CyanPrimary)
-                    }
+            if (trafficInfo != null) {
+                TrafficInfoContent(trafficInfo, Modifier.weight(1f))
+            } else {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = node.tag,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = "${maskNodeAddress(node.server)}:${node.serverPort}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
-                Spacer(Modifier.height(6.dp))
-                LatencyBadge(latencyState)
+
+                Spacer(Modifier.width(8.dp))
+                Column(horizontalAlignment = Alignment.End) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ProtocolBadge(node)
+                        if (selected) {
+                            Spacer(modifier = Modifier.width(7.dp))
+                            Icon(Icons.Default.Check, contentDescription = "已选择", tint = CyanPrimary)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    LatencyBadge(latencyState)
+                }
             }
 
             Box {
                 IconButton(onClick = { menuExpanded = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "节点操作", tint = TextSecondary)
+                    Icon(Icons.Default.MoreVert, contentDescription = if (trafficInfo == null) "节点操作" else "流量信息操作", tint = TextSecondary)
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text("测试 Ping") },
-                        leadingIcon = { Icon(Icons.Default.Speed, null) },
-                        onClick = { menuExpanded = false; onPingNode() }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("重命名") },
-                        leadingIcon = { Icon(Icons.Default.Edit, null) },
-                        onClick = {
-                            menuExpanded = false
-                            renameInput = node.tag
-                            showRenameDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("编辑节点") },
-                        leadingIcon = { Icon(Icons.Default.Edit, null) },
-                        onClick = { menuExpanded = false; onEditNode() }
-                    )
+                    if (trafficInfo == null) {
+                        DropdownMenuItem(
+                            text = { Text("测试 Ping") },
+                            leadingIcon = { Icon(Icons.Default.Speed, null) },
+                            onClick = { menuExpanded = false; onPingNode() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("重命名") },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = {
+                                menuExpanded = false
+                                renameInput = node.tag
+                                showRenameDialog = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("编辑节点") },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = { menuExpanded = false; onEditNode() }
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text("复制流量信息") },
+                            leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                            onClick = {
+                                menuExpanded = false
+                                clipboard.setText(AnnotatedString(trafficInfo.originalText))
+                            }
+                        )
+                    }
                     if (!isLocal && isEdited) {
                         DropdownMenuItem(
                             text = { Text("恢复订阅值") },
@@ -461,6 +486,35 @@ private fun NodeCard(
                 TextButton(onClick = { showRenameDialog = false }) { Text("取消") }
             }
         )
+    }
+}
+
+@Composable
+private fun TrafficInfoContent(info: TrafficInfoDisplay, modifier: Modifier = Modifier) {
+    SelectionContainer(modifier = modifier) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "流量概览",
+                style = MaterialTheme.typography.labelLarge,
+                color = CyanPrimary
+            )
+            info.remainingText?.let { remaining ->
+                Text(
+                    text = "剩余 $remaining",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            }
+            // Keep every provider field, even when its format is not recognized.
+            // No line cap, ellipsis, inferred allowance or sample values.
+            Text(
+                text = info.detailText.ifBlank { info.originalText }
+                    .replace(Regex("\\s*[|｜]\\s*"), "\n"),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextPrimary
+            )
+        }
     }
 }
 

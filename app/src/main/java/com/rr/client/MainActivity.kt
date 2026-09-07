@@ -63,6 +63,7 @@ import com.rr.client.storage.PreferencesManager
 import com.rr.client.subscription.SubscriptionFetcher
 import com.rr.client.subscription.SubscriptionParser
 import com.rr.client.subscription.SubscriptionUrlNormalizer
+import com.rr.client.subscription.TrafficInfoNode
 import com.rr.client.subscription.model.SubProfile
 import com.rr.client.ui.components.NodeEditDialog
 import com.rr.client.ui.components.PinSetupDialog
@@ -250,6 +251,7 @@ class MainActivity : ComponentActivity() {
         val allNodes = remember(baseNodes, nodeOverrides) {
             baseNodes.map { base -> NodeOverridePatcher.resolve(base, nodeOverrides[base.id]) }
         }
+        val selectableNodes = remember(allNodes) { allNodes.filterNot(TrafficInfoNode::isInfoNode) }
         val latestAllNodes by rememberUpdatedState(allNodes)
         val subscriptionProfiles = remember(subProfiles) { subProfiles.filterNot { it.isLocal } }
         val nodeGroups = remember(subProfiles, allNodes) {
@@ -276,7 +278,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        val selectedNode = allNodes.find { it.id == selectedNodeId }
+        val selectedNode = selectableNodes.find { it.id == selectedNodeId }
         val selectedProfile = subProfiles.firstOrNull { profile -> profile.nodes.any { it.id == selectedNodeId } }
 
         fun packagesFor(mode: String): Set<String> = when (mode) {
@@ -294,6 +296,8 @@ class MainActivity : ComponentActivity() {
         fun refreshFromProfiles(updated: List<SubProfile>) {
             subProfiles = updated
             val nodesNow = updated.flatMap { it.nodes }
+                .map { NodeOverridePatcher.resolve(it, nodeOverrides[it.id]) }
+                .filterNot(TrafficInfoNode::isInfoNode)
             val current = selectedNodeId
             val resolved = if (nodesNow.any { it.id == current }) current else nodesNow.firstOrNull()?.id
             if (resolved != current) {
@@ -319,6 +323,8 @@ class MainActivity : ComponentActivity() {
             bypassSelectedPackages = runCatching { prefs.bypassSelectedAppPackages.first() }.getOrDefault(emptySet())
 
             val nodesNow = loadedProfiles.flatMap { it.nodes }
+                .map { NodeOverridePatcher.resolve(it, nodeOverrides[it.id]) }
+                .filterNot(TrafficInfoNode::isInfoNode)
             val resolved = if (nodesNow.any { it.id == storedId }) storedId else nodesNow.firstOrNull()?.id
             selectedNodeId = resolved
             if (resolved != null) prefs.setSelectedNodeId(resolved)
@@ -332,7 +338,7 @@ class MainActivity : ComponentActivity() {
         }
 
         fun toast(text: String) = Toast.makeText(this@MainActivity, text, Toast.LENGTH_LONG).show()
-        fun currentTargetNode(): ProxyNode? = selectedNode ?: allNodes.firstOrNull()
+        fun currentTargetNode(): ProxyNode? = selectedNode ?: selectableNodes.firstOrNull()
 
         fun persistLocalNodes(transform: (List<ProxyNode>) -> List<ProxyNode>, message: String? = null) {
             lifecycleScope.launch {
@@ -603,11 +609,13 @@ class MainActivity : ComponentActivity() {
         }
 
         fun selectNode(nodeId: String) {
+            if (selectableNodes.none { it.id == nodeId }) return
             selectedNodeId = nodeId
             lifecycleScope.launch { prefs.setSelectedNodeId(nodeId) }
         }
 
         fun pingNode(node: ProxyNode) {
+            if (TrafficInfoNode.isInfoNode(node)) return
             if (isVpnRunning || isVpnStarting) {
                 toast("请先断开 VPN 再测速，避免当前代理影响 Ping 结果")
                 return
@@ -625,10 +633,10 @@ class MainActivity : ComponentActivity() {
                 toast("请先断开 VPN 再测速，避免当前代理影响 Ping 结果")
                 return
             }
-            if (allNodes.isEmpty()) return
-            latencyStates = latencyStates + allNodes.associate { it.id to NodeLatencyState.Testing }
+            if (selectableNodes.isEmpty()) return
+            latencyStates = latencyStates + selectableNodes.associate { it.id to NodeLatencyState.Testing }
             lifecycleScope.launch {
-                allNodes.chunked(3).forEach { batch ->
+                selectableNodes.chunked(3).forEach { batch ->
                     batch.map { node -> async { node.id to NodeLatencyTester.ping(node.server) } }
                         .awaitAll()
                         .forEach { (id, result) -> latencyStates = latencyStates + (id to result) }

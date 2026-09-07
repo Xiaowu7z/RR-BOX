@@ -9,6 +9,7 @@ import android.graphics.Shader
 import android.os.SystemClock
 import android.util.AttributeSet
 import com.journeyapps.barcodescanner.ViewfinderView
+import com.rr.client.R
 import kotlin.math.max
 
 /** NekoBox-style square QR viewfinder while keeping JourneyApps' real framing rectangle. */
@@ -17,12 +18,13 @@ class RrQrViewfinderView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : ViewfinderView(context, attrs) {
     private val density = resources.displayMetrics.density
+    private val accentColor = context.getColor(R.color.primary)
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(158, 0, 0, 0)
         style = Paint.Style.FILL
     }
     private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(0, 229, 255)
+        color = accentColor
         style = Paint.Style.STROKE
         strokeWidth = 4f * density
         strokeCap = Paint.Cap.ROUND
@@ -66,7 +68,7 @@ class RrQrViewfinderView @JvmOverloads constructor(
             y,
             r - inset,
             y,
-            intArrayOf(Color.TRANSPARENT, Color.rgb(0, 229, 255), Color.TRANSPARENT),
+            intArrayOf(Color.TRANSPARENT, accentColor, Color.TRANSPARENT),
             floatArrayOf(0f, 0.5f, 1f),
             Shader.TileMode.CLAMP
         )
