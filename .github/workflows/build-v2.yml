@@ -2,7 +2,7 @@ name: RRBOX 1.0.0 Build & Release (arm64-v8a)
 
 on:
   push:
-    branches: ["main", "dev"]
+    branches: ["main", "dev", "audit/stable-1.0.0"]
   workflow_dispatch:
 
 permissions:
@@ -27,248 +27,74 @@ env:
 
 jobs:
   build:
-    name: Build signed RRBOX 1.0.0
+    name: Test, lint and sign RRBOX 1.0.0
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-
     steps:
-      - name: Checkout RR-BOX
+      - name: Checkout exact source
         uses: actions/checkout@v5
         with:
           fetch-depth: 1
-
+      - name: Source inventory and regressions
+        run: |
+          python3 scripts/source_audit.py
+          bash scripts/source-regressions.sh
+          git diff --check
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
       - name: Install Android platform and build tools
         shell: bash
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
-
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
-
-      - name: Download maintained China binary rules
-        shell: bash
-        run: |
-          set -euo pipefail
-          rules_dir="app/src/main/assets/rules"
-          rm -rf "$rules_dir"
-          mkdir -p "$rules_dir" build-reports
-          fetch_rule() {
-            local output="$1"; shift
-            local tmp="${output}.tmp"
-            for url in "$@"; do
-              rm -f "$tmp"
-              if curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 60 "$url" -o "$tmp"; then
-                if [ "$(xxd -p -l 3 "$tmp")" = "535253" ] && [ "$(stat -c '%s' "$tmp")" -gt 8 ]; then
-                  mv "$tmp" "$output"
-                  return 0
-                fi
-              fi
-            done
-            return 1
-          }
-          fetch_rule "$rules_dir/geosite-geolocation-cn.srs" \
-            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs" \
-            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
-          fetch_rule "$rules_dir/geoip-cn.srs" \
-            "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs" \
-            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
-          sha256sum "$rules_dir"/*.srs | tee build-reports/CHINA-RULES-SHA256.txt
-
+      - name: Download and verify China binary rules
+        run: bash scripts/ci-fetch-rules.sh
       - name: Build pinned sing-box libbox
-        shell: bash
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          set -euo pipefail
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          rm -rf sing-box-src
-          rm -f app/libs/libbox.aar
-          mkdir -p app/libs build-reports
-          git clone --branch "$SING_BOX_TAG" --depth 1 https://github.com/SagerNet/sing-box.git sing-box-src
-          cd sing-box-src
-          test "$(git rev-parse HEAD)" = "$SING_BOX_COMMIT"
-          make lib_install
-          grep -q 'with_gvisor' cmd/internal/build_libbox/main.go
-          grep -q 'with_tailscale' cmd/internal/build_libbox/main.go
-          grep -q 'with_naive_outbound' cmd/internal/build_libbox/main.go
-          go run ./cmd/internal/build_libbox -target android -platform android/arm64
-          test -s libbox.aar
-          cp libbox.aar ../app/libs/libbox.aar
-          cd ..
-          unzip -Z1 app/libs/libbox.aar | grep -q '^jni/arm64-v8a/libbox\.so$'
-          sha256sum app/libs/libbox.aar | tee build-reports/LIBBOX-SHA256.txt
-
+        run: bash scripts/ci-build-libbox.sh
       - name: Build pinned HEV native TUN engine
-        shell: bash
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          set -euo pipefail
-          rm -rf hev-socks5-tunnel "$RUNNER_TEMP/rr-hev" app/src/main/jniLibs/arm64-v8a
-          mkdir -p "$RUNNER_TEMP/rr-hev/libs" "$RUNNER_TEMP/rr-hev/obj" app/src/main/jniLibs/arm64-v8a build-reports
-          git clone https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
-          git -C hev-socks5-tunnel checkout --detach "$HEV_COMMIT"
-          git -C hev-socks5-tunnel submodule update --init --recursive
-          test "$(git -C hev-socks5-tunnel rev-parse HEAD)" = "$HEV_COMMIT"
-          pushd hev-socks5-tunnel
-          "$ANDROID_NDK_HOME/ndk-build" \
-            NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=arm64-v8a APP_PLATFORM=android-26 \
-            NDK_LIBS_OUT="$RUNNER_TEMP/rr-hev/libs" NDK_OUT="$RUNNER_TEMP/rr-hev/obj" \
-            "APP_CFLAGS=-O3 -DNDEBUG -DPKGNAME=com/rr/client/vpn -DCLSNAME=HevTunnelNative" \
-            "APP_LDFLAGS=-Wl,--build-id=none -Wl,--hash-style=gnu"
-          popd
-          cp "$RUNNER_TEMP/rr-hev/libs/arm64-v8a/libhev-socks5-tunnel.so" app/src/main/jniLibs/arm64-v8a/
-          test -s app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so
-          sha256sum app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so | tee build-reports/HEV-SHA256.txt
-
-      - name: Restore release signing key
-        shell: bash
+        run: bash scripts/ci-build-hev.sh
+      - name: Restore existing release signing key
         env:
           RR_KEYSTORE_BASE64: ${{ secrets.RR_KEYSTORE_BASE64 }}
           RR_KEYSTORE_PASSWORD: ${{ secrets.RR_KEYSTORE_PASSWORD }}
           RR_KEY_ALIAS_VALUE: ${{ secrets.RR_KEY_ALIAS }}
           RR_KEY_PASSWORD_VALUE: ${{ secrets.RR_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          : "${RR_KEYSTORE_BASE64:?Missing RR_KEYSTORE_BASE64}"
-          : "${RR_KEYSTORE_PASSWORD:?Missing RR_KEYSTORE_PASSWORD}"
-          : "${RR_KEY_ALIAS_VALUE:?Missing RR_KEY_ALIAS}"
-          : "${RR_KEY_PASSWORD_VALUE:?Missing RR_KEY_PASSWORD_VALUE}"
-          keystore_path="$RUNNER_TEMP/rr-client-release.jks"
-          printf '%s' "$RR_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
-          keytool -list -keystore "$keystore_path" -storepass "$RR_KEYSTORE_PASSWORD" -alias "$RR_KEY_ALIAS_VALUE" >/dev/null
-          echo "RR_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
-
-      - name: Source regressions, unit tests and signed Release build
-        shell: bash
+        run: bash scripts/ci-restore-signing.sh
+      - name: All Release unit tests, Android Lint and signed APK
         env:
           RR_KEYSTORE_PASS: ${{ secrets.RR_KEYSTORE_PASSWORD }}
           RR_KEY_ALIAS: ${{ secrets.RR_KEY_ALIAS }}
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          grep -q 'versionCode = 100' app/build.gradle.kts
-          grep -q 'versionName = "1.0.0"' app/build.gradle.kts
-          grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
-          grep -q 'pipeline: true' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
-          grep -q 'tcp-fastopen: true' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
-          grep -q 'TRANSPORT_WIFI' app/src/main/java/com/rr/client/lab/NetworkDiagnostics.kt
-          grep -q 'TRANSPORT_CELLULAR' app/src/main/java/com/rr/client/lab/NetworkDiagnostics.kt
-          grep -q 'class RRQuickTileService' app/src/main/java/com/rr/client/vpn/RRQuickTileService.kt
-          grep -q 'Quick tile fast path' app/src/main/java/com/rr/client/vpn/RRQuickTileController.kt
-          grep -q 'android.permission.BIND_QUICK_SETTINGS_TILE' app/src/main/AndroidManifest.xml
-          grep -q 'LocalNodeDeletionPolicy.canDelete' app/src/main/java/com/rr/client/MainActivity.kt
-          grep -q 'activeRuntimeNodeId' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          grep -q 'class NetworkContinuityMonitor' app/src/main/java/com/rr/client/vpn/NetworkContinuityMonitor.kt
-          grep -q 'NetworkContinuityObserver' app/src/main/java/com/rr/client/lab/NetworkContinuityObserver.kt
-          grep -q 'ACTION_LAB_DROP_DATA_PLANE' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
-          grep -q 'object ProtocolCapabilityRegistry' app/src/main/java/com/rr/client/subscription/ProtocolCapabilityRegistry.kt
-          grep -q 'object RawLocalNodeImporter' app/src/main/java/com/rr/client/lab/RawLocalNodeImporter.kt
-
-          # Keep the already validated adaptive, monochrome and status-bar icon resources frozen for 1.0.
-          test "$(grep -c 'android:icon="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml)" -ge 3
-          grep -q 'android:logo="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml
-          grep -q 'android:roundIcon="@mipmap/ic_rrbox_app_097"' app/src/main/AndroidManifest.xml
-          grep -A6 'android:name=".vpn.RRVpnService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@mipmap/ic_rrbox_app_097"'
-          grep -A6 'android:name=".vpn.RRQuickTileService"' app/src/main/AndroidManifest.xml | grep -q 'android:icon="@drawable/ic_rrbox_status_097"'
-          cmp app/src/main/res/drawable-nodpi/ic_rrbox_launcher.webp app/src/main/res/drawable-nodpi/ic_rrbox_launcher_097.webp
-          test -s app/src/main/res/mipmap-anydpi-v26/ic_rrbox_app_097.xml
-          test -s app/src/main/res/mipmap-anydpi-v33/ic_rrbox_app_097.xml
-          grep -q '<monochrome android:drawable="@drawable/ic_rrbox_monochrome_097"' app/src/main/res/mipmap-anydpi-v33/ic_rrbox_app_097.xml
-          grep -q '<monochrome android:drawable="@drawable/ic_rrbox_monochrome_097"' app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
-          grep -q '@drawable/ic_rrbox_adaptive_foreground_097' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
-          test -s app/src/main/res/drawable/ic_rrbox_monochrome_097.xml
-          grep -q 'CHANNEL_ID = "rrbox_status_channel_097"' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'NOTIFICATION_ID = 1007' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          grep -q 'R.drawable.ic_rrbox_status_097' app/src/main/java/com/rr/client/vpn/NotificationManager.kt
-          if grep -q '\.setLargeIcon' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then exit 1; fi
-          if grep -q 'BitmapFactory' app/src/main/java/com/rr/client/vpn/NotificationManager.kt; then exit 1; fi
-
-          grep -q 'REPOSITORY = "RR-BOX"' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
-          grep -q 'releases/latest' app/src/main/java/com/rr/client/update/AppUpdateChecker.kt
-          grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' obtainium.json
-
-          gradle --no-daemon --max-workers=2 --stacktrace clean :app:testReleaseUnitTest :app:assembleRelease
-
-      - name: Verify APK and generate reports
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_apk="app/build/outputs/apk/release/app-release.apk"
-          test -s "$source_apk"
-          mkdir -p dist
-          output_apk="dist/${OUTPUT_APK_NAME}"
-          cp "$source_apk" "$output_apk"
-          cp obtainium.json dist/obtainium.json
-          apksigner="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
-          aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
-          "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
-          "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
-          grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-          grep -q "versionCode='100'" dist/PACKAGE-REPORT.txt
-          grep -q "versionName='1.0.0'" dist/PACKAGE-REPORT.txt
-          grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
-          unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
-          grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
-          grep -q '^lib/arm64-v8a/libhev-socks5-tunnel\.so$' dist/APK-FILE-LIST.txt
-          grep -q '^assets/rules/geosite-geolocation-cn\.srs$' dist/APK-FILE-LIST.txt
-          grep -q '^assets/rules/geoip-cn\.srs$' dist/APK-FILE-LIST.txt
-          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' dist/APK-FILE-LIST.txt; then exit 1; fi
-          sha256sum "$output_apk" | tee dist/SHA256SUMS.txt
-          apk_sha256="$(awk '{print $1}' dist/SHA256SUMS.txt)"
-          apk_size="$(stat -c '%s' "$output_apk")"
-          certificate_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' dist/SIGNATURE-REPORT.txt | head -n 1)"
-          cat > dist/BUILD-REPORT.md <<EOF
-          # RRBOX 1.0.0 Stable Build Report
-
-          - Source commit: $(git rev-parse HEAD)
-          - Package: com.rr.client
-          - Version code: 100
-          - Version name: 1.0.0
-          - ABI: arm64-v8a
-          - APK: ${OUTPUT_APK_NAME}
-          - APK size: ${apk_size} bytes
-          - APK SHA-256: ${apk_sha256}
-          - Signing certificate SHA-256: ${certificate_sha256}
-          - System engine: sing-box system TUN stable baseline
-          - HEV engine: native/lwIP + mapped DNS + SOCKS5 pipeline + best-effort client TFO
-          - Network continuity: event-driven physical path tracking + validated runtime recovery
-          - Quick Settings: validated Runtime Cache fast path
-          - App/notification icon resources: frozen validated production resources
-          - Update channels: GitHub releases/latest + Obtainium
-          EOF
-
-      - name: Upload build artifact
+        run: gradle --no-daemon --max-workers=2 --stacktrace clean :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease
+      - name: Verify APK, signer continuity and test reports
+        run: bash scripts/ci-verify-apk.sh
+      - name: Upload signed build
         uses: actions/upload-artifact@v4
         with:
           name: RRBOX-1.0.0-arm64-v8a
@@ -276,8 +102,15 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
-
-      - name: Publish RRBOX 1.0.0 stable release
+      - name: Align stable tag to tested source
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.0') }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/v1.0.0" -f sha="$GITHUB_SHA" -F force=false
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.0" --jq .object.sha)" = "$GITHUB_SHA"
+      - name: Publish audited RRBOX 1.0.0 stable release
         if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.0') }}"
         uses: softprops/action-gh-release@v2
         with:
@@ -287,49 +120,48 @@ jobs:
           prerelease: false
           make_latest: true
           generate_release_notes: false
-          body: |
-            ## RRBOX 1.0.0 正式版
-
-            RRBOX 从测试阶段进入 1.0 正式产品线。本版冻结核心数据面与更新通道，后续优先根据真实设备、真实运营商和真实节点反馈做稳定性迭代。
-
-            ### 1.0 核心
-            - System TUN 继续作为默认稳定数据面；HEV native/lwIP 作为正式高性能可选数据面，保留一键回退。
-            - 内置事件驱动的 Wi-Fi / 蜂窝网络连续性守护；健康切网不乱重启，数据面异常时使用已验证 Runtime Cache 恢复。
-            - 协议导入覆盖 VLESS、VMess、Hysteria1/2、TUIC、AnyTLS、Naive、Trojan、Shadowsocks、SOCKS、HTTP(S)、SSH、ShadowTLS、Snell；复杂或新字段可走原生 sing-box Raw outbound。
-            - Quick Settings 快捷开关命中 Runtime Cache 后跳过重复数据库/App 枚举/规则构建，并在失败时回滚状态。
-            - VPN 连接期间只保护实际正在运行的本地节点；其他本地节点仍可正常清理，不重启当前连接。
-            - Network Lab 保留可复现的 System vs HEV A/B、物理网络诊断、恢复演练、启动自检、日志与 Raw 校验。
-            - 图标、状态栏 Small Icon 与通知资源沿用已经实机验证通过的资源，不做无关改动。
-            - 正式签名 APK、App 内更新与 Obtainium 统一跟踪 GitHub Stable Release。
-
-            ### 实机 A/B 取舍
-            三次有效同机 A/B 的 run-level 中位数：System TLS 591 ms / TTFB 859 ms / 1.57 MB/s / CPU 1081 ms；HEV TLS 610 ms / TTFB 1010 ms / 1.56 MB/s / CPU 790 ms。HEV 在这组测试中 CPU 约低 27%，吞吐同档，但 TTFB 较慢，因此 1.0 仍保持 System 默认、HEV 可选，不宣称任何引擎在所有网络中必然更快。
-
-            当前正式 APK 仅发布 arm64-v8a，最低 Android 8.0。
+          body_path: dist/RELEASE-NOTES.md
           files: |
             dist/RRBOX-1.0.0-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
             dist/PACKAGE-REPORT.txt
+            dist/TEST-REPORT.json
+            dist/SOURCE-AUDIT.json
             dist/obtainium.json
-
-      - name: Verify App and Obtainium update channels
+      - name: Verify published APK digest and update channel
         if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.0') }}"
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          expected_tag="v1.0.0"
-          expected_apk="RRBOX-1.0.0-arm64-v8a.apk"
-          latest_tag=""
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
-            [ "$latest_tag" = "$expected_tag" ] && break
+          for attempt in {1..10}; do
+            gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/latest.json"
+            if python3 - <<'PY'
+          import json, os, pathlib
+          release=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'latest.json').read_text())
+          assert release['tag_name']=='v1.0.0' and not release['draft'] and not release['prerelease']
+          assets=[a for a in release['assets'] if a['name']==os.environ['OUTPUT_APK_NAME']]
+          assert len(assets)==1 and assets[0]['state']=='uploaded'
+          digest=pathlib.Path('dist/SHA256SUMS.txt').read_text().split()[0]
+          assert assets[0]['digest']=='sha256:'+digest
+          assert assets[0]['size']==pathlib.Path('dist',os.environ['OUTPUT_APK_NAME']).stat().st_size
+          assert json.loads(pathlib.Path('obtainium.json').read_text())['url']=='https://github.com/Xiaowu7z/RR-BOX'
+          PY
+            then exit 0; fi
             sleep 3
           done
-          test "$latest_tag" = "$expected_tag"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${expected_tag}" \
-            --jq ".assets[] | select(.name == \"${expected_apk}\") | .browser_download_url" | grep -q .
-          grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' dist/obtainium.json
+          exit 1
+      - name: Upload full diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RRBOX-audit-reports-${{ github.run_id }}
+          path: |
+            build-reports/
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 30
