@@ -2,7 +2,7 @@ name: RRBOX 1.0.0 Build & Release (arm64-v8a)
 
 on:
   push:
-    branches: ["main", "dev", "audit/stable-1.0.0"]
+    branches: ["main", "dev", "audit/stable-1.0.0", "feat/domestic-routing-wechat-douyin"]
   workflow_dispatch:
 
 permissions:
@@ -92,6 +92,13 @@ jobs:
           RR_KEY_ALIAS: ${{ secrets.RR_KEY_ALIAS }}
           RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
         run: gradle --no-daemon --max-workers=2 --stacktrace clean :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease
+      - name: Build pinned host core for routing verification
+        working-directory: sing-box-src
+        run: |
+          test "$(git rev-parse HEAD)" = "$SING_BOX_COMMIT"
+          go build -ldflags "-X github.com/sagernet/sing-box/constant.Version=${SING_BOX_TAG#v}" -o ../build-reports/sing-box-routing-check ./cmd/sing-box
+      - name: Verify domestic and overseas routing with real core
+        run: python3 scripts/verify-routing.py --sing-box build-reports/sing-box-routing-check --fixtures app/build/routing-fixtures --report build-reports/ROUTING-CORE-REPORT.json
       - name: Verify APK, signer continuity and test reports
         run: bash scripts/ci-verify-apk.sh
       - name: Upload signed build

@@ -1,180 +1,156 @@
 package com.rr.client.routing
 
 import android.content.Context
+import android.system.Os
+import android.system.OsConstants
+import com.google.gson.JsonParser
+import com.rr.client.vpn.VpnRuntimeStateStore
+import io.nekohasekai.libbox.Libbox
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-/**
- * Maintains the two binary sing-box rule-sets RRBOX needs for mainland routing:
- * China domains and China IP ranges. Build-time snapshots are bundled in the APK;
- * runtime updates replace both files only after both pass validation.
- */
+/** Bundled offline recovery and bounded, validated, all-or-nothing China rule updates. */
 object ChinaRuleSetManager {
-    // sing-box v1.14.0 constant.RuleSetVersionCurrent == 5.
-    private const val MAX_SUPPORTED_SRS_VERSION = 5
-
-    data class Paths(
-        val geositeChina: String,
-        val geoipChina: String
-    )
+    data class Paths(val geositeChina: String, val geoipChina: String)
 
     data class UpdateResult(
         val updatedAtMillis: Long,
-        val totalBytes: Long
+        val totalBytes: Long,
+        val generation: String = "",
+        val changed: Boolean = true
     )
 
-    private data class RuleSpec(
-        val assetName: String,
-        val localName: String,
-        val urls: List<String>
-    )
+    private data class RuleSpec(val fileName: String, val urls: List<String>)
 
     private val specs = listOf(
-        RuleSpec(
-            assetName = "geosite-geolocation-cn.srs",
-            localName = "geosite-geolocation-cn.srs",
-            urls = listOf(
-                "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs",
-                "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
-            )
-        ),
-        RuleSpec(
-            assetName = "geoip-cn.srs",
-            localName = "geoip-cn.srs",
-            urls = listOf(
-                "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-                "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
-            )
-        )
+        RuleSpec("geosite-geolocation-cn.srs", listOf(
+            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs",
+            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-cn.srs"
+        )),
+        RuleSpec("geoip-cn.srs", listOf(
+            "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+            "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs"
+        ))
     )
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    private val stores = mutableMapOf<String, RuleSetGenerationStore>()
+    private val client by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(50, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(false)
+            .build()
+    }
 
     fun ensureBundled(context: Context): Result<Paths> = runCatching {
-        val directory = ruleDirectory(context).apply { mkdirs() }
-        specs.forEach { spec ->
-            val destination = File(directory, spec.localName)
-            if (!isValidSrs(destination)) {
-                val temporary = File(directory, ".${spec.localName}.asset.tmp")
-                temporary.delete()
-                context.assets.open("rules/${spec.assetName}").use { input ->
-                    temporary.outputStream().use { output -> input.copyTo(output) }
+        val store = store(context)
+        store.current()?.let { return@runCatching it.paths() }
+        // Keep the old flat paths: an already saved runtime may still refer to them.
+        val legacy = specs.map { File(File(context.filesDir, "rules"), it.fileName) }
+        if (legacy.all { it.isFile }) {
+            runCatching {
+                store.install(onlyIfMissing = true) { targets ->
+                    legacy.zip(targets).forEach { (source, target) ->
+                        source.inputStream().use { input ->
+                            target.outputStream().use { SrsRuleSetValidation.copyBounded(input, it) }
+                        }
+                    }
                 }
-                require(isValidSrs(temporary)) {
-                    "内置规则集损坏或版本不兼容：${spec.localName}"
-                }
-                replaceAtomically(temporary, destination)
-            }
+            }.getOrNull()?.let { return@runCatching it.snapshot.paths() }
         }
-        currentPaths(context) ?: error("中国规则集初始化失败")
+        store.install(onlyIfMissing = true) { targets ->
+            specs.zip(targets).forEach { (spec, target) ->
+                context.assets.open("rules/${spec.fileName}").use { input ->
+                    target.outputStream().use { SrsRuleSetValidation.copyBounded(input, it) }
+                }
+            }
+        }.snapshot.paths()
     }
 
-    fun currentPaths(context: Context): Paths? {
-        val directory = ruleDirectory(context)
-        val geositeChina = File(directory, "geosite-geolocation-cn.srs")
-        val geoipChina = File(directory, "geoip-cn.srs")
-        if (!listOf(geositeChina, geoipChina).all(::isValidSrs)) return null
-        return Paths(
-            geositeChina = geositeChina.absolutePath,
-            geoipChina = geoipChina.absolutePath
-        )
-    }
+    fun currentPaths(context: Context): Paths? = runCatching { store(context).current()?.paths() }.getOrNull()
 
     suspend fun update(context: Context): Result<UpdateResult> = withContext(Dispatchers.IO) {
+        val coroutineContext = currentCoroutineContext()
         runCatching {
-            val directory = ruleDirectory(context).apply { mkdirs() }
-            val downloaded = mutableListOf<Pair<File, File>>()
-            try {
-                specs.forEach { spec ->
-                    val temp = File(directory, ".${spec.localName}.download.tmp")
-                    temp.delete()
-                    downloadFirstAvailable(spec.urls, temp)
-                    require(isValidSrs(temp)) {
-                        "下载到的规则集无效或高于 sing-box 1.14 支持版本：${spec.localName}"
-                    }
-                    downloaded += temp to File(directory, spec.localName)
+            val result = store(context).install { targets ->
+                specs.zip(targets).forEach { (spec, target) ->
+                    coroutineContext.ensureActive()
+                    downloadFirstAvailable(spec.urls, target) { coroutineContext.ensureActive() }
                 }
-
-                // Commit only after both files passed validation.
-                downloaded.forEach { (temp, destination) -> replaceAtomically(temp, destination) }
-                val paths = currentPaths(context) ?: error("规则集更新后校验失败")
-                val bytes = listOf(paths.geositeChina, paths.geoipChina)
-                    .sumOf { File(it).length() }
-                UpdateResult(System.currentTimeMillis(), bytes)
-            } finally {
-                directory.listFiles { file ->
-                    file.name.endsWith(".download.tmp") || file.name.endsWith(".asset.tmp")
-                }?.forEach(File::delete)
+                coroutineContext.ensureActive()
             }
-        }
+            UpdateResult(
+                result.snapshot.updatedAtMillis,
+                result.snapshot.files.sumOf { it.length() },
+                result.snapshot.generation,
+                result.changed
+            )
+        }.onFailure { if (it is CancellationException) throw it }
     }
 
-    private fun downloadFirstAvailable(urls: List<String>, target: File) {
+    private fun downloadFirstAvailable(urls: List<String>, target: File, ensureActive: () -> Unit) {
         var lastError: Throwable? = null
         for (url in urls) {
-            val result = runCatching {
-                val request = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "RRBOX rule-set updater")
-                    .build()
+            ensureActive()
+            try {
+                val request = Request.Builder().url(url)
+                    .header("User-Agent", "RRBOX rule-set updater").build()
                 client.newCall(request).execute().use { response ->
                     require(response.isSuccessful) { "HTTP ${response.code}" }
+                    require(response.request.url.isHttps) { "规则更新要求 HTTPS" }
                     val body = response.body ?: error("空响应")
+                    require(body.contentLength() <= SrsRuleSetValidation.MAX_FILE_BYTES) { "规则集下载超过 8 MiB 限制" }
                     target.outputStream().use { output ->
-                        body.byteStream().use { input -> input.copyTo(output) }
+                        body.byteStream().use { input -> SrsRuleSetValidation.copyBounded(input, output, ensureActive) }
                     }
                 }
+                // Try the mirror on corrupt/incompatible bodies, not just HTTP failures.
+                SrsRuleSetValidation.validate(listOf(target), Libbox::checkConfig)
+                return
+            } catch (error: Exception) {
+                target.delete()
+                if (error is CancellationException) throw error
+                lastError = error
             }
-            if (result.isSuccess && isValidSrs(target)) return
-            lastError = result.exceptionOrNull()
-            target.delete()
         }
-        throw IllegalStateException("规则集下载失败", lastError)
+        throw IllegalStateException("规则集下载失败，继续使用原有规则", lastError)
     }
 
-    internal fun isValidSrs(file: File): Boolean {
-        if (!file.isFile || file.length() < 8L) return false
-        return runCatching {
-            file.inputStream().use { input ->
-                val s = input.read()
-                val r = input.read()
-                val s2 = input.read()
-                val version = input.read()
-                s == 0x53 && r == 0x52 && s2 == 0x53 &&
-                    version in 1..MAX_SUPPORTED_SRS_VERSION
-            }
-        }.getOrDefault(false)
-    }
-
-    private fun replaceAtomically(source: File, destination: File) {
-        val backup = File(destination.parentFile, ".${destination.name}.bak")
-        backup.delete()
-        if (destination.exists() && !destination.renameTo(backup)) {
-            destination.copyTo(backup, overwrite = true)
-            destination.delete()
-        }
-        try {
-            if (!source.renameTo(destination)) {
-                source.copyTo(destination, overwrite = true)
-                source.delete()
-            }
-            require(isValidSrs(destination)) { "规则集写入失败：${destination.name}" }
-            backup.delete()
-        } catch (error: Throwable) {
-            destination.delete()
-            if (backup.exists()) backup.renameTo(destination)
-            throw error
+    private fun store(context: Context): RuleSetGenerationStore = synchronized(stores) {
+        val appContext = context.applicationContext
+        val directory = File(appContext.filesDir, "rules")
+        stores.getOrPut(directory.absolutePath) {
+            RuleSetGenerationStore(
+                directory = directory,
+                fileNames = specs.map { it.fileName },
+                validate = { files -> SrsRuleSetValidation.validate(files, Libbox::checkConfig) },
+                protectedPaths = {
+                    // Continuity recovery intentionally reuses its last validated configuration.
+                    val cached = VpnRuntimeStateStore(appContext).load()
+                    if (cached == null) emptySet() else {
+                        JsonParser.parseString(cached.configJson).asJsonObject
+                            .getAsJsonObject("route")?.getAsJsonArray("rule_set")
+                            ?.mapNotNull { it.asJsonObject.get("path")?.asString }?.toSet().orEmpty()
+                    }
+                },
+                directorySync = { path ->
+                    // Android's Java FileChannel may reject directories with EISDIR.
+                    val descriptor = Os.open(path.absolutePath,
+                        OsConstants.O_RDONLY or OsConstants.O_DIRECTORY or OsConstants.O_CLOEXEC, 0)
+                    try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+                }
+            )
         }
     }
 
-    private fun ruleDirectory(context: Context) = File(context.filesDir, "rules")
+    private fun RuleSetGenerationStore.Snapshot.paths() = Paths(files[0].absolutePath, files[1].absolutePath)
 }

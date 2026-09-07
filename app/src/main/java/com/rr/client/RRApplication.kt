@@ -3,7 +3,6 @@ package com.rr.client
 import android.app.Application
 import android.util.Log
 import com.rr.client.lab.NetworkContinuityObserver
-import com.rr.client.lab.RRLogCapture
 import com.rr.client.lab.StartupSelfCheck
 import com.rr.client.storage.AppDatabase
 import com.rr.client.storage.PreferencesManager
@@ -27,7 +26,8 @@ class RRApplication : Application() {
         preferencesManager = PreferencesManager(this)
 
         // Observability only. These collectors never participate in packet forwarding.
-        RRLogCapture.start()
+        // Process logcat is collected only while the lab is visible. Route metadata has its
+        // own bounded service collector and remains available while testing other apps.
         StartupSelfCheck.schedule(this)
         NetworkContinuityObserver.start(this)
     }

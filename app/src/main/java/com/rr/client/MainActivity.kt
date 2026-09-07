@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -84,6 +85,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -100,6 +103,7 @@ class MainActivity : ComponentActivity() {
     private var pinEnabledCached = false
     private var suppressNextBackgroundLock = false
     private var routingRestartJob: Job? = null
+    private var routingRestartGeneration = 0L
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -246,6 +250,7 @@ class MainActivity : ComponentActivity() {
         val allNodes = remember(baseNodes, nodeOverrides) {
             baseNodes.map { base -> NodeOverridePatcher.resolve(base, nodeOverrides[base.id]) }
         }
+        val latestAllNodes by rememberUpdatedState(allNodes)
         val subscriptionProfiles = remember(subProfiles) { subProfiles.filterNot { it.isLocal } }
         val nodeGroups = remember(subProfiles, allNodes) {
             val resolved = allNodes.associateBy { it.id }
@@ -453,26 +458,46 @@ class MainActivity : ComponentActivity() {
             fast: Boolean = fastForwarding
         ) {
             if (!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) return
-            val node = currentTargetNode() ?: return
+            // Updating rules must preserve the running node, even if another node is selected in UI.
+            val activeId = RRVpnService.activeRuntimeNodeId.value ?: return
+            val nodesSnapshot = latestAllNodes
+            val node = nodesSnapshot.firstOrNull { it.id == activeId } ?: return
+            val runtimeGeneration = RRVpnService.currentRuntimeGeneration()
 
             routingRestartJob?.cancel()
+            val updateGeneration = ++routingRestartGeneration
             routingRestartJob = lifecycleScope.launch {
                 applyingRouting = true
-                delay(300L)
+                try {
+                    delay(300L)
+                    if (!com.rr.client.vpn.RoutingUpdatePolicy.mayApply(
+                            com.rr.client.vpn.VpnConnectionIntentStore.isDesiredRunning(this@MainActivity),
+                            node.id, RRVpnService.activeRuntimeNodeId.value,
+                            runtimeGeneration, RRVpnService.currentRuntimeGeneration()
+                        )) return@launch
 
-                if (mode == PerAppPolicyResolver.MODE_ALLOW_LIST && packages.isEmpty()) {
-                    sendStopVpn()
-                    applyingRouting = false
-                    toast("仅选中代理模式至少需要选择 1 个应用，VPN 已断开")
-                    return@launch
+                    if (mode == PerAppPolicyResolver.MODE_ALLOW_LIST && packages.isEmpty()) {
+                        sendStopVpn()
+                        toast("仅选中应用模式至少需要选择 1 个应用，VPN 已断开")
+                        return@launch
+                    }
+
+                    val result = buildRuntimeConfig(node, nodesSnapshot, apps, smart, mode, packages, fast)
+                    currentCoroutineContext().ensureActive()
+                    if (!com.rr.client.vpn.RoutingUpdatePolicy.mayApply(
+                            com.rr.client.vpn.VpnConnectionIntentStore.isDesiredRunning(this@MainActivity),
+                            node.id, RRVpnService.activeRuntimeNodeId.value,
+                            runtimeGeneration, RRVpnService.currentRuntimeGeneration()
+                        )) return@launch
+                    result.onSuccess { config ->
+                        sendRestartVpn(config, node.tag, node.id, runtimeGeneration)
+                    }.onFailure { error ->
+                        toast("分流配置失败：${error.message ?: error.javaClass.simpleName}")
+                    }
+                    delay(400L)
+                } finally {
+                    if (updateGeneration == routingRestartGeneration) applyingRouting = false
                 }
-
-                buildRuntimeConfig(node, allNodes, apps, smart, mode, packages, fast)
-                    .onSuccess { config -> sendRestartVpn(config, node.tag, node.id) }
-                    .onFailure { error -> toast("分流配置失败：${error.message ?: error.javaClass.simpleName}") }
-
-                delay(400L)
-                applyingRouting = false
             }
         }
 
@@ -770,14 +795,34 @@ class MainActivity : ComponentActivity() {
                             if (!updatingRuleSets) {
                                 updatingRuleSets = true
                                 lifecycleScope.launch {
-                                    val result = ChinaRuleSetManager.update(this@MainActivity)
-                                    updatingRuleSets = false
-                                    result.onSuccess { update ->
-                                        prefs.setChinaRuleSetLastUpdated(update.updatedAtMillis)
-                                        toast("中国规则更新成功，共 ${update.totalBytes / 1024} KB")
-                                        scheduleRoutingRestart(perAppMode, packagesFor(perAppMode), smartRouting)
-                                    }.onFailure { error ->
-                                        toast("规则更新失败，已保留旧规则：${error.message ?: "网络错误"}")
+                                    try {
+                                        val result = ChinaRuleSetManager.update(this@MainActivity)
+                                        currentCoroutineContext().ensureActive()
+                                        result.onSuccess { update ->
+                                            prefs.setChinaRuleSetLastUpdated(update.updatedAtMillis)
+                                            val paths = withContext(Dispatchers.IO) {
+                                                ChinaRuleSetManager.currentPaths(this@MainActivity)
+                                            }
+                                            val needsApply = smartRouting &&
+                                                (RRVpnService.isRunning.value || RRVpnService.isStarting.value) &&
+                                                (update.changed || (paths != null &&
+                                                    com.rr.client.core.RuleSetRuntimePolicy.needsReload(
+                                                        RRVpnService.currentRuntimeConfig(),
+                                                        paths.geositeChina, paths.geoipChina
+                                                    )))
+                                            if (update.changed || needsApply) {
+                                                toast("中国规则已保存，共 ${update.totalBytes / 1024} KB")
+                                                if (needsApply) {
+                                                    scheduleRoutingRestart(perAppMode, packagesFor(perAppMode), smartRouting)
+                                                }
+                                            } else {
+                                                toast("中国规则已是最新，无需重启连接")
+                                            }
+                                        }.onFailure { error ->
+                                            toast("规则更新失败，继续使用可用规则：${error.message ?: "网络错误"}")
+                                        }
+                                    } finally {
+                                        updatingRuleSets = false
                                     }
                                 }
                             }
@@ -1032,10 +1077,12 @@ class MainActivity : ComponentActivity() {
         clearPendingVpn()
     }
 
-    private fun sendRestartVpn(config: String, nodeTag: String, nodeId: String) {
+    private fun sendRestartVpn(config: String, nodeTag: String, nodeId: String, runtimeGeneration: Long) {
         ContextCompat.startForegroundService(
             this,
-            vpnIntent(RRNotificationManager.ACTION_RESTART_VPN, config, nodeTag, nodeId)
+            vpnIntent(RRNotificationManager.ACTION_RESTART_VPN, config, nodeTag, nodeId).apply {
+                putExtra(RRVpnService.EXTRA_ROUTING_UPDATE_GENERATION, runtimeGeneration)
+            }
         )
     }
 

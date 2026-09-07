@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import com.rr.client.RRApplication
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.storage.PreferencesManager
@@ -52,12 +54,15 @@ import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
 import com.rr.client.vpn.RRVpnService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToLong
 
 class NetworkLabActivity : ComponentActivity() {
+    private var capturePreferenceJob: Job? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -67,10 +72,16 @@ class NetworkLabActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        RRLogCapture.start()
+        capturePreferenceJob = lifecycleScope.launch {
+            RRApplication.instance.preferencesManager.fastForwarding.collect { lightweight ->
+                RRLogCapture.start(lightweight = lightweight)
+            }
+        }
     }
 
     override fun onStop() {
+        capturePreferenceJob?.cancel()
+        capturePreferenceJob = null
         RRLogCapture.stop()
         super.onStop()
     }
@@ -91,6 +102,8 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
     val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
     val selfCheck by StartupSelfCheck.report.collectAsState()
     val logEntries by RRLogStore.entries.collectAsState()
+    val lightweight by preferences.fastForwarding.collectAsState(initial = true)
+    val connectionLoggingActive by RRLogStore.connectionLoggingActive.collectAsState()
 
     var profiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
@@ -284,8 +297,10 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
             } else {
                 LogCenter(
                     entries = logEntries,
-                    onCopy = { copyText("RRBOX logs", RRLogStore.exportText()) },
-                    onShare = { shareText("RRBOX logs", RRLogStore.exportText()) },
+                    lightweight = lightweight,
+                    connectionLoggingActive = connectionLoggingActive,
+                    onCopy = { copyText("RRBOX logs", RRLogStore.exportText(it)) },
+                    onShare = { shareText("RRBOX logs", RRLogStore.exportText(it)) },
                     onClear = RRLogStore::clear
                 )
             }
@@ -544,35 +559,73 @@ private fun LabDashboard(
 @Composable
 private fun LogCenter(
     entries: List<LabLogEntry>,
-    onCopy: () -> Unit,
-    onShare: () -> Unit,
+    lightweight: Boolean,
+    connectionLoggingActive: Boolean,
+    onCopy: (List<LabLogEntry>) -> Unit,
+    onShare: (List<LabLogEntry>) -> Unit,
     onClear: () -> Unit
 ) {
+    var routesOnly by rememberSaveable { mutableStateOf(true) }
+    var search by rememberSaveable { mutableStateOf("") }
+    val filtered = remember(entries, routesOnly, search) {
+        val query = search.trim()
+        entries.filter {
+            (!routesOnly || it.channel == ConnectionRouteLog.CHANNEL) &&
+                (query.isEmpty() || it.message.contains(query, ignoreCase = true) ||
+                    it.channel.contains(query, ignoreCase = true))
+        }
+    }
+    val timeFormat = remember { java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()) }
     Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
         Text("日志中心", style = MaterialTheme.typography.titleLarge, color = TextPrimary, fontWeight = FontWeight.Bold)
         Text(
-            "仅在 Network Lab 页面打开期间采集 RRBOX 自身进程日志，并自动隐藏 UUID、token、password、private_key 等敏感字段。",
+            when {
+                lightweight && connectionLoggingActive -> "轻量模式设置尚待应用，当前隧道仍在采集连接流向。请应用设置或重连节点。"
+                lightweight -> "轻量模式：停止新增连接流向记录，仅采集进程警告/错误。测试时请在设置关闭轻量模式并应用；历史记录仍可查看。"
+                connectionLoggingActive -> "正在记录经过 RRBOX 的新连接与实际出口，离开此页仍可测试其他 APP。仅保存最近 600 条，不记录数据包或请求正文。"
+                else -> "连接流向采集未启动。请关闭轻量模式并连接节点；连接建立后可在这里查看实际出口。"
+            },
             style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary
+        )
+        Text(
+            "查看所有应用请将接管范围设为所有应用；绕过 VPN 的流量无法记录。HEV 无法确认原始应用时显示未知；无法取得的域名或规则不会猜测。记录已自动脱敏。",
+            style = MaterialTheme.typography.labelSmall,
             color = TextSecondary
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onCopy, enabled = entries.isNotEmpty()) {
+            FilterChip(selected = routesOnly, onClick = { routesOnly = true }, label = { Text("连接流向") })
+            FilterChip(selected = !routesOnly, onClick = { routesOnly = false }, label = { Text("全部日志") })
+        }
+        OutlinedTextField(
+            value = search,
+            onValueChange = { search = it.take(200) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("搜索应用 / 包名 / 域名 / IP / 出口") }
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(onClick = { onCopy(filtered) }, enabled = filtered.isNotEmpty()) {
                 Icon(Icons.Default.ContentCopy, null)
-                Text("复制")
+                Text("复制筛选")
             }
-            OutlinedButton(onClick = onShare, enabled = entries.isNotEmpty()) {
+            OutlinedButton(onClick = { onShare(filtered) }, enabled = filtered.isNotEmpty()) {
                 Icon(Icons.Default.Share, null)
-                Text("导出")
+                Text("导出筛选")
             }
             OutlinedButton(onClick = onClear, enabled = entries.isNotEmpty()) {
                 Icon(Icons.Default.DeleteSweep, null)
                 Text("清空")
             }
         }
+        Text("匹配 ${filtered.size} 条 · 最新在前", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.height(8.dp))
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(entries.takeLast(300).reversed(), key = { "${it.timestamp}-${it.hashCode()}" }) { entry ->
+            items(filtered.asReversed()) { entry ->
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(8.dp),
@@ -580,7 +633,12 @@ private fun LogCenter(
                     border = BorderStroke(1.dp, CardBorder)
                 ) {
                     Column(Modifier.padding(10.dp)) {
-                        Text(entry.channel, color = CyanPrimary, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        Text(
+                            "${timeFormat.format(java.util.Date(entry.timestamp))} · ${if (entry.channel == ConnectionRouteLog.CHANNEL) "连接流向" else entry.channel}",
+                            color = CyanPrimary,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
                         Text(entry.message, color = TextSecondary, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                     }
                 }

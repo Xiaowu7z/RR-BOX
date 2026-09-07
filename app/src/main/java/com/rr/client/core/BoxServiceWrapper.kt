@@ -1,6 +1,11 @@
 package com.rr.client.core
 
 import com.rr.client.vpn.NetworkContinuityMonitor
+import com.rr.client.lab.ConnectionLogDeduplicator
+import com.rr.client.lab.ConnectionRouteLog
+import com.rr.client.lab.ConnectionRouteRecord
+import com.rr.client.lab.ConnectionRouteMessage
+import com.rr.client.lab.RRLogStore
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.VpnService
@@ -16,6 +21,7 @@ import io.nekohasekai.libbox.CommandClientOptions
 import io.nekohasekai.libbox.CommandServer
 import io.nekohasekai.libbox.CommandServerHandler
 import io.nekohasekai.libbox.ConnectionEvents
+import io.nekohasekai.libbox.ConnectionEvent
 import io.nekohasekai.libbox.ConnectionOwner
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.Libbox
@@ -58,6 +64,10 @@ class BoxServiceWrapper(
     private var interfaceMonitor: NetworkContinuityMonitor? = null
 
     private val recentLogs = ArrayDeque<String>()
+    private val connectionLogIds = ConnectionLogDeduplicator()
+    private val appLabels = LinkedHashMap<String, String>()
+    @Volatile private var collectConnectionLogs = false
+    @Volatile private var commandGeneration = 0L
 
     @Volatile
     var lastError: String? = null
@@ -108,17 +118,33 @@ class BoxServiceWrapper(
             server.startOrReloadService(configJson, OverrideOptions())
             isRunning = true
             isStopping = false
+            collectConnectionLogs = ConnectionRouteLog.enabledForConfig(configJson)
+            RRLogStore.setConnectionLoggingActive(false)
 
             runCatching {
                 val clientOptions = CommandClientOptions().apply {
                     addCommand(Libbox.CommandStatus)
+                    // Connections are optional diagnostics; lightweight mode keeps status only.
+                    if (collectConnectionLogs) addCommand(Libbox.CommandConnections)
                     statusInterval = 1_000_000_000L
                 }
-                val client = Libbox.newCommandClient(this, clientOptions)
+                val generation = commandGeneration
+                val handler = object : CommandClientHandler by this@BoxServiceWrapper {
+                    override fun writeConnectionEvents(events: ConnectionEvents) {
+                        if (generation == commandGeneration) this@BoxServiceWrapper.writeConnectionEvents(events)
+                    }
+
+                    override fun disconnected(message: String) {
+                        if (generation == commandGeneration) this@BoxServiceWrapper.disconnected(message)
+                    }
+                }
+                val client = Libbox.newCommandClient(handler, clientOptions)
                 client.connect()
                 commandClient = client
             }.onFailure { error ->
                 commandClient = null
+                collectConnectionLogs = false
+                RRLogStore.setConnectionLoggingActive(false)
                 Log.w(TAG, "Status client unavailable; VPN remains active", error)
                 recordLog("实时流量通道暂不可用，但代理隧道已启动：${error.message.orEmpty()}")
             }
@@ -139,6 +165,11 @@ class BoxServiceWrapper(
         if (isStopping) return
         isStopping = true
         isRunning = false
+        commandGeneration++
+        collectConnectionLogs = false
+        RRLogStore.setConnectionLoggingActive(false)
+        connectionLogIds.clear()
+        synchronized(appLabels) { appLabels.clear() }
         interfaceMonitor?.stop()
         interfaceMonitor = null
 
@@ -484,6 +515,7 @@ class BoxServiceWrapper(
     }
 
     override fun disconnected(message: String) {
+        if (collectConnectionLogs) RRLogStore.setConnectionLoggingActive(false)
         recordLog("CommandClient disconnected: $message")
     }
 
@@ -509,7 +541,74 @@ class BoxServiceWrapper(
 
     override fun updateClashMode(newMode: String) = Unit
 
-    override fun writeConnectionEvents(events: ConnectionEvents) = Unit
+    override fun writeConnectionEvents(events: ConnectionEvents) {
+        if (!collectConnectionLogs || !isRunning) return
+        RRLogStore.setConnectionLoggingActive(true)
+        runCatching { collectConnectionEvents(events) }.onFailure { error ->
+            // Optional diagnostics must never escape across gomobile or stop the data plane.
+            RRLogStore.record("LOG", "连接流向采集失败（隧道继续运行）：${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    private fun collectConnectionEvents(events: ConnectionEvents) {
+        val iterator = events.iterator()
+        val batch = ArrayList<ConnectionRouteMessage>(100)
+        var failed = 0
+        while (collectConnectionLogs && isRunning && iterator.hasNext()) {
+            val event = iterator.next()
+            runCatching { formatConnectionEvent(event) }
+                .onFailure { failed++ }.getOrNull()?.let(batch::add)
+            if (batch.size >= 100) {
+                RRLogStore.recordConnections(batch)
+                batch.clear()
+            }
+        }
+        RRLogStore.recordConnections(batch)
+        if (failed > 0) RRLogStore.record("LOG", "本批 $failed 条连接元数据暂不可用，已跳过；隧道继续运行。")
+    }
+
+    private fun formatConnectionEvent(event: ConnectionEvent): ConnectionRouteMessage? {
+        // Traffic deltas/close events have no new routing decision. Never log per packet.
+        if (event.type != Libbox.ConnectionEventNew.toInt() &&
+            event.type != Libbox.ConnectionEventClosed.toInt()) return null
+        val connection = event.connection ?: return null
+        if (!connectionLogIds.accept(event.getID())) return null
+        val hev = connection.inbound == HevConfigAdapter.SOCKS_TAG
+        val process = connection.processInfo.takeUnless { hev }
+        val packages = ArrayList<String>()
+        process?.packageNames()?.let { names ->
+            while (names.hasNext() && packages.size < 16) packages.add(names.next().take(256))
+        }
+        val application = packages.takeIf { it.size == 1 }?.first()?.let(::applicationLabel)
+        val message = ConnectionRouteLog.format(ConnectionRouteRecord(
+            application = application,
+            packages = packages,
+            uid = process?.getUserID(),
+            domain = connection.domain.orEmpty(),
+            destination = connection.destination.orEmpty(),
+            network = connection.network.orEmpty(),
+            outbound = connection.outbound.orEmpty(),
+            outboundType = connection.outboundType.orEmpty(),
+            rule = connection.rule.orEmpty(),
+            hev = hev
+        ))
+        return ConnectionRouteMessage(
+            timestamp = connection.createdAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+            message = message + if (connection.closedAt > 0) "\n状态：已结束（历史或补录）" else ""
+        )
+    }
+
+    private fun applicationLabel(packageName: String): String = synchronized(appLabels) {
+        appLabels[packageName] ?: run {
+            val label = runCatching {
+                val manager = vpnService?.packageManager ?: return@runCatching packageName
+                manager.getApplicationLabel(manager.getApplicationInfo(packageName, 0)).toString().take(120)
+            }.getOrDefault(packageName)
+            if (appLabels.size >= 256) appLabels.entries.iterator().run { next(); remove() }
+            appLabels[packageName] = label
+            label
+        }
+    }
 
     fun isCoreRunning(): Boolean = isRunning
 

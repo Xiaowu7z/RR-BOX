@@ -9,6 +9,7 @@ import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.ChinaRuleSetManager
+import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.PerAppPolicyResolver
 
 /** Stable sing-box 1.14 runtime configuration. */
@@ -70,6 +71,9 @@ object ConfigBuilder {
                 add(JsonObject().apply {
                     addProperty("type", "direct")
                     addProperty("tag", TAG_DIRECT)
+                    // HEV submits mapped destinations as domains: resolve a direct business
+                    // using the same local resolver chosen by its DNS policy.
+                    addProperty("domain_resolver", DNS_DIRECT)
                 })
             })
 
@@ -88,6 +92,8 @@ object ConfigBuilder {
                     }
 
                     if (smartRouting) {
+                        addDomainRoutingRules(this)
+
                         add(JsonObject().apply {
                             addProperty("ip_is_private", true)
                             addProperty("outbound", TAG_DIRECT)
@@ -102,11 +108,10 @@ object ConfigBuilder {
                                 add("rule_set", JsonArray().apply { add(RULE_GEOIP_CN) })
                                 addProperty("outbound", TAG_DIRECT)
                             })
-                        } else {
-                            add(JsonObject().apply {
-                                add("domain_suffix", JsonArray().apply { add("cn") })
-                                addProperty("outbound", TAG_DIRECT)
-                            })
+                            // This evaluates actual destination IPs. The pinned core does not
+                            // auto-resolve domain-form HEV requests for IP rules. Deliberately
+                            // avoid a global resolve action: its failure aborts otherwise viable
+                            // remote-DNS proxy connections, and adds a serial DNS round trip.
                         }
                     }
                 })
@@ -161,6 +166,27 @@ object ConfigBuilder {
         })
     }
 
+    private fun addDomainRoutingRules(rules: JsonArray) {
+        DomesticRoutingPolicy.domainRules.forEach { policy ->
+            rules.add(domainCondition(policy).apply {
+                addProperty("outbound", when (policy.destination) {
+                    DomesticRoutingPolicy.Destination.DIRECT -> TAG_DIRECT
+                    DomesticRoutingPolicy.Destination.PROXY -> TAG_PROXY
+                })
+            })
+        }
+    }
+
+    private fun domainCondition(policy: DomesticRoutingPolicy.DomainRule): JsonObject =
+        JsonObject().apply {
+            if (policy.domains.isNotEmpty()) {
+                add("domain", JsonArray().apply { policy.domains.forEach(::add) })
+            }
+            if (policy.suffixes.isNotEmpty()) {
+                add("domain_suffix", JsonArray().apply { policy.suffixes.forEach(::add) })
+            }
+        }
+
     private fun buildDnsConfig(
         selectedNode: ProxyNode,
         smartRouting: Boolean,
@@ -194,15 +220,18 @@ object ConfigBuilder {
                 })
             }
             if (smartRouting) {
+                DomesticRoutingPolicy.domainRules.forEach { policy ->
+                    add(domainCondition(policy).apply {
+                        addProperty("action", "route")
+                        addProperty("server", when (policy.destination) {
+                            DomesticRoutingPolicy.Destination.DIRECT -> DNS_DIRECT
+                            DomesticRoutingPolicy.Destination.PROXY -> DNS_REMOTE
+                        })
+                    })
+                }
                 if (ruleSets != null) {
                     add(JsonObject().apply {
                         add("rule_set", JsonArray().apply { add(RULE_GEOSITE_CN) })
-                        addProperty("action", "route")
-                        addProperty("server", DNS_DIRECT)
-                    })
-                } else {
-                    add(JsonObject().apply {
-                        add("domain_suffix", JsonArray().apply { add("cn") })
                         addProperty("action", "route")
                         addProperty("server", DNS_DIRECT)
                     })
@@ -211,6 +240,10 @@ object ConfigBuilder {
         })
         addProperty("final", DNS_REMOTE)
         addProperty("strategy", "prefer_ipv4")
+        // Recover domains for System TUN flows that cannot be sniffed. This is best-effort:
+        // application-owned DoH/HTTPDNS and shared-IP ambiguity still need IP/default rules.
+        // sing-box 1.14 isolates DNS caches by transport already; independent_cache is deprecated.
+        addProperty("reverse_mapping", smartRouting)
     }
 
     /**

@@ -115,7 +115,7 @@ fun SettingsScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(text = "中国大陆智能分流", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                     Text(
-                        text = "使用维护中的 SagerNet 中国域名与 IP 二进制规则集；局域网地址保持直连。",
+                        text = "国内服务与局域网直连，海外服务走当前节点。微信、国内抖音与海外 TikTok 分开判断。",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -127,6 +127,16 @@ fun SettingsScreen(
                 )
             }
             Spacer(Modifier.height(10.dp))
+            Text(
+                text = if (smartRouting) {
+                    "已开启日常分流：微信消息、媒体与视频号，国内抖音视频与直播使用专项域名规则；TikTok（含改包名的第三方版本）按海外服务域名走代理。"
+                } else {
+                    "已关闭智能分流：纳入接管范围的业务连接全部走当前代理节点。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Spacer(Modifier.height(8.dp))
             Text(
                 text = if (ruleSetLastUpdated > 0L) {
                     "本地规则更新时间：${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(ruleSetLastUpdated))}"
@@ -161,7 +171,7 @@ fun SettingsScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(text = "轻量模式", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                     Text(
-                        text = "不改变 TUN 引擎与节点协议；降低运行日志，并在关闭智能分流时跳过全局流量嗅探，减少额外 CPU 开销。",
+                        text = "关闭逐连接流向日志，仅保留必要错误与少量状态信息。分流规则继续生效；关闭智能分流时也会减少额外流量检查。",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )

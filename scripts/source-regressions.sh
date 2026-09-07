@@ -48,6 +48,6 @@ grep -q '"url": "https://github.com/Xiaowu7z/RR-BOX"' obtainium.json
 grep -q 'NodeOverridePatcher.resolve' app/src/main/java/com/rr/client/MainActivity.kt
 grep -q 'expectedConfigJson = configJson' app/src/main/java/com/rr/client/vpn/RRQuickTileController.kt
 grep -q 'onImportText = ::importClipboardContent' app/src/main/java/com/rr/client/MainActivity.kt
-grep -q 'val generation = ++requestGeneration' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
+grep -q 'val generation = advanceRuntimeGeneration()' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
 grep -q 'SafeConstructor' app/src/main/java/com/rr/client/subscription/ClashSubscriptionConverter.kt
 grep -q 'SecretRedactor.redact' app/src/main/java/com/rr/client/lab/RRLogStore.kt

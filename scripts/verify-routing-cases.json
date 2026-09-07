@@ -1,0 +1,206 @@
+{
+  "schema": 1,
+  "sources": [
+    {
+      "url": "https://github.com/v2fly/domain-list-community/blob/master/data/tencent",
+      "git_blob": "690b6bebe87b8abad0da2ca46c6e9d4d4375fb66"
+    },
+    {
+      "url": "https://github.com/v2fly/domain-list-community/blob/master/data/douyin",
+      "git_blob": "2cd5c0ef69ade3d35dbf2230edd14412d6c19f1d"
+    },
+    {
+      "url": "https://github.com/v2fly/domain-list-community/blob/master/data/bytedance",
+      "git_blob": "5c90566c4ac1accf061cccb11373f80fbee193f1"
+    },
+    {
+      "url": "https://github.com/v2fly/domain-list-community/blob/master/data/tiktok",
+      "git_blob": "dd1c8d43f569b6dfaf831d320305ac79f94c0532"
+    }
+  ],
+  "note": "Domain suffix coverage probes, including representative/synthetic subdomains. These are not captured application sessions or a complete endpoint inventory.",
+  "groups": [
+    {
+      "name": "wechat-messages-login",
+      "outbound": "direct",
+      "domains": [
+        "weixin.qq.com",
+        "short.weixin.qq.com",
+        "long.weixin.qq.com",
+        "login.weixin.qq.com"
+      ]
+    },
+    {
+      "name": "wechat-images-files",
+      "outbound": "direct",
+      "domains": [
+        "mmbiz.qpic.cn",
+        "wx.qlogo.cn",
+        "res.wx.qq.com",
+        "file.weixin.qq.com"
+      ]
+    },
+    {
+      "name": "wechat-channels-live",
+      "outbound": "direct",
+      "domains": [
+        "channels.weixin.qq.com",
+        "finder.video.qq.com",
+        "wxlivecdn.com",
+        "live.wxlivecdn.com"
+      ]
+    },
+    {
+      "name": "wechat-miniapps-pay",
+      "outbound": "direct",
+      "domains": [
+        "mp.weixin.qq.com",
+        "servicewechat.com",
+        "wxgateway.com",
+        "api.mch.weixin.qq.com",
+        "tenpay.com"
+      ]
+    },
+    {
+      "name": "douyin-feed-comment-messages",
+      "outbound": "direct",
+      "domains": [
+        "www.douyin.com",
+        "amemv.com",
+        "iesdouyin.com",
+        "douyinfe.com"
+      ]
+    },
+    {
+      "name": "douyin-video-image",
+      "outbound": "direct",
+      "domains": [
+        "v3.douyinvod.com",
+        "v5.douyincdn.com",
+        "p3.douyinpic.com",
+        "douyinstatic.com"
+      ]
+    },
+    {
+      "name": "douyin-live-upload",
+      "outbound": "direct",
+      "domains": [
+        "webcast.amemv.com",
+        "douyinliving.com",
+        "huoshanlive.com"
+      ]
+    },
+    {
+      "name": "douyin-shopping-pay",
+      "outbound": "direct",
+      "domains": [
+        "douyinec.com",
+        "douyinpay.com",
+        "jinritemai.com",
+        "open-douyin.com"
+      ]
+    },
+    {
+      "name": "daily-mainland",
+      "outbound": "direct",
+      "domains": [
+        "www.taobao.com",
+        "www.tmall.com",
+        "www.jd.com",
+        "www.alipay.com",
+        "www.meituan.com",
+        "www.dianping.com",
+        "www.ele.me",
+        "www.amap.com",
+        "map.baidu.com",
+        "www.bilibili.com",
+        "www.xiaohongshu.com",
+        "www.zhihu.com",
+        "www.12306.cn"
+      ]
+    },
+    {
+      "name": "tiktok-api-messages-third-party",
+      "outbound": "proxy",
+      "domains": [
+        "www.tiktok.com",
+        "api.tiktokv.com",
+        "api.tiktokv.us",
+        "api.tiktokv.eu",
+        "tik-tokapi.com"
+      ]
+    },
+    {
+      "name": "tiktok-video-image",
+      "outbound": "proxy",
+      "domains": [
+        "v16.tiktokcdn.com",
+        "v16.tiktokcdn-us.com",
+        "v16.tiktokcdn-eu.com",
+        "p16.muscdn.com",
+        "p16.ibyteimg.com",
+        "tos-useast.ibytedtos.com",
+        "api.byteoversea.com"
+      ]
+    },
+    {
+      "name": "tiktok-live-upload",
+      "outbound": "proxy",
+      "domains": [
+        "live.tiktokv.com",
+        "ttlivecdn.com",
+        "ttoverseaus.net",
+        "tiktokglobalshopv.com"
+      ]
+    },
+    {
+      "name": "tiktok-cdn-alias",
+      "outbound": "proxy",
+      "domains": [
+        "tiktokcdn.com.akamaized.net",
+        "p16-tiktokcdn-com.akamaized.net",
+        "tiktokv.com.edgekey.net",
+        "tiktokcdn-us.com.edgesuite.net"
+      ]
+    },
+    {
+      "name": "foreign-in-wechat-browser",
+      "outbound": "proxy",
+      "domains": [
+        "www.youtube.com",
+        "api.telegram.org",
+        "x.com",
+        "chatgpt.com",
+        "www.google.com"
+      ]
+    },
+    {
+      "name": "suffix-boundary",
+      "outbound": "proxy",
+      "domains": [
+        "notdouyin.com",
+        "douyin.com.evil.invalid",
+        "notqq.com",
+        "weixin.qq.com.evil.invalid",
+        "notservicewechat.com",
+        "servicewechat.com.evil.invalid",
+        "ordinary.akamaized.net",
+        "ordinary.edgesuite.net",
+        "unknown.rr-routing.invalid"
+      ]
+    },
+    {
+      "name": "shared-cdn-maintained-srs",
+      "outbound": "direct",
+      "bundled_only": true,
+      "domains": [
+        "aweme.snssdk.com",
+        "p3.byteimg.com",
+        "sf3.pstatp.com",
+        "tos-cn.bytetos.com",
+        "webcast.snssdk.com",
+        "wxcloudrun.com"
+      ]
+    }
+  ]
+}

@@ -17,6 +17,7 @@ import com.rr.client.traffic.SessionTraffic
 import com.rr.client.traffic.TrafficSpeed
 import io.nekohasekai.libbox.Libbox
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,8 +83,10 @@ class RRVpnService : VpnService() {
             _engineRestartMeasurement.asStateFlow()
 
         private var serviceRef: WeakReference<RRVpnService>? = null
+        private val runtimeGenerationSequence = AtomicLong(0L)
 
         const val EXTRA_RECOVERY_REQUEST = "EXTRA_RECOVERY_REQUEST"
+        const val EXTRA_ROUTING_UPDATE_GENERATION = "EXTRA_ROUTING_UPDATE_GENERATION"
         const val EXTRA_CONFIG_JSON = "EXTRA_CONFIG_JSON"
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
@@ -102,6 +105,10 @@ class RRVpnService : VpnService() {
 
         /** Real local data-plane status, not just the UI StateFlow flag. */
         fun isDataPlaneHealthy(): Boolean = serviceRef?.get()?.isDataPlaneHealthyInternal() == true
+
+        fun currentRuntimeGeneration(): Long = serviceRef?.get()?.requestGeneration ?: -1L
+
+        fun currentRuntimeConfig(): String? = serviceRef?.get()?.activeConfigJson
     }
 
     inner class LocalBinder : Binder() {
@@ -175,6 +182,19 @@ class RRVpnService : VpnService() {
             }
 
             RRNotificationManager.ACTION_RESTART_VPN -> {
+                if (intent.hasExtra(EXTRA_ROUTING_UPDATE_GENERATION) &&
+                    !RoutingUpdatePolicy.mayApply(
+                        VpnConnectionIntentStore.isDesiredRunning(this),
+                        intent.getStringExtra(EXTRA_NODE_ID), activeNodeId,
+                        intent.getLongExtra(EXTRA_ROUTING_UPDATE_GENERATION, -1L), requestGeneration
+                    )) {
+                    Log.i(TAG, "Discarding routing update for an ended or replaced VPN session")
+                    if (!_isRunning.value && !_isStarting.value) {
+                        ensureForeground("RRBOX · 已取消分流更新")
+                        stopVpn(persistTraffic = false)
+                    }
+                    return START_NOT_STICKY
+                }
                 if (intent.getBooleanExtra(EXTRA_RECOVERY_REQUEST, false) &&
                     !VpnConnectionIntentStore.isDesiredRunning(this)) {
                     if (!_isRunning.value && !_isStarting.value) {
@@ -263,6 +283,9 @@ class RRVpnService : VpnService() {
         return START_NOT_STICKY
     }
 
+    private fun advanceRuntimeGeneration(): Long =
+        runtimeGenerationSequence.incrementAndGet().also { requestGeneration = it }
+
     private fun ensureForeground(title: String) {
         startForeground(
             RRNotificationManager.NOTIFICATION_ID,
@@ -276,7 +299,7 @@ class RRVpnService : VpnService() {
         hevBenchmarkSelfTraffic: Boolean = false
     ) {
         val measurementStartedAt = SystemClock.elapsedRealtime()
-        val generation = ++requestGeneration
+        val generation = advanceRuntimeGeneration()
         stopping = false
         _lastError.value = null
         _isStarting.value = true
@@ -453,7 +476,7 @@ class RRVpnService : VpnService() {
             Log.w(TAG, "Ignoring lab data-plane drop: no desired active runtime")
             return
         }
-        val generation = ++requestGeneration
+        val generation = advanceRuntimeGeneration()
         startJob?.cancel()
         startJob = null
         serviceScope.launch {
@@ -578,7 +601,7 @@ class RRVpnService : VpnService() {
     private fun stopVpn(persistTraffic: Boolean) {
         if (stopping) return
         stopping = true
-        val generation = ++requestGeneration
+        val generation = advanceRuntimeGeneration()
         startJob?.cancel()
         startJob = null
 
@@ -625,7 +648,7 @@ class RRVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        ++requestGeneration
+        advanceRuntimeGeneration()
         startJob?.cancel()
         startJob = null
         runCatching { hevEngine?.stop() }

@@ -73,7 +73,7 @@ fun AppRoutingScreen(
             .padding(16.dp)
     ) {
         Text(
-            text = "分应用代理",
+            text = "应用接管范围",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
             color = TextPrimary
@@ -85,8 +85,8 @@ fun AppRoutingScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             listOf(
-                PerAppPolicyResolver.MODE_ALL to "全部代理",
-                PerAppPolicyResolver.MODE_ALLOW_LIST to "仅选中代理",
+                PerAppPolicyResolver.MODE_ALL to "所有应用",
+                PerAppPolicyResolver.MODE_ALLOW_LIST to "仅选中应用",
                 PerAppPolicyResolver.MODE_DISALLOW_LIST to "选中绕过"
             ).forEach { (mode, label) ->
                 val selected = perAppMode == mode
@@ -109,9 +109,9 @@ fun AppRoutingScreen(
         Spacer(modifier = Modifier.height(10.dp))
         Text(
             text = when (perAppMode) {
-                PerAppPolicyResolver.MODE_ALLOW_LIST -> "只有这里勾选的应用进入 RRBOX。这个名单与“选中绕过”完全独立。"
+                PerAppPolicyResolver.MODE_ALLOW_LIST -> "只有勾选的应用使用 RRBOX 分流；其他应用直接联网。这个名单与“选中绕过”独立保存。"
                 PerAppPolicyResolver.MODE_DISALLOW_LIST -> "这里勾选的应用完全绕过 RRBOX。这个名单与“仅选中代理”完全独立。"
-                else -> "所有应用进入 RRBOX；全局模式不显示应用选择列表。"
+                else -> "所有应用使用 RRBOX 分流。开启智能分流后，国内服务直连，海外服务走当前代理节点。"
             },
             style = MaterialTheme.typography.bodySmall,
             color = TextSecondary
@@ -134,10 +134,10 @@ fun AppRoutingScreen(
                 border = BorderStroke(1.dp, CardBorder)
             ) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("全部代理已启用", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text("所有应用已纳入分流", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "此模式没有可勾选的应用界面。切回另外两个模式时，会分别恢复各自保存的名单。",
+                        "接管范围决定哪些应用使用 RRBOX，设置中的智能分流决定连接走直连还是代理。切换到其他范围时会恢复各自保存的名单。",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )

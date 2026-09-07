@@ -28,6 +28,7 @@ test "$certificate_sha256" = "fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16
 "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/zipalign" -c 4 "$output_apk"
 python3 scripts/collect_reports.py
 cp build-reports/SOURCE-AUDIT.json dist/SOURCE-AUDIT.json
+cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
 # RRBOX 1.0.0 Stable Build Report
 
@@ -44,6 +45,8 @@ cat > dist/BUILD-REPORT.md <<EOF
 - HEV engine: native/lwIP + mapped DNS + SOCKS5 pipeline + best-effort client TFO
 - Network continuity: event-driven physical path tracking + validated runtime recovery
 - Quick Settings: current persisted config checked before cache reuse
+- Routing: shared domestic DNS/route policy, WeChat / Douyin / TikTok separation
+- Routing verification: pinned host core TCP/UDP/DNS fixture report (device acceptance still required)
 - App/notification icon resources: frozen validated production resources
 - Update channels: GitHub releases/latest + Obtainium
 EOF
