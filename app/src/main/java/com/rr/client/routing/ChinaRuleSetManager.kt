@@ -1,6 +1,7 @@
 package com.rr.client.routing
 
 import android.content.Context
+import android.os.Build
 import android.system.Os
 import android.system.OsConstants
 import com.google.gson.JsonParser
@@ -145,8 +146,10 @@ object ChinaRuleSetManager {
                 directorySync = { path ->
                     // Android's Java FileChannel may reject directories with EISDIR.
                     require(path.isDirectory) { "规则集同步目标必须是目录" }
-                    val descriptor = Os.open(path.absolutePath,
-                        OsConstants.O_RDONLY or OsConstants.O_CLOEXEC, 0)
+                    val closeOnExec = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        OsConstants.O_CLOEXEC
+                    } else 0
+                    val descriptor = Os.open(path.absolutePath, OsConstants.O_RDONLY or closeOnExec, 0)
                     try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
                 }
             )
