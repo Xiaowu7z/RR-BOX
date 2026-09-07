@@ -9,6 +9,7 @@ import com.rr.client.RRApplication
 import com.rr.client.core.ConfigBuilder
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
+import com.rr.client.subscription.TrafficInfoNode
 import com.rr.client.subscription.model.SubProfile
 import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.CancellationException
@@ -47,12 +48,13 @@ object RRQuickTileController {
             val allNodes = profiles
                 .flatMap { it.nodes }
                 .map { node -> com.rr.client.core.NodeOverridePatcher.resolve(node, overrides[node.id]) }
+            val selectableNodes = allNodes.filterNot(TrafficInfoNode::isInfoNode)
 
-            require(allNodes.isNotEmpty()) {
+            require(selectableNodes.isNotEmpty()) {
                 "还没有可用节点，请先在 RRBOX 中添加节点或订阅"
             }
 
-            val targetNode = allNodes.firstOrNull { it.id == storedId } ?: allNodes.first()
+            val targetNode = selectableNodes.firstOrNull { it.id == storedId } ?: selectableNodes.first()
             val ruleSets = if (smartRouting) {
                 ChinaRuleSetManager.ensureBundled(context).getOrNull()
             } else {
