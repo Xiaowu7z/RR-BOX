@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.net.NetworkCapabilities
 import android.os.ParcelFileDescriptor
 import android.os.Process as AndroidProcess
@@ -28,7 +29,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.File
+import java.io.FileDescriptor
 import java.io.IOException
 import java.io.InputStream
 import java.net.SocketTimeoutException
@@ -70,13 +73,11 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
             session = current
         }
         try {
-            val server = LocalServerSocket(socketName)
+            val server = RootListener(socketName)
             synchronized(stateLock) {
                 if (current.stopping) { server.close(); throw CancellationException("Root startup stopped") }
                 current.server = server
             }
-            val flags = Os.fcntlInt(server.fileDescriptor, OsConstants.F_GETFL, 0)
-            Os.fcntlInt(server.fileDescriptor, OsConstants.F_SETFL, flags or OsConstants.O_NONBLOCK)
             currentCoroutineContext().ensureActive()
             val child = ProcessBuilder(RootEngineProtocol.arguments(binary.absolutePath, socketName,
                 AndroidProcess.myUid(), pid, startTicks, started)).start()
@@ -208,7 +209,7 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
         cleanupFailure?.let { throw IOException(it) }
     }
 
-    private suspend fun acceptRootPeer(current: Session, server: LocalServerSocket): LocalSocket {
+    private suspend fun acceptRootPeer(current: Session, server: RootListener): LocalSocket {
         val deadline = current.started + RootEngineProtocol.GRANT_MILLIS
         val poll = StructPollfd().apply { fd = server.fileDescriptor; events = OsConstants.POLLIN.toShort() }
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -220,7 +221,7 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
                 }
             }
             poll.revents = 0
-            if (Os.poll(arrayOf(poll), 100) <= 0) continue
+            if (Os.poll(arrayOf(poll), ACCEPT_POLL_MILLIS) <= 0) continue
             if (poll.revents.toInt() and OsConstants.POLLIN == 0) throw IOException("Root 监听套接字已关闭")
             val peer = try { server.accept() } catch (error: IOException) {
                 if (SystemClock.elapsedRealtime() >= deadline || current.stopping) throw error
@@ -443,6 +444,35 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
         Thread(action, "rrbox-root-$name").apply { isDaemon = true; start() }
     }
 
+    /**
+     * Public API 1 socket options bound accept even if readiness disappears after poll.
+     * LocalServerSocket(FileDescriptor) borrows its fd, so retain and close its LocalSocket
+     * owner explicitly. This also avoids the API 30-only Os.fcntlInt entry point.
+     */
+    private class RootListener(name: String) : Closeable {
+        private val owner = LocalSocket()
+        private val server: LocalServerSocket
+
+        init {
+            try {
+                owner.bind(LocalSocketAddress(name, LocalSocketAddress.Namespace.ABSTRACT))
+                // LocalSocket maps SO_TIMEOUT to SO_RCVTIMEO/SO_SNDTIMEO; Linux applies
+                // SO_RCVTIMEO to accept(), including on this borrowed listening fd.
+                owner.soTimeout = ACCEPT_POLL_MILLIS
+                server = LocalServerSocket(owner.fileDescriptor)
+            } catch (error: Exception) {
+                runCatching { owner.close() }
+                throw error
+            }
+        }
+
+        val fileDescriptor: FileDescriptor get() = server.fileDescriptor
+        fun accept(): LocalSocket = server.accept()
+        override fun close() {
+            try { server.close() } finally { owner.close() }
+        }
+    }
+
     private class Session(val started: Long) {
         val io = ReentrantLock(true)
         val stopMutex = Mutex()
@@ -450,7 +480,7 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
         val stdout = Capture()
         val stderr = Capture()
         @Volatile var process: Process? = null
-        @Volatile var server: LocalServerSocket? = null
+        @Volatile var server: RootListener? = null
         @Volatile var socket: LocalSocket? = null
         @Volatile var tun: ParcelFileDescriptor? = null
         @Volatile var prepared = false
@@ -489,6 +519,7 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
 
     private companion object {
         const val TAG = "RootVpnEngine"
+        const val ACCEPT_POLL_MILLIS = 100
         const val CONTROL_MILLIS = 15_000L
         const val HEARTBEAT_MILLIS = 3_000L
         const val HEARTBEAT_TIMEOUT_MILLIS = 2_000L
