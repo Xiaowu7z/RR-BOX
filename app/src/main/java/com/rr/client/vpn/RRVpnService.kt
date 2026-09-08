@@ -11,6 +11,7 @@ import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.core.HevConfigAdapter
+import com.rr.client.lab.RRLogStore
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.storage.PreferencesManager
@@ -584,6 +585,8 @@ class RRVpnService : VpnService() {
                 resetTrafficState()
                 _isStarting.value = false
                 _isRunning.value = true
+                RRLogStore.record("CORE", "转发启动完成；引擎=$resolvedEngine；运行代次=$generation；" +
+                    "核心及引擎已就绪，不代表各业务请求成功")
                 _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
                 VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, true)
                 if (ruleUpdateRestored && ruleActivation != null) {
@@ -628,6 +631,7 @@ class RRVpnService : VpnService() {
                         "sing-box 内核未能启动"
                     }
                 _lastError.value = reason
+                RRLogStore.record("CORE", "转发启动失败；引擎=$resolvedEngine；运行代次=$generation；$reason")
                 if (ruleActivation != null) {
                     ChinaRuleSetManager.noteActivationFailure(this@RRVpnService, ruleActivation.candidateGeneration, reason, ruleActivation.operation)
                 }
@@ -990,12 +994,14 @@ class RRVpnService : VpnService() {
                 _isRunning.value = false
                 _currentSpeed.value = TrafficSpeed()
                 _lastError.value = "数据面清理未确认：${stopped.exceptionOrNull()?.message.orEmpty()}"
+                RRLogStore.record("CORE", _lastError.value.orEmpty())
                 stopping = false
                 ensureForeground("$activeNodeTag · Root 清理未确认")
                 Log.e(TAG, _lastError.value.orEmpty())
                 return@launch
             }
             activeConfigJson = null
+            RRLogStore.record("CORE", "转发停止完成；引擎=$activeEngine；运行代次=$generation")
             activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             requestedEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             _isStarting.value = false

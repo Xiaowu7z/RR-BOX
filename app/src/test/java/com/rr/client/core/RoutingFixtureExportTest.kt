@@ -45,11 +45,13 @@ class RoutingFixtureExportTest {
                 ruleSets = paths,
                 routingPolicy = policy
             )
-            for (engine in listOf("system", "hev")) {
+            for (engine in listOf("system", "hev", "root")) {
                 val filename = "$engine-$rulesMode.json"
-                File(output, filename).writeText(if (engine == "hev") {
-                    HevConfigAdapter.adapt(stable).configJson
-                } else stable)
+                File(output, filename).writeText(when (engine) {
+                    "hev" -> HevConfigAdapter.adapt(stable).configJson
+                    "root" -> RootConfigAdapter.adapt(stable).configJson
+                    else -> stable
+                })
                 variants.add(JsonObject().apply {
                     addProperty("file", filename)
                     addProperty("engine", engine)
@@ -58,11 +60,11 @@ class RoutingFixtureExportTest {
                 })
             }
         }
-        assertEquals(6, variants.size())
+        assertEquals(9, variants.size())
         File(output, "manifest.json").writeText(GsonBuilder().setPrettyPrinting().create().toJson(
             JsonObject().apply {
                 addProperty("schema", 1)
-                addProperty("producer", "ConfigBuilder + HevConfigAdapter")
+                addProperty("producer", "ConfigBuilder + HevConfigAdapter + RootConfigAdapter")
                 addProperty("policy_rule_version", policy.ruleVersion)
                 addProperty("policy_sha256", java.security.MessageDigest.getInstance("SHA-256")
                     .digest(policyBytes).joinToString("") { "%02x".format(it.toInt() and 0xff) })

@@ -12,6 +12,7 @@ import contextlib
 import copy
 import hashlib
 import ipaddress
+import io
 import json
 import pathlib
 import socket
@@ -71,6 +72,20 @@ def split_udp(packet):
     if kind not in (1, 3, 4) or len(packet) < end + 2:
         raise ValueError("Truncated SOCKS UDP address")
     return packet[3:end + 2], packet[end + 2:]
+
+
+def decode_address(encoded):
+    """Decode an observed address without opening a socket or resolving a name."""
+    stream = io.BytesIO(encoded)
+    stream.recv = stream.read
+    return read_address(stream)
+
+
+def observer_reply(server, host, port, payload):
+    if not getattr(server, "detailed", False):
+        return server.marker
+    return (json.dumps({"outbound": server.marker.decode().strip(), "host": host,
+                        "port": port, "payload_sha256": hashlib.sha256(payload).hexdigest()}) + "\n").encode()
 
 
 def connect_socks(port):
@@ -144,8 +159,8 @@ class ObserverTCP(socketserver.BaseRequestHandler):
                 return
             sock.sendall(b"\x05\x00\x00" + address("127.0.0.1", self.server.udp_port))
             if command == 1:
-                sock.recv(65535)
-                sock.sendall(self.server.marker)
+                payload = sock.recv(65535)
+                sock.sendall(observer_reply(self.server, host, port, payload))
             else:
                 while sock.recv(1024):
                     pass
@@ -158,8 +173,9 @@ class ObserverUDP(socketserver.BaseRequestHandler):
     def handle(self):
         packet, sock = self.request
         try:
-            encoded_address, _ = split_udp(packet)
-            sock.sendto(b"\x00\x00\x00" + encoded_address + self.server.marker, self.client_address)
+            encoded_address, payload = split_udp(packet)
+            host, port = decode_address(encoded_address)
+            sock.sendto(b"\x00\x00\x00" + encoded_address + observer_reply(self.server, host, port, payload), self.client_address)
         except (OSError, ValueError, IndexError):
             pass
 
@@ -230,7 +246,7 @@ def parse_dns_answer(packet):
 
 
 @contextlib.contextmanager
-def environment():
+def environment(detailed=False):
     servers = []
     observers, dns_servers = {}, {}
     try:
@@ -239,6 +255,7 @@ def environment():
             tcp = ThreadedTCP(("127.0.0.1", 0), ObserverTCP)
             # Fixed-width labels simplify packet verification.
             udp.marker = tcp.marker = (name.ljust(6) + "\n").encode("ascii")
+            udp.detailed = tcp.detailed = detailed
             tcp.udp_port = udp.server_address[1]
             servers.extend([udp, tcp])
             observers[name] = tcp.server_address[1]
@@ -357,9 +374,18 @@ def verify_srs_decode(binary, paths, directory, report):
         raise AssertionError("Native core accepted an SRS with a valid header/zlib stream but invalid rule body")
 
 
-def tls_hello(host):
+def tls_hello(host, tls13=False):
     incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-    connection = ssl.create_default_context().wrap_bio(incoming, outgoing, server_hostname=host)
+    context = ssl.create_default_context()
+    if host is None:
+        context.check_hostname = False
+    if tls13:
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.set_alpn_protocols(["h3"])
+        # Keep the fixture in one 1200-byte Initial even on OpenSSL versions
+        # enabling larger post-quantum key shares by default.
+        context.set_ecdh_curve("X25519")
+    connection = context.wrap_bio(incoming, outgoing, server_hostname=host)
     try:
         connection.do_handshake()
     except ssl.SSLWantReadError:
@@ -546,8 +572,11 @@ def main():
         report["binary_sha256"], report["version_output"] = sha256(args.sing_box), version.strip()
         manifest = json.loads((args.fixtures / "manifest.json").read_text())
         cases = json.loads(args.cases.read_text())
-        if manifest.get("schema") != 1 or len(manifest.get("variants", [])) != 6:
-            raise ValueError("Expected all six production fixture variants")
+        expected_variants = {(engine, mode) for engine in ("system", "hev", "root")
+                             for mode in ("fallback", "bundled", "off")}
+        actual_variants = {(meta["engine"], meta["rules"]) for meta in manifest.get("variants", [])}
+        if manifest.get("schema") != 1 or actual_variants != expected_variants or len(manifest["variants"]) != 9:
+            raise ValueError("Expected all nine production fixture variants")
         report["case_sources"] = cases["sources"]
         report["cases_sha256"] = sha256(args.cases)
         with environment() as (observers, dns_servers):

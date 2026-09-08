@@ -12,6 +12,7 @@ import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.routing.RoutingPolicySnapshot
+import com.rr.client.routing.XDestinationRecoveryPolicy
 
 /** Stable sing-box 1.14 runtime configuration. */
 object ConfigBuilder {
@@ -94,6 +95,10 @@ object ConfigBuilder {
                     }
 
                     if (smartRouting) {
+                        // Root stop/start does not replace Android's active network. An app
+                        // may keep an IP learned while capture was off. Recover only reviewed
+                        // X hosts with a recognizable protocol, before terminal package rules.
+                        addDestinationRecoveryRules(this, selectedNode, proxy, routingPolicy)
                         // Package identity is available in System / Root. HEV still
                         // evaluates the shared domain policy when the owner is unavailable.
                         routingPolicy.proxyPackageGroups.forEach { packages ->
@@ -207,6 +212,52 @@ object ConfigBuilder {
                 })
             })
         }
+    }
+
+    private fun addDestinationRecoveryRules(
+        rules: JsonArray, selectedNode: ProxyNode, proxy: JsonObject, routingPolicy: RoutingPolicySnapshot
+    ) {
+        // Imported native JSON can carry a different effective server from its display
+        // model. Exclude both so recovery never rewrites either bootstrap identity.
+        val hosts = XDestinationRecoveryPolicy.hosts(routingPolicy, selectedNode.server, primitiveString(proxy.get("server")))
+        if (hosts.isEmpty()) return
+        for (host in hosts) {
+            rules.add(destinationRecoveryCondition(listOf(host)).apply {
+                addProperty("action", "route-options")
+                // The replacement is exactly the matched host, never a suffix or a shared
+                // CDN name. Core route-options preserves the port and UDP reply identity.
+                addProperty("override_address", host)
+            })
+        }
+        rules.add(destinationRecoveryCondition(hosts).apply {
+            // resolve alone leaves an IP destination unchanged. Only after the override
+            // can trusted DNS replace it. Resolve these hosts for IP-only/packetaddr
+            // outbounds too; all other HEV domains retain their remote-DNS behavior.
+            addProperty("action", "resolve")
+            addProperty("server", DNS_REMOTE)
+            addProperty("strategy", "prefer_ipv4")
+        })
+        // Keep the existing terminal package/domain rules and their priority unchanged.
+        // A second override at the terminal rule would erase the resolved addresses.
+    }
+
+    private fun destinationRecoveryCondition(hosts: List<String>) = JsonObject().apply {
+        addProperty("type", "logical")
+        addProperty("mode", "and")
+        add("rules", JsonArray().apply {
+            add(JsonObject().apply { add("domain", JsonArray().apply { hosts.forEach(::add) }) })
+            add(JsonObject().apply {
+                add("protocol", JsonArray().apply { add("http"); add("tls"); add("quic") })
+            })
+            add(JsonObject().apply {
+                add("network", JsonArray().apply { add("tcp"); add("udp") })
+            })
+            add(JsonObject().apply { addProperty("ip_is_private", true); addProperty("invert", true) })
+            add(JsonObject().apply {
+                add("ip_cidr", JsonArray().apply { XDestinationRecoveryPolicy.excludedDestinationCidrs.forEach(::add) })
+                addProperty("invert", true)
+            })
+        })
     }
 
     private fun domainCondition(policy: DomesticRoutingPolicy.DomainRule): JsonObject =

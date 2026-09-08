@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.rr.client.RRApplication
 import com.rr.client.core.ConfigBuilder
+import com.rr.client.lab.RRLogStore
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.subscription.TrafficInfoNode
@@ -72,6 +73,9 @@ object RRQuickTileController {
                 ruleSets = ruleSets,
                 routingPolicy = ruleSets?.policy ?: com.rr.client.routing.RoutingPolicySnapshot.bundled()
             )
+            // Persist the small control event even when the logcat viewer is closed.
+            RRLogStore.record("APP", "快捷连接准备；智能分流=$smartRouting；" +
+                "策略版本=${ruleSets?.policy?.ruleVersion ?: 0L}；规则包=${ruleSets?.bundleVersion ?: 0L}")
             // Validate against CURRENT persisted nodes/settings before using a cached runtime.
             // ConfigBuilder does not need installed-app enumeration for per-app include/exclude.
             if (cached != null && QuickTileRuntimePolicy.matches(
@@ -86,7 +90,7 @@ object RRQuickTileController {
             ) {
                 currentCoroutineContext().ensureActive()
                 val current = cached.copy(nodeTag = targetNode.tag)
-                startRuntime(context, current)
+                startRuntime(context, current, cached = true)
                 val elapsed = SystemClock.elapsedRealtime() - startedAt
                 Log.i(TAG, "Quick tile fast path: cached runtime · node=${current.nodeTag} · prepare=${elapsed}ms")
                 return@runCatching QuickConnectResult(
@@ -110,7 +114,7 @@ object RRQuickTileController {
             )
             store.save(runtime)
             currentCoroutineContext().ensureActive()
-            startRuntime(context, runtime)
+            startRuntime(context, runtime, cached = false)
 
             val elapsed = SystemClock.elapsedRealtime() - startedAt
             Log.i(TAG, "Quick tile rebuilt runtime · node=${targetNode.tag} · prepare=${elapsed}ms")
@@ -146,6 +150,7 @@ object RRQuickTileController {
     }
 
     fun stop(context: Context) {
+        RRLogStore.record("APP", "快捷按钮请求断开；当前引擎=${RRVpnService.activeRuntimeEngine.value.orEmpty()}")
         VpnConnectionIntentStore.setDesiredRunning(context, false)
         context.startService(
             Intent(context, RRVpnService::class.java).apply {
@@ -154,7 +159,8 @@ object RRQuickTileController {
         )
     }
 
-    private fun startRuntime(context: Context, runtime: VpnRuntimeState) {
+    private fun startRuntime(context: Context, runtime: VpnRuntimeState, cached: Boolean) {
+        RRLogStore.record("APP", "快捷按钮请求连接；配置=${if (cached) "已核对当前规则的缓存" else "重新生成"}")
         ContextCompat.startForegroundService(
             context,
             Intent(context, RRVpnService::class.java).apply {

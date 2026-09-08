@@ -104,7 +104,10 @@ class ExternalRoutingPolicyConfigTest {
             add("proxyPackageGroups", JsonArray()); add("directIpExceptions", JsonArray())
         }
         val rules = config(RoutingPolicySnapshot.parse(data.toString())).getAsJsonObject("route").getAsJsonArray("rules")
-        assertFalse(rules.any { it.asJsonObject.has("rules") || it.asJsonObject.has("ip_cidr") })
+        assertFalse(rules.any { it.asJsonObject.has("ip_cidr") })
+        assertFalse(rules.any { rule -> rule.asJsonObject.getAsJsonArray("rules")?.any {
+            it.asJsonObject.has("package_name")
+        } == true })
         assertFalse(rules.any { it.asJsonObject.keySet() == setOf("outbound") })
     }
 

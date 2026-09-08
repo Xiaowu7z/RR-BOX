@@ -51,7 +51,7 @@ class RoutingPolicySnapshot private constructor(
     companion object {
         const val SCHEMA_VERSION = 1
         const val MAX_BYTES = 1024 * 1024
-        const val BUNDLED_RULE_VERSION = 2026090801L
+        const val BUNDLED_RULE_VERSION = 2026090802L
         private const val MAX_LIST_ITEMS = 4096
         private const val MAX_TOTAL_ITEMS = 16000
         private val rootKeys = setOf("schemaVersion", "ruleVersion", "publishedAt", "description",
@@ -69,9 +69,12 @@ class RoutingPolicySnapshot private constructor(
          */
         private val fallback by lazy {
             RoutingPolicySnapshot(
-                SCHEMA_VERSION, BUNDLED_RULE_VERSION, "2026-09-08T00:00:00Z",
-                "内置分流规则：保留中国服务直连、海外服务代理及 TikTok / BIGO 应用规则。",
-                DomesticRoutingPolicy.domainRules,
+                SCHEMA_VERSION, BUNDLED_RULE_VERSION, "2026-09-08T08:30:00Z",
+                "分流规则：保留国内直连及海外代理，新增 X 已观察主机的旧地址恢复范围。地址恢复需要支持此功能的 RRBOX。",
+                DomesticRoutingPolicy.domainRules.toMutableList().apply {
+                    add(indexOfFirst { it.destination == DomesticRoutingPolicy.Destination.DIRECT },
+                        XDestinationRecoveryPolicy.bundledRule())
+                },
                 listOf(TikTokAppPolicy.proxyPackages, BigoAppPolicy.proxyPackages),
                 DomesticRoutingPolicy.observedMainlandIpv4Exceptions
             )
@@ -133,7 +136,9 @@ class RoutingPolicySnapshot private constructor(
                 val suffixes = strings(rule.get("suffixes")) { validDomain(it, suffix = true) }
                 val domains = strings(rule.get("domains")) { validDomain(it, suffix = false) }
                 require(suffixes.isNotEmpty() || domains.isNotEmpty()) { "域名规则不得匹配所有流量" }
-                DomesticRoutingPolicy.DomainRule(id, destination, suffixes, domains)
+                DomesticRoutingPolicy.DomainRule(id, destination, suffixes, domains).also {
+                    XDestinationRecoveryPolicy.validate(it)
+                }
             }
             require(domainRules.map { it.id }.distinct().size == domainRules.size) { "域名规则 ID 重复" }
             // Keep the app-owned priority contract: known international services must be

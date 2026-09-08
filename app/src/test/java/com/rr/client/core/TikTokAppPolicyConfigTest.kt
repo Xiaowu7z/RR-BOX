@@ -20,7 +20,13 @@ class TikTokAppPolicyConfigTest {
     }
 
     private fun rules(root: JsonObject) = root.getAsJsonObject("route").getAsJsonArray("rules").map { it.asJsonObject }
-    private fun guard(root: JsonObject) = rules(root).first { it.get("type")?.asString == "logical" }
+    private fun guard(root: JsonObject) = rules(root).single { rule ->
+        rule.getAsJsonArray("rules")?.any { child ->
+            child.asJsonObject.getAsJsonArray("package_name")?.any {
+                it.asString == "com.zhiliaoapp.musically"
+            } == true
+        } == true
+    }
 
     @Test
     fun exactTikTokAndPluginIdentityTakesPriorityOverSharedDomesticDomains() {

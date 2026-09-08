@@ -156,6 +156,26 @@ class RoutingPolicySnapshotTest {
     }
 
     @Test
+    fun reservedRecoveryGroupCannotAddSuffixesOtherServicesOrDirectTargets() {
+        fun JsonObject.recovery() = getAsJsonArray("domainRules").single {
+            it.asJsonObject["id"].asString == XDestinationRecoveryPolicy.RULE_ID
+        }.asJsonObject
+        rejected { recovery().add("suffixes", JsonArray().apply { add("twitter.com") }) }
+        rejected { recovery().addProperty("destination", "DIRECT") }
+        for (host in listOf("gateway.kugou.com", "api.twitter.com.example.org", "cloudflare-ech.com", "mytwitter.com")) {
+            rejected { recovery().add("domains", JsonArray().apply { add(host) }) }
+        }
+        rejected { recovery().add("domains", JsonArray().apply {
+            repeat(XDestinationRecoveryPolicy.MAX_HOSTS + 1) { add("api$it.twitter.com") }
+        }) }
+        val next = parse {
+            recovery().add("domains", JsonArray().apply { add("new-api.x.com") })
+        }
+        assertEquals(listOf("new-api.x.com"), XDestinationRecoveryPolicy.hosts(next, "node.example.com"))
+        assertTrue(XDestinationRecoveryPolicy.hosts(next, "NEW-API.X.COM.").isEmpty())
+    }
+
+    @Test
     fun parsedAndBundledSnapshotsAreDeeplyImmutable() {
         for (snapshot in listOf(RoutingPolicySnapshot.parse(asset().readBytes()), RoutingPolicySnapshot.bundled())) {
             assertThrows(UnsupportedOperationException::class.java) {

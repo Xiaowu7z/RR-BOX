@@ -14,7 +14,7 @@
 
 ## 原生内核验收方法
 
-`RoutingFixtureExportTest` 调用生产 `ConfigBuilder` 与 `HevConfigAdapter`，导出 System/HEV 各三份配置：智能分流＋离线补充、智能分流＋APK 内置 SRS、关闭智能分流。工具先对未修改的每份配置运行 `sing-box check`，再保留生产路由和 DNS 规则原文执行本机探测。
+`RoutingFixtureExportTest` 调用生产 `ConfigBuilder`、`HevConfigAdapter` 与 `RootConfigAdapter`，读取当前维护的 `rrbox-policy.json`，导出 System/HEV/Root 各三份配置：智能分流＋离线补充、智能分流＋APK 内置 SRS、关闭智能分流。工具先对未修改的每份配置运行 `sing-box check`，再保留生产路由和 DNS 规则原文执行本机探测。
 
 为了不需要 root/TUN、真实节点或应用账号，测试仅替换以下环境部分：
 
@@ -51,6 +51,21 @@ python3 scripts/verify-routing.py --sing-box build-reports/sing-box-host --fixtu
 ```
 
 工具还校验二进制 `version` 输出中的版本与 VCS Revision，并记录二进制、域名用例与实际 SRS 的 SHA-256。失败返回非零退出码。所有被测配置和 native debug 日志放在报告旁的 `routing-core-details/`。
+
+## X 旧目标地址恢复验收
+
+`verify-destination-recovery.py` 复用上述传输替换，增加记录实际出站 `host`、`port` 的观测端。输入公开旧 IP 与精确 X 主机的 HTTP Host、TLS SNI 或 QUIC v1 Initial，必须实际拨向测试远程 DNS 返回的地址，不能仅以“已命中代理”通过。远程 DNS 缓存复用、目标端口、UDP 回包原始地址和原始数据包 SHA-256 都单独断言；包含 IPv6 原地址恢复到 IPv4 的回包对照。
+
+QUIC Initial 由 `scripts/routing-quic-fixture/main.go` 使用 Go 标准密码库生成，包含 TLS 1.3 ClientHello、CRYPTO/PADDING、AES-GCM 及头部保护。生成器不访问网络，也不依赖第三方 Go 包。该测试验证 core 的 QUIC 嗅探与 UDP 地址映射，不宣称完成 HTTP/3 握手或 X 的真实业务。
+
+关闭智能分流、国内主机、未审核的相邻主机、私网与合成地址、空 SNI、ECH 外层主机、未知 TCP/UDP 协议均要求保留原目标。System/HEV/Root 共九份生产配置都执行这些检查；Root 真 TUN 和系统路由仍由独立 `verify-root-tcp.py` 门禁验证。
+
+```bash
+go build -o build-reports/routing-quic-fixture scripts/routing-quic-fixture/main.go
+python3 scripts/verify-destination-recovery.py --sing-box build-reports/sing-box-host --quic-generator build-reports/routing-quic-fixture --fixtures app/build/routing-fixtures --report build-reports/DESTINATION-RECOVERY-REPORT.json
+```
+
+报告和完整核心日志保存在 `build-reports/DESTINATION-RECOVERY-REPORT.json` 与 `destination-recovery-details/`。`--self-test` 仅验证观测工具自己的协议，不能代替真实核心门禁。
 
 ## 当前有意保留的边界
 

@@ -163,7 +163,13 @@ class DomesticRoutingConfigTest {
         assertPolicy(hev, listOf("long.weixin.qq.com", "v.douyinvod.com"), direct = true)
         assertPolicy(hev, listOf("v.tiktokcdn.com", "p.ibyteimg.com"), direct = false)
         val rules = hev.getAsJsonObject("route").getAsJsonArray("rules")
-        assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "resolve" })
+        val resolves = rules.map { it.asJsonObject }.filter { it.get("action")?.asString == "resolve" }
+        assertEquals(1, resolves.size)
+        assertEquals("dns-remote", resolves.single()["server"].asString)
+        val exactHosts = resolves.single().getAsJsonArray("rules")[0].asJsonObject.getAsJsonArray("domain")
+            .map { it.asString }
+        assertTrue("Known stale X hosts should recover", "api.twitter.com" in exactHosts)
+        assertFalse("Other HEV proxy hosts must not gain a resolve dependency", "api.tiktokv.com" in exactHosts)
         assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "reject" })
         assertFalse(rules.drop(1).any { it.asJsonObject.has("network") })
         assertEquals("proxy", hev.getAsJsonObject("route").get("final").asString)
