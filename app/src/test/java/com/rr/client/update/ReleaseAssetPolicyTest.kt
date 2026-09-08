@@ -4,8 +4,8 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ReleaseAssetPolicyTest {
-    private val name = "RRBOX-1.0.1-arm64-v8a.apk"
-    private val good = "https://github.com/Xiaowu7z/RR-BOX/releases/download/v1.0.1/$name"
+    private val name = "RRBOX-1.0.2-arm64-v8a.apk"
+    private val good = "https://github.com/Xiaowu7z/RR-BOX/releases/download/v1.0.2/$name"
     @Test fun acceptsOfficialReleaseAsset() { assertTrue(ReleaseAssetPolicy.isTrustedDownload(good, name)) }
     @Test fun rejectsForeignHostsAndUserInfo() {
         assertFalse(ReleaseAssetPolicy.isTrustedDownload(good.replace("github.com", "evil.example"), name))

@@ -101,8 +101,13 @@ class BigoAppPolicyConfigTest {
                 val policyIndex = allRules.indexOf(domainRule(root, section))
                 val key = if (section == "route") "outbound" else "server"
                 val direct = if (section == "route") "direct" else "dns-direct"
+                val jarvisDirect = JsonParser.parseString("""{
+                    "package_name":["app.jarvis.assistant"],"action":"route","outbound":"direct"
+                }""").asJsonObject
                 val fallbackIndices = allRules.indices.filter {
-                    allRules[it].get(key)?.asString == direct || allRules[it].has("rule_set")
+                    // Only the explicit Jarvis app override may precede foreign domains.
+                    (allRules[it].get(key)?.asString == direct || allRules[it].has("rule_set")) &&
+                        allRules[it] != jarvisDirect
                 }
                 assertTrue(fallbackIndices.isNotEmpty() && fallbackIndices.all { policyIndex < it })
                 for (host in exactHosts + suffixes + listOf("api.bigo.sg", "www.bigo.tv")) {

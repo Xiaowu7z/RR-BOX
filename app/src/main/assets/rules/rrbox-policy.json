@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "ruleVersion": 2026090802,
-  "publishedAt": "2026-09-08T08:30:00Z",
-  "description": "分流规则：保留国内直连及海外代理，新增 X 已观察主机的旧地址恢复范围。地址恢复需要支持此功能的 RRBOX。",
+  "ruleVersion": 2026090803,
+  "publishedAt": "2026-09-08T14:47:47Z",
+  "description": "分流规则：保留国内直连及海外代理，明确 DeepSeek API 直连。JARVIS 应用包名直连需升级 RRBOX 1.0.2。",
   "domainRules": [
     {
       "id": "tiktok-international",
@@ -198,6 +198,14 @@
         "probe.twitter.com",
         "video.twimg.com",
         "x.com"
+      ]
+    },
+    {
+      "id": "deepseek-api",
+      "destination": "DIRECT",
+      "suffixes": [],
+      "domains": [
+        "api.deepseek.com"
       ]
     },
     {

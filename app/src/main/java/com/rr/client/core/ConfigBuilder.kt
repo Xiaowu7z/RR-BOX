@@ -10,6 +10,7 @@ import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
+import com.rr.client.routing.JarvisAppPolicy
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.routing.RoutingPolicySnapshot
 import com.rr.client.routing.WeChatIpv6RecoveryPolicy
@@ -102,9 +103,17 @@ object ConfigBuilder {
                     }
 
                     if (smartRouting) {
+                        // This explicit app-wide preference precedes domain recovery as
+                        // well as terminal proxy policies. DNS interception remains first.
+                        // HEV falls back to domain policy when the original owner is absent.
+                        add(JsonObject().apply {
+                            add("package_name", JsonArray().apply { add(JarvisAppPolicy.PACKAGE_NAME) })
+                            addProperty("action", "route")
+                            addProperty("outbound", TAG_DIRECT)
+                        })
                         // Root stop/start does not replace Android's active network. An app
                         // may keep an IP learned while capture was off. Recover only reviewed
-                        // X hosts with a recognizable protocol, before terminal package rules.
+                        // X hosts with a recognizable protocol, before remaining proxy package rules.
                         addDestinationRecoveryRules(this, selectedNode, proxy, routingPolicy)
                         // Package identity is available in System / Root. HEV still
                         // evaluates the shared domain policy when the owner is unavailable.

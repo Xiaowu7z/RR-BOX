@@ -104,7 +104,7 @@ class SubscriptionFetcher(
 
     companion object {
         private val COMPATIBILITY_USER_AGENTS = listOf(
-            "RRBOX/1.0.1 (Android; sing-box/1.14.0)",
+            "RRBOX/1.0.2 (Android; sing-box/1.14.0)",
             "sing-box",
             "NekoBox",
             "v2rayNG",
