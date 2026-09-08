@@ -8,6 +8,7 @@ import com.google.gson.JsonParser
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.routing.BigoAppPolicy
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.PerAppPolicyResolver
@@ -103,6 +104,26 @@ object ConfigBuilder {
                                 add(JsonObject().apply {
                                     add("package_name", JsonArray().apply {
                                         TikTokAppPolicy.proxyPackages.forEach(::add)
+                                    })
+                                })
+                                add(JsonObject().apply {
+                                    addProperty("ip_is_private", true)
+                                    addProperty("invert", true)
+                                })
+                            })
+                            addProperty("action", "route")
+                            addProperty("outbound", TAG_PROXY)
+                        })
+                        // BIGO can use shared domestic infrastructure and direct-IP requests.
+                        // Scope this separately to its exact Android identity; private device
+                        // traffic stays outside the guard, and HEV uses the domain policy.
+                        add(JsonObject().apply {
+                            addProperty("type", "logical")
+                            addProperty("mode", "and")
+                            add("rules", JsonArray().apply {
+                                add(JsonObject().apply {
+                                    add("package_name", JsonArray().apply {
+                                        BigoAppPolicy.proxyPackages.forEach(::add)
                                     })
                                 })
                                 add(JsonObject().apply {

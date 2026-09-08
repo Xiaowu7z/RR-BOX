@@ -425,6 +425,17 @@ def run_variant(binary, original, meta, cases, directory, report, observers, dns
             for kind, payload in (("http", f"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()), ("tls-client-hello", tls_hello(host))):
                 verify(f"{kind}-foreign-host-cn-ip", host, "proxy",
                        lambda p=payload: tcp_exchange(port, "223.5.5.5", 443, p).decode().strip(), "tiktok-priority-over-china-ip")
+        # BIGO can connect to a CN-classified address for international login.
+        # Exercise actual core sniffing with no package metadata, as in HEV;
+        # unobserved neighboring names must still fall through to normal IP policy.
+        for group, hosts in (("bigo-priority-over-china-ip", cases["bigo_priority_hosts"]),
+                             ("bigo-exact-domain-boundaries", cases["bigo_boundary_hosts"])):
+            expected = "direct" if group.endswith("boundaries") and meta["smart"] and meta["rules"] == "bundled" else "proxy"
+            for host in hosts:
+                for kind, payload in (("http", f"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()),
+                                      ("tls-client-hello", tls_hello(host))):
+                    verify(f"{kind}-bigo-cn-ip", host, expected,
+                           lambda p=payload: tcp_exchange(port, "223.5.5.5", 443, p).decode().strip(), group)
         # Narrow observed-host exceptions work even when bundled SRS files are absent.
         # Observers terminate these probes locally; none contacts the named addresses.
         for host in cases["observed_mainland_ipv4_exceptions"]:

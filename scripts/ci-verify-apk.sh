@@ -55,7 +55,7 @@ cat > dist/BUILD-REPORT.md <<EOF
 - Network continuity: event-driven physical path tracking + validated runtime recovery
 - Quick Settings: current persisted config checked before cache reuse
 - Routing: shared domestic DNS/route policy, WeChat / Douyin / TikTok separation
-- Routing verification: pinned host core TCP/UDP/DNS fixture report (device acceptance still required)
+- Routing verification: pinned host core TCP/UDP/DNS fixtures including BIGO login domain precedence and exact-domain boundaries (device acceptance still required)
 - App/notification icon resources: frozen validated production resources
 - Update channels: GitHub releases/latest + Obtainium
 EOF

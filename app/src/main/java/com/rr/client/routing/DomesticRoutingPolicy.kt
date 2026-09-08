@@ -104,6 +104,18 @@ object DomesticRoutingPolicy {
             )
         ),
         DomainRule(
+            id = "bigo-international",
+            destination = Destination.PROXY,
+            // Official service domains linked by the BIGO LIVE store listing.
+            // https://play.google.com/store/apps/details?id=sg.bigo.live
+            suffixes = listOf("bigo.sg", "bigo.tv"),
+            domains = listOf(
+                // Observed under sg.bigo.live in connection logs; domain ownership is
+                // unverified. Keep exact hosts, never the shared piojm.tech/dfaklj.tech roots.
+                "bglvlbs.piojm.tech", "conf-lv.piojm.tech", "support0.dfaklj.tech"
+            )
+        ),
+        DomainRule(
             id = "wechat",
             destination = Destination.DIRECT,
             suffixes = listOf(

@@ -61,6 +61,11 @@
       "url": "https://stat.ripe.net/data/prefix-overview/data.json?resource=8.134.241.67",
       "reviewed": "2026-09-08",
       "note": "AS37963 announces the enclosing /23. Only three observed /32 hosts are policy exceptions, never the entire announced prefix."
+    },
+    {
+      "url": "https://play.google.com/store/apps/details?id=sg.bigo.live",
+      "reviewed": "2026-09-08",
+      "note": "Official BIGO LIVE Android package identity. Separate exact service endpoints are attributed from application-owned route observations, not verified ownership of their parent domains."
     }
   ],
   "note": "Domain suffix coverage probes, including representative/synthetic subdomains. These are not captured application sessions or a complete endpoint inventory.",
@@ -310,6 +315,17 @@
         "sub.vpp-license-proxy.aliyuncs.com",
         "vpp-license-proxy.aliyuncs.com.evil.invalid"
       ]
+    },
+    {
+      "name": "bigo-international-login",
+      "outbound": "proxy",
+      "domains": [
+        "setting.bigo.sg",
+        "www.bigo.tv",
+        "bglvlbs.piojm.tech",
+        "conf-lv.piojm.tech",
+        "support0.dfaklj.tech"
+      ]
     }
   ],
   "observed_mainland_ipv4_exceptions": [
@@ -326,5 +342,24 @@
     "8.134.240.6",
     "8.132.237.147",
     "8.153.65.227"
+  ],
+  "bigo_priority_hosts": [
+    "setting.bigo.sg",
+    "www.bigo.tv",
+    "bglvlbs.piojm.tech",
+    "conf-lv.piojm.tech",
+    "support0.dfaklj.tech"
+  ],
+  "bigo_boundary_hosts": [
+    "notbigo.sg",
+    "bigo.sg.evil.invalid",
+    "bigo.tv.evil.invalid",
+    "piojm.tech",
+    "other.piojm.tech",
+    "sub.bglvlbs.piojm.tech",
+    "bglvlbs.piojm.tech.evil.invalid",
+    "dfaklj.tech",
+    "other.dfaklj.tech",
+    "sub.support0.dfaklj.tech"
   ]
 }
