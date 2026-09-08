@@ -13,11 +13,13 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -38,6 +40,7 @@ def emit(stream, event):
 
 
 def app_endpoint(name, binary, events, requests):
+    os.chdir(Path(binary).parent)
     os.setgroups([])
     os.setgid(CORE_UID)
     os.setuid(CORE_UID)
@@ -208,6 +211,14 @@ def main():
     namespace_setup()
     baseline = root.rules()
     baseline_interfaces = root.interfaces()
+    # GitHub runner checkout ancestors may be inaccessible to the real app UID.
+    # Stage only this test executable; never relax checkout/runner permissions.
+    executable_dir = tempfile.mkdtemp(prefix="rrbox-root-tcp-", dir="/tmp")
+    staged_stack = Path(executable_dir, "root-tcp-stack-check")
+    shutil.copyfile(stack, staged_stack)
+    staged_stack.chmod(0o755)
+    Path(executable_dir).chmod(0o711)
+    stack = str(staged_stack)
     name = "rrbox-root-" + uuid.uuid4().hex
     app_read, parent_write = os.pipe()
     parent_read, app_write = os.pipe()
@@ -301,6 +312,7 @@ def main():
         except ProcessLookupError:
             pass
         os.waitpid(pid, 0)
+        shutil.rmtree(executable_dir)
         output = Path(args.report)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")
