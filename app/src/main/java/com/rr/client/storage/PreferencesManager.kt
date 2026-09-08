@@ -28,6 +28,7 @@ class PreferencesManager(private val context: Context) {
 
         const val TUN_ENGINE_SYSTEM = "SYSTEM"
         const val TUN_ENGINE_HEV = "HEV"
+        const val TUN_ENGINE_ROOT = "ROOT"
 
         // Legacy 0.1.6/0.1.7 shared selection. Keep only as a migration seed.
         val PER_APP_SELECTED_PACKAGES = stringSetPreferencesKey("per_app_selected_packages")
@@ -58,6 +59,7 @@ class PreferencesManager(private val context: Context) {
     val tunEngine: Flow<String> = context.dataStore.data.map { preferences ->
         when (preferences[TUN_ENGINE]) {
             TUN_ENGINE_HEV -> TUN_ENGINE_HEV
+            TUN_ENGINE_ROOT -> TUN_ENGINE_ROOT
             else -> TUN_ENGINE_SYSTEM
         }
     }
@@ -112,9 +114,23 @@ class PreferencesManager(private val context: Context) {
     suspend fun setTunEngine(engine: String) {
         val normalized = when (engine) {
             TUN_ENGINE_HEV -> TUN_ENGINE_HEV
+            TUN_ENGINE_ROOT -> TUN_ENGINE_ROOT
             else -> TUN_ENGINE_SYSTEM
         }
         context.dataStore.edit { it[TUN_ENGINE] = normalized }
+    }
+
+    /** A running A/B must never overwrite a Root selection made by the user concurrently. */
+    suspend fun setBenchmarkTunEngine(engine: String): Boolean {
+        require(engine == TUN_ENGINE_SYSTEM || engine == TUN_ENGINE_HEV)
+        var changed = false
+        context.dataStore.edit { preferences ->
+            if (preferences[TUN_ENGINE] != TUN_ENGINE_ROOT) {
+                preferences[TUN_ENGINE] = engine
+                changed = true
+            }
+        }
+        return changed
     }
 
     suspend fun setPerAppMode(mode: String) {

@@ -40,6 +40,14 @@ jobs:
           python3 scripts/source_audit.py
           bash scripts/source-regressions.sh
           git diff --check
+      - name: Verify Root helper in isolated host network
+        run: |
+          set -euo pipefail
+          mkdir -p build-reports
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+            "-DRRBOX_IP_PATH=\"$(command -v ip)\"" native/root_engine.c -o build-reports/root-engine-host
+          sudo unshare --net -- python3 scripts/verify-root-engine.py \
+            --helper "$PWD/build-reports/root-engine-host" --report "$PWD/build-reports/ROOT-ENGINE-REPORT.json"
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -79,6 +87,14 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bash scripts/ci-build-hev.sh
+      - name: Build isolated Root capability probe
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bash scripts/ci-build-root-probe.sh
+      - name: Build Root TUN and UID routing supervisor
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bash scripts/ci-build-root-engine.sh
       - name: Restore existing release signing key
         env:
           RR_KEYSTORE_BASE64: ${{ secrets.RR_KEYSTORE_BASE64 }}

@@ -97,6 +97,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
     val nodeOverrides by preferences.nodeOverrides.collectAsState(initial = emptyMap())
     val isRunning by RRVpnService.isRunning.collectAsState()
     val isStarting by RRVpnService.isStarting.collectAsState()
+    val activeEngine by RRVpnService.activeRuntimeEngine.collectAsState()
     val currentSpeed by RRVpnService.currentSpeed.collectAsState()
     val sessionTraffic by RRVpnService.sessionTraffic.collectAsState()
     val selfCheck by StartupSelfCheck.report.collectAsState()
@@ -142,7 +143,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
         diagnosticBusy = true
         scope.launch {
             diagnostics = runCatching {
-                NetworkDiagnostics.collect(context, selectedNode, engine, isRunning)
+                NetworkDiagnostics.collect(context, selectedNode, activeEngine ?: engine, isRunning)
             }.onFailure {
                 RRLogStore.record("DIAG", "诊断失败: ${it.message ?: it.javaClass.simpleName}")
             }.getOrNull()
@@ -217,6 +218,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
             if (selectedTab == 0) {
                 LabDashboard(
                     engine = engine,
+                    activeEngine = activeEngine,
                     isRunning = isRunning,
                     isStarting = isStarting,
                     selectedNode = selectedNode,
@@ -255,7 +257,11 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
                     },
                     onRunBenchmark = {
                         val node = selectedNode
-                        if (node != null && !benchmarkBusy) {
+                        if (engine == PreferencesManager.TUN_ENGINE_ROOT ||
+                            activeEngine == PreferencesManager.TUN_ENGINE_ROOT || RRVpnService.hasRootDataPlane()
+                        ) {
+                            benchmarkError = "Root 模式不参与 System / HEV A/B；请先切换并连接 System 或 HEV"
+                        } else if (node != null && !benchmarkBusy) {
                             benchmarkBusy = true
                             benchmark = null
                             benchmarkError = null
@@ -340,6 +346,7 @@ private fun NetworkLabRoot(onBack: () -> Unit) {
 @Composable
 private fun LabDashboard(
     engine: String,
+    activeEngine: String?,
     isRunning: Boolean,
     isStarting: Boolean,
     selectedNode: ProxyNode?,
@@ -366,6 +373,9 @@ private fun LabDashboard(
     onOpenRawValidator: () -> Unit
 ) {
     val historyStats = remember(benchmarkHistory) { summarizeBenchmarkHistory(benchmarkHistory) }
+    val displayedEngine = activeEngine ?: engine
+    val rootBenchmarkBlocked = engine == PreferencesManager.TUN_ENGINE_ROOT ||
+        activeEngine == PreferencesManager.TUN_ENGINE_ROOT || RRVpnService.hasRootDataPlane()
 
     Column(
         modifier = Modifier
@@ -375,8 +385,18 @@ private fun LabDashboard(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         LabCard(title = "运行状态", icon = { Icon(Icons.Default.Memory, null, tint = CyanPrimary) }) {
-            StatusRow("转发引擎", if (engine == PreferencesManager.TUN_ENGINE_HEV) "HEV / High Performance" else "System / Stable")
-            StatusRow("VPN", when { isStarting -> "正在重建"; isRunning -> "已连接"; else -> "未连接" })
+            StatusRow("转发引擎", when (displayedEngine) {
+                PreferencesManager.TUN_ENGINE_HEV -> "HEV / High Performance"
+                PreferencesManager.TUN_ENGINE_ROOT -> "Root / 超级用户"
+                else -> "System / Stable"
+            })
+            if (activeEngine != null && activeEngine != engine) {
+                StatusRow("已选择引擎", engine)
+            }
+            StatusRow("连接状态", when { isStarting -> "正在建立数据面"; isRunning -> "已连接"; else -> "未连接" })
+            if (displayedEngine == PreferencesManager.TUN_ENGINE_ROOT) {
+                StatusRow("接管方式", "Root TUN · 不占用 Android VPN 槽位")
+            }
             StatusRow("节点", selectedNode?.tag ?: "未选择")
             StatusRow("实时下载", currentSpeed.formattedDownSpeed)
             StatusRow("实时上传", currentSpeed.formattedUpSpeed)
@@ -395,7 +415,7 @@ private fun LabDashboard(
                 StatusRow("IPv4", snapshot.ipv4Addresses.joinToString().ifBlank { "--" })
                 StatusRow("IPv6", snapshot.ipv6Addresses.joinToString().ifBlank { "--" })
                 StatusRow("DNS", snapshot.dnsServers.joinToString().ifBlank { "--" })
-                StatusRow("VPN TUN", snapshot.vpnInterface?.let { "$it · MTU ${snapshot.vpnMtu ?: 0}" } ?: "--")
+                StatusRow(snapshot.tunLabel, snapshot.vpnInterface?.let { "$it · MTU ${snapshot.vpnMtu ?: 0}" } ?: "--")
                 Spacer(Modifier.height(8.dp))
                 diagnostics.checks.forEach { CheckLine(it) }
             } else {
@@ -420,7 +440,7 @@ private fun LabDashboard(
             Spacer(Modifier.height(8.dp))
             OutlinedButton(
                 onClick = onRunRecoveryDrill,
-                enabled = isRunning && !isStarting && !recoveryDrillBusy
+                enabled = isRunning && !isStarting && !recoveryDrillBusy && !benchmarkBusy
             ) {
                 Text(if (recoveryDrillBusy) "恢复演练中…" else "运行自动恢复演练")
             }
@@ -446,13 +466,25 @@ private fun LabDashboard(
             Spacer(Modifier.height(10.dp))
             Button(
                 onClick = onRunBenchmark,
-                enabled = isRunning && !isStarting && selectedNode != null && !benchmarkBusy,
+                enabled = isRunning && !isStarting && selectedNode != null && !benchmarkBusy &&
+                    !recoveryDrillBusy && !rootBenchmarkBlocked,
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {
                 Text(
-                    if (benchmarkBusy) "A/B 测试中…" else "开始一键 A/B",
+                    when {
+                        rootBenchmarkBlocked -> "Root 模式下不可运行 A/B"
+                        benchmarkBusy -> "A/B 测试中…"
+                        else -> "开始一键 A/B"
+                    },
                     color = DarkBackground,
                     fontWeight = FontWeight.Bold
+                )
+            }
+            if (rootBenchmarkBlocked) {
+                Text(
+                    "Root 已选择或正在运行。请先切换并连接 System 或 HEV，再开始 A/B。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
             benchmarkProgress?.let {
@@ -465,7 +497,7 @@ private fun LabDashboard(
             benchmarkError?.let {
                 Text("失败：$it", color = MaterialTheme.colorScheme.error)
                 Text(
-                    "A/B 失败或结束后都会恢复测试前的原始转发引擎，不改变日常运行配置。",
+                    "A/B 失败或结束后会恢复测试前的引擎；测试期间若主动切换至 Root，则保留 Root 选择。",
                     color = TextSecondary,
                     style = MaterialTheme.typography.labelSmall
                 )
@@ -559,6 +591,8 @@ private fun LabDashboard(
             OutlinedButton(onClick = onOpenRawValidator) { Text("Raw 校验并导入") }
             rawValidation?.let { Text(it, color = TextSecondary, style = MaterialTheme.typography.bodySmall) }
         }
+
+        RootProbeCard(selectedEngine = engine)
 
         Spacer(Modifier.height(18.dp))
     }

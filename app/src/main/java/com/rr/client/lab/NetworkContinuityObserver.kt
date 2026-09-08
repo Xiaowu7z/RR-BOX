@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.SystemClock
+import com.rr.client.RRApplication
+import com.rr.client.storage.PreferencesManager
 import com.rr.client.vpn.NetworkContinuityMonitor
 import com.rr.client.vpn.NetworkContinuityState
 import com.rr.client.vpn.RRQuickTileController
@@ -11,11 +13,13 @@ import com.rr.client.vpn.RRVpnService
 import com.rr.client.vpn.VpnConnectionIntentStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -25,7 +29,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Process-lifetime network continuity observer.
  *
  * Event-driven only: no periodic heartbeat packets. A physical handoff schedules one local data-plane
- * check. If the user still expects the VPN to be connected and the actual System/HEV data plane is
+ * check. If the user still expects a connection and the actual System/HEV/Root data plane is
  * dead, RRBOX reuses the last validated runtime cache for a guarded recovery.
  */
 object NetworkContinuityObserver {
@@ -36,13 +40,20 @@ object NetworkContinuityObserver {
     private val recoveryMutex = Mutex()
     private var monitor: NetworkContinuityMonitor? = null
     private var lastRecoveryAttemptElapsed = 0L
+    private var handoffJob: Job? = null
+    @Volatile private var latestPath: NetworkContinuityMonitor.PhysicalPath? = null
+    @Volatile private var physicalFingerprint: String? = null
+    @Volatile private var rootRefreshPending = false
 
     fun start(context: Context) {
         if (monitor != null) return
         val appContext = context.applicationContext
         var hasSeenPath = false
         monitor = NetworkContinuityMonitor(appContext) { path ->
+            handoffJob?.cancel()
+            latestPath = path
             if (path == null) {
+                if (RRVpnService.hasRootDataPlane()) rootRefreshPending = true
                 _state.value = _state.value.copy(interfaceName = "--", validated = false,
                     healthy = false, lastEvent = "物理网络已断开，等待网络恢复")
                 return@NetworkContinuityMonitor
@@ -50,6 +61,13 @@ object NetworkContinuityObserver {
             val previous = _state.value
             val hadPath = hasSeenPath
             hasSeenPath = true
+            // The monitor's final two fields are validation/metering. Only physical path,
+            // addresses and DNS require rebuilding Root's resolver route exceptions.
+            val fingerprint = path.signature.substringBeforeLast('|').substringBeforeLast('|')
+            if (physicalFingerprint != null && physicalFingerprint != fingerprint && RRVpnService.hasRootDataPlane()) {
+                rootRefreshPending = true
+            }
+            physicalFingerprint = fingerprint
             val switchCount = previous.switchCount + if (hadPath) 1L else 0L
             val vpnWasActive = RRVpnService.isRunning.value || RRVpnService.isStarting.value
             val now = System.currentTimeMillis()
@@ -74,24 +92,65 @@ object NetworkContinuityObserver {
             )
 
             if (hadPath) {
-                scope.launch { evaluateAfterHandoff(appContext) }
+                val generation = RRVpnService.currentRuntimeGeneration()
+                handoffJob = scope.launch { evaluateAfterHandoff(appContext, path.signature, generation) }
             }
         }.also { it.start() }
         _state.value = _state.value.copy(monitoring = true)
     }
 
-    private suspend fun evaluateAfterHandoff(context: Context) {
+    private suspend fun evaluateAfterHandoff(context: Context, signature: String, generation: Long) {
         delay(HEALTH_DELAY_MS)
+        if (latestPath?.signature != signature) return
+        if (!RRVpnService.hasRootDataPlane() && !RRVpnService.isStarting.value) rootRefreshPending = false
+
+        if (rootRefreshPending && latestPath?.validated == true &&
+            RRVpnService.activeRuntimeEngine.value == PreferencesManager.TUN_ENGINE_ROOT
+        ) {
+            // A DNS update may arrive after prepare() captured the old resolver but before
+            // activation. Keep this latest, cancellable handoff pending until startup settles.
+            if (RRVpnService.isStarting.value) {
+                withTimeoutOrNull(ROOT_START_SETTLE_MS) {
+                    while (RRVpnService.isStarting.value) delay(100L)
+                }
+            }
+            if (latestPath?.signature != signature) return
+            if (RRVpnService.currentRuntimeGeneration() != generation) {
+                // A newer user/core restart reads the current network itself.
+                rootRefreshPending = false
+            } else if (RRApplication.instance.preferencesManager.tunEngine.first() == PreferencesManager.TUN_ENGINE_ROOT &&
+                RRVpnService.isRunning.value && !RRVpnService.isStarting.value &&
+                RRVpnService.isDataPlaneHealthy() && VpnConnectionIntentStore.isDesiredRunning(context)
+            ) {
+                val refreshed = recoveryMutex.withLock {
+                    runCatching {
+                        context.startService(Intent(context, RRVpnService::class.java).apply {
+                            action = RRVpnService.ACTION_ROOT_NETWORK_CHANGED
+                            putExtra(RRVpnService.EXTRA_ROOT_NETWORK_GENERATION, generation)
+                        })
+                    }.isSuccess
+                }
+                if (refreshed) {
+                    rootRefreshPending = false
+                    _state.value = _state.value.copy(
+                        lastHealthCheckAtMillis = System.currentTimeMillis(),
+                        lastEvent = "物理网络或 DNS 已变化，正在更新 Root 接管路径"
+                    )
+                    RRLogStore.record("NET_WATCH", "Root 物理路径变化：请求重建当前解析器接管规则")
+                    return
+                }
+            }
+        }
 
         val running = RRVpnService.isRunning.value
         val starting = RRVpnService.isStarting.value
         val dataPlaneHealthy = RRVpnService.isDataPlaneHealthy()
         val desiredRunning = VpnConnectionIntentStore.isDesiredRunning(context)
-        val permissionReady = VpnService.prepare(context) == null
+        val permissionReady = permissionReady(context)
         val cooldownReady = SystemClock.elapsedRealtime() - lastRecoveryAttemptElapsed >= RECOVERY_COOLDOWN_MS
 
         if (dataPlaneHealthy && (running || starting)) {
-            markHealthy("切换后 VPN 数据面仍在运行")
+            markHealthy("切换后转发数据面仍在运行")
             RRLogStore.record(
                 "NET_WATCH",
                 "切换后状态: running=$running starting=$starting dataPlaneHealthy=true"
@@ -119,7 +178,7 @@ object NetworkContinuityObserver {
 
         if (!shouldRecover) {
             val detail = when {
-                starting -> "VPN 正在自行重建，暂不介入"
+                starting -> "引擎正在自行重建，暂不介入"
                 !permissionReady -> "VPN 权限已失效，无法自动恢复"
                 !cooldownReady -> "恢复冷却期内，避免重复重启"
                 else -> "数据面状态异常，但未满足自动恢复安全条件"
@@ -148,11 +207,11 @@ object NetworkContinuityObserver {
     suspend fun runRecoveryDrill(context: Context): Result<String> = runCatching {
         val appContext = context.applicationContext
         check(RRVpnService.isRunning.value && !RRVpnService.isStarting.value) {
-            "请先连接 VPN，且等待当前启动完成"
+            "请先连接节点，且等待当前启动完成"
         }
         check(RRVpnService.isDataPlaneHealthy()) { "当前数据面本身就不健康，不能开始演练" }
         check(VpnConnectionIntentStore.isDesiredRunning(appContext)) { "当前连接意图不是保持在线" }
-        check(VpnService.prepare(appContext) == null) { "VPN 权限不可用" }
+        check(permissionReady(appContext)) { "VPN 权限不可用" }
 
         _state.value = _state.value.copy(
             healthy = true,
@@ -195,7 +254,7 @@ object NetworkContinuityObserver {
         if (!VpnConnectionIntentStore.isDesiredRunning(context)) {
             return@withLock false
         }
-        if (VpnService.prepare(context) != null) {
+        if (!permissionReady(context)) {
             _state.value = _state.value.copy(
                 lastHealthCheckAtMillis = System.currentTimeMillis(),
                 healthy = false,
@@ -258,6 +317,15 @@ object NetworkContinuityObserver {
         recovered
     }
 
+    private suspend fun permissionReady(context: Context): Boolean {
+        val selectedEngine = RRApplication.instance.preferencesManager.tunEngine.first()
+        if (selectedEngine == PreferencesManager.TUN_ENGINE_ROOT ||
+            RRVpnService.activeRuntimeEngine.value == PreferencesManager.TUN_ENGINE_ROOT ||
+            RRVpnService.hasRootDataPlane()
+        ) return true
+        return VpnService.prepare(context) == null
+    }
+
     private fun markHealthy(event: String) {
         _state.value = _state.value.copy(
             lastHealthCheckAtMillis = System.currentTimeMillis(),
@@ -267,12 +335,18 @@ object NetworkContinuityObserver {
     }
 
     fun stop() {
+        handoffJob?.cancel()
+        handoffJob = null
         monitor?.stop()
         monitor = null
+        latestPath = null
+        physicalFingerprint = null
+        rootRefreshPending = false
         _state.value = _state.value.copy(monitoring = false)
     }
 
     private const val HEALTH_DELAY_MS = 1_500L
     private const val RECOVERY_TIMEOUT_MS = 5_000L
     private const val RECOVERY_COOLDOWN_MS = 5_000L
+    private const val ROOT_START_SETTLE_MS = 65_000L
 }

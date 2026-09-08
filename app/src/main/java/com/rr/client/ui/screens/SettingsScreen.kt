@@ -1,6 +1,11 @@
 package com.rr.client.ui.screens
 
+import android.app.Activity
 import android.content.Intent
+import android.net.VpnService
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -28,7 +33,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -46,7 +55,11 @@ import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
 import com.rr.client.vpn.RRVpnService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
 
@@ -68,26 +81,80 @@ fun SettingsScreen(
     onDisablePin: () -> Unit,
     onChangePin: () -> Unit,
     onPinMaxFailedAttemptsChanged: (Int) -> Unit,
-    onCheckAppUpdate: () -> Unit
+    onCheckAppUpdate: () -> Unit,
+    onVpnPermissionPendingChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val preferences = RRApplication.instance.preferencesManager
     val tunEngine by preferences.tunEngine.collectAsState(initial = PreferencesManager.TUN_ENGINE_SYSTEM)
+    var pendingTunEngine by rememberSaveable { mutableStateOf<String?>(null) }
+    var engineSwitchBusy by remember { mutableStateOf(false) }
 
-    fun switchTunEngine(engine: String) {
-        if (engine == tunEngine) return
+    fun commitTunEngine(engine: String) {
+        engineSwitchBusy = true
         scope.launch {
-            preferences.setTunEngine(engine)
-            if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, RRVpnService::class.java).apply {
-                        action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
+            try {
+                // Once saved, finish dispatching the corresponding restart even if the
+                // settings tab leaves composition while DataStore commits the selection.
+                withContext(NonCancellable) {
+                    val previousEngine = preferences.tunEngine.first()
+                    preferences.setTunEngine(engine)
+                    try {
+                        if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
+                            ContextCompat.startForegroundService(
+                                context,
+                                Intent(context, RRVpnService::class.java).apply {
+                                    action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
+                                }
+                            )
+                        }
+                    } catch (error: Exception) {
+                        preferences.setTunEngine(previousEngine)
+                        throw error
                     }
-                )
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                Toast.makeText(context, "切换引擎失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            } finally {
+                engineSwitchBusy = false
             }
         }
+    }
+
+    val enginePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        onVpnPermissionPendingChanged(false)
+        val requestedEngine = pendingTunEngine
+        pendingTunEngine = null
+        if (requestedEngine != null && result.resultCode == Activity.RESULT_OK) {
+            commitTunEngine(requestedEngine)
+        } else if (requestedEngine != null) {
+            Toast.makeText(context, "VPN 授权未通过，保留当前引擎", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun switchTunEngine(engine: String) {
+        if (engine == tunEngine || engineSwitchBusy || pendingTunEngine != null) return
+        // Ask only for an explicit System/HEV target. Selecting Root must never prepare a VPN.
+        if (engine != PreferencesManager.TUN_ENGINE_ROOT) {
+            val permissionIntent = VpnService.prepare(context)
+            if (permissionIntent != null) {
+                pendingTunEngine = engine
+                try {
+                    onVpnPermissionPendingChanged(true)
+                    enginePermissionLauncher.launch(permissionIntent)
+                } catch (error: Exception) {
+                    onVpnPermissionPendingChanged(false)
+                    pendingTunEngine = null
+                    Toast.makeText(context, "无法打开 VPN 授权：${error.message}", Toast.LENGTH_LONG).show()
+                }
+                return
+            }
+        }
+        commitTunEngine(engine)
     }
 
     Column(
@@ -191,14 +258,16 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        SettingsCard(borderHighlighted = tunEngine == PreferencesManager.TUN_ENGINE_HEV) {
+        SettingsCard(borderHighlighted = tunEngine != PreferencesManager.TUN_ENGINE_SYSTEM) {
             Text(text = "转发引擎", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
             Spacer(Modifier.height(4.dp))
             Text(
-                text = if (tunEngine == PreferencesManager.TUN_ENGINE_HEV) {
-                    "当前：HEV 极速引擎。Android TUN 交给 native C/lwIP，再通过本机 SOCKS5 进入 sing-box。"
-                } else {
-                    "当前：稳定引擎。使用已实机验证的 sing-box system TUN 数据面。"
+                text = when (tunEngine) {
+                    PreferencesManager.TUN_ENGINE_HEV ->
+                        "当前：HEV 极速引擎。Android TUN 交给 native C/lwIP，再通过本机 SOCKS5 进入 sing-box。"
+                    PreferencesManager.TUN_ENGINE_ROOT ->
+                        "当前：Root 引擎。需要超级用户授权，直接接管设备流量，不占用 Android VPN 槽位。"
+                    else -> "当前：稳定引擎。使用已实机验证的 sing-box system TUN 数据面。"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
@@ -217,6 +286,7 @@ fun SettingsScreen(
                 } else {
                     OutlinedButton(
                         onClick = { switchTunEngine(PreferencesManager.TUN_ENGINE_SYSTEM) },
+                        enabled = !engineSwitchBusy && pendingTunEngine == null,
                         modifier = Modifier.weight(1f)
                     ) { Text("稳定模式") }
                 }
@@ -230,13 +300,28 @@ fun SettingsScreen(
                 } else {
                     OutlinedButton(
                         onClick = { switchTunEngine(PreferencesManager.TUN_ENGINE_HEV) },
+                        enabled = !engineSwitchBusy && pendingTunEngine == null,
                         modifier = Modifier.weight(1f)
                     ) { Text("HEV 极速") }
                 }
             }
             Spacer(Modifier.height(8.dp))
+            if (tunEngine == PreferencesManager.TUN_ENGINE_ROOT) {
+                Button(
+                    onClick = {},
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
+                ) { Text("Root 模式 · 已选择", color = DarkBackground, fontWeight = FontWeight.Bold) }
+            } else {
+                OutlinedButton(
+                    onClick = { switchTunEngine(PreferencesManager.TUN_ENGINE_ROOT) },
+                    enabled = !engineSwitchBusy && pendingTunEngine == null,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Root 模式") }
+            }
+            Spacer(Modifier.height(8.dp))
             Text(
-                "HEV 与 System 使用同一套 DNS 分流并返回真实地址，避免切换引擎后遗留虚拟地址。HEV 保留高性能转发参数，System 稳定模式仍为默认。",
+                "三种引擎沿用当前节点、分流与应用范围。Root 需要设备已获取超级用户权限；切回 System / HEV 时可能需要 Android VPN 授权。System 稳定模式仍为默认。",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
@@ -276,7 +361,7 @@ fun SettingsScreen(
             Text(text = "Network Lab · 网络实验室", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "旁路查看网络路径、TUN/MTU、DNS、IPv4/IPv6、启动自检、进程日志，并运行 System vs HEV A/B 观察。实验室不会替换或重写两套现有数据面。",
+                "旁路查看网络路径、TUN/MTU、DNS、IPv4/IPv6、启动自检与进程日志。System vs HEV A/B 仅在这两种引擎下开放，Root 运行时不会参与。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
@@ -383,8 +468,8 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(4.dp))
             Text(text = "版本: ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "sing-box 内核: v1.14.0", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-            Text(text = "转发引擎: system TUN / HEV native", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-            Text(text = "运行方式: Android 标准 VpnService", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            Text(text = "转发引擎: System / HEV / Root", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            Text(text = "运行方式: Android VPN / Root 接管", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "最低系统: Android 8.0 (API 26)", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Text(text = "当前构建架构: arm64-v8a", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
         }

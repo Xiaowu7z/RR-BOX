@@ -10,11 +10,15 @@ import android.os.SystemClock
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
+import com.rr.client.RRApplication
+import com.rr.client.storage.PreferencesManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class RRQuickTileService : TileService() {
@@ -56,25 +60,28 @@ class RRQuickTileService : TileService() {
             return
         }
 
-        if (VpnService.prepare(this) != null) {
-            setTileState(Tile.STATE_INACTIVE, "需要 VPN 授权")
-            val intent = Intent(this, RRQuickTilePermissionActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            // AndroidX selects the API-34 PendingIntent overload and keeps
-            // the legacy Intent overload confined to older Android versions.
-            TileServiceCompat.startActivityAndCollapse(
-                this, PendingIntentActivityWrapper(this, 0, intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT, false)
-            )
-            return
-        }
-
         // Match mature VPN tiles: visual feedback is immediate; config/service work happens after it.
         setTileState(Tile.STATE_ACTIVE, "正在连接")
         connecting = true
         scope.launch {
             try {
+                val rootMode = RRApplication.instance.preferencesManager.tunEngine.first() ==
+                    PreferencesManager.TUN_ENGINE_ROOT ||
+                    RRVpnService.activeRuntimeEngine.value == PreferencesManager.TUN_ENGINE_ROOT ||
+                    RRVpnService.hasRootDataPlane()
+                if (!rootMode && VpnService.prepare(this@RRQuickTileService) != null) {
+                    setTileState(Tile.STATE_INACTIVE, "需要 VPN 授权")
+                    val intent = Intent(this@RRQuickTileService, RRQuickTilePermissionActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    // AndroidX chooses the API-34 PendingIntent overload or the legacy overload.
+                    TileServiceCompat.startActivityAndCollapse(
+                        this@RRQuickTileService,
+                        PendingIntentActivityWrapper(this@RRQuickTileService, 0, intent,
+                            PendingIntent.FLAG_UPDATE_CURRENT, false)
+                    )
+                    return@launch
+                }
                 val result = RRQuickTileController.connect(this@RRQuickTileService)
                 result.onFailure { error ->
                     setTileState(Tile.STATE_INACTIVE, "连接失败")
@@ -100,6 +107,14 @@ class RRQuickTileService : TileService() {
                     delay(50L)
                 }
                 refreshTile()
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                setTileState(Tile.STATE_INACTIVE, "连接失败")
+                Toast.makeText(
+                    this@RRQuickTileService,
+                    "快速连接失败：${error.message ?: error.javaClass.simpleName}",
+                    Toast.LENGTH_LONG
+                ).show()
             } finally {
                 connecting = false
             }
@@ -120,7 +135,7 @@ class RRQuickTileService : TileService() {
         qsTile?.let { tile ->
             tile.label = "RRBOX"
             tile.state = state
-            tile.contentDescription = "RRBOX VPN · $subtitle"
+            tile.contentDescription = "RRBOX · $subtitle"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = subtitle
             }

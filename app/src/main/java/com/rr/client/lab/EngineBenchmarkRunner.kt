@@ -26,6 +26,7 @@ class EngineBenchmarkRunner(
     private val appContext = context.applicationContext
 
     suspend fun run(): EngineBenchmarkReport {
+        requireNoRootRuntime()
         require(RRVpnService.isRunning.value && !RRVpnService.isStarting.value) {
             "请先让 RRBOX 正常连接，再开始 System / HEV A/B"
         }
@@ -119,6 +120,7 @@ class EngineBenchmarkRunner(
         delay(900L)
         val baselinePssKb = currentPssKb()
 
+        requireNoRootRuntime()
         onProgress("$engine · 64 KiB UID→TUN 路径预检")
         val preflight = EngineBenchmarkProbe.httpsRound(
             context = appContext,
@@ -153,6 +155,7 @@ class EngineBenchmarkRunner(
         val cpuStart = Process.getElapsedCpuTime()
         val httpsRounds = buildList {
             repeat(EngineBenchmarkProbe.HTTPS_ATTEMPTS) { index ->
+                requireNoRootRuntime()
                 val attempt = index + 1
                 onProgress(
                     "$engine · 固定 IPv4 HTTPS $attempt/${EngineBenchmarkProbe.HTTPS_ATTEMPTS} · 2 MiB"
@@ -223,8 +226,11 @@ class EngineBenchmarkRunner(
         engine: String,
         includeSelfForHevBenchmark: Boolean = false
     ): Long {
+        requireNoRootRuntime()
         check(VpnConnectionIntentStore.isDesiredRunning(appContext)) { "用户已断开，停止 A/B" }
-        preferences.setTunEngine(engine)
+        check(preferences.setBenchmarkTunEngine(engine)) {
+            "用户已选择 Root，停止 System / HEV A/B"
+        }
         RRVpnService.clearLastError()
         val previousSerial = RRVpnService.engineRestartMeasurement.value.serial
         ContextCompat.startForegroundService(
@@ -252,7 +258,18 @@ class EngineBenchmarkRunner(
     }
 
     private suspend fun restoreEngine(originalEngine: String) {
-        preferences.setTunEngine(originalEngine)
+        // A user selecting Root during A/B takes precedence over restoring the prior test arm.
+        if (preferences.tunEngine.first() == PreferencesManager.TUN_ENGINE_ROOT ||
+            RRVpnService.activeRuntimeEngine.value == PreferencesManager.TUN_ENGINE_ROOT ||
+            RRVpnService.hasRootDataPlane()
+        ) {
+            RRLogStore.record("BENCH", "Root 已选择或正在运行，跳过 A/B 恢复，保留用户当前选择")
+            return
+        }
+        if (!preferences.setBenchmarkTunEngine(originalEngine)) {
+            RRLogStore.record("BENCH", "恢复期间用户已选择 Root，保留 Root 选择")
+            return
+        }
         if (!VpnConnectionIntentStore.isDesiredRunning(appContext)) return
         RRVpnService.clearLastError()
         val previousSerial = RRVpnService.engineRestartMeasurement.value.serial
@@ -275,6 +292,13 @@ class EngineBenchmarkRunner(
             "BENCH",
             "已按正常模式恢复原始引擎: $originalEngine (${measurement.durationMillis}ms service-internal)"
         )
+    }
+
+    private suspend fun requireNoRootRuntime() {
+        require(preferences.tunEngine.first() != PreferencesManager.TUN_ENGINE_ROOT &&
+            RRVpnService.activeRuntimeEngine.value != PreferencesManager.TUN_ENGINE_ROOT &&
+            !RRVpnService.hasRootDataPlane()
+        ) { "Root 模式不参与 System / HEV A/B；请先切换并连接 System 或 HEV" }
     }
 
     private fun maskHost(value: String): String {

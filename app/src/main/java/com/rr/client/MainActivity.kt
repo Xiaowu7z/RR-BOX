@@ -105,6 +105,7 @@ class MainActivity : ComponentActivity() {
     private var suppressNextBackgroundLock = false
     private var routingRestartJob: Job? = null
     private var routingRestartGeneration = 0L
+    private var clearingApplicationData = false
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -121,11 +122,15 @@ class MainActivity : ComponentActivity() {
     private val vpnLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            startVpnServiceInternal()
-        } else {
-            clearPendingVpn()
-            Toast.makeText(this, "VPN 授权未通过", Toast.LENGTH_SHORT).show()
+        suppressNextBackgroundLock = false
+        lifecycleScope.launch {
+            // The selected mode may have changed while Android's permission activity was open.
+            if (rootModeSelectedOrActive() || result.resultCode == RESULT_OK) {
+                startVpnServiceInternal()
+            } else {
+                clearPendingVpn()
+                Toast.makeText(this@MainActivity, "VPN 授权未通过", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -828,6 +833,7 @@ class MainActivity : ComponentActivity() {
                         pinEnabled = pinEnabled,
                         pinMaxFailedAttempts = pinMaxFailedAttempts,
                         checkingAppUpdate = checkingAppUpdate,
+                        onVpnPermissionPendingChanged = { pending -> suppressNextBackgroundLock = pending },
                         onSmartRoutingChanged = { enabled ->
                             smartRouting = enabled
                             lifecycleScope.launch { prefs.setSmartRouting(enabled) }
@@ -1104,9 +1110,31 @@ class MainActivity : ComponentActivity() {
         pendingNodeTag = nodeTag
         pendingNodeId = nodeId
 
-        val intent = VpnService.prepare(this)
-        if (intent != null) vpnLauncher.launch(intent) else startVpnServiceInternal()
+        lifecycleScope.launch {
+            if (rootModeSelectedOrActive()) {
+                startVpnServiceInternal()
+                return@launch
+            }
+            val intent = VpnService.prepare(this@MainActivity)
+            if (intent != null) {
+                suppressNextBackgroundLock = true
+                try {
+                    vpnLauncher.launch(intent)
+                } catch (error: Exception) {
+                    suppressNextBackgroundLock = false
+                    clearPendingVpn()
+                    Toast.makeText(this@MainActivity, "无法打开 VPN 授权：${error.message}", Toast.LENGTH_LONG).show()
+                }
+            } else {
+                startVpnServiceInternal()
+            }
+        }
     }
+
+    private suspend fun rootModeSelectedOrActive(): Boolean =
+        RRApplication.instance.preferencesManager.tunEngine.first() == PreferencesManager.TUN_ENGINE_ROOT ||
+            RRVpnService.activeRuntimeEngine.value == PreferencesManager.TUN_ENGINE_ROOT ||
+            RRVpnService.hasRootDataPlane()
 
     private fun startVpnServiceInternal() {
         val config = pendingConfigJson ?: return
@@ -1157,15 +1185,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun clearOwnApplicationData() {
-        runCatching {
-            val manager = getSystemService(ActivityManager::class.java) ?: error("ActivityManager unavailable")
-            check(manager.clearApplicationUserData()) { "Android 拒绝清除应用数据请求" }
-        }.onFailure { error ->
-            Toast.makeText(
-                this,
-                "无法自动清除 RRBOX 数据：${error.message ?: error.javaClass.simpleName}",
-                Toast.LENGTH_LONG
-            ).show()
+        if (clearingApplicationData) return
+        clearingApplicationData = true
+        routingRestartJob?.cancel()
+        clearPendingVpn()
+        lifecycleScope.launch {
+            var teardownComplete = false
+            try {
+                check(RRVpnService.awaitStopForReset(this@MainActivity)) {
+                    "引擎清理尚未确认，已暂停清除数据，请重试"
+                }
+                teardownComplete = true
+                val manager = getSystemService(ActivityManager::class.java) ?: error("ActivityManager unavailable")
+                check(manager.clearApplicationUserData()) { "Android 拒绝清除应用数据请求" }
+            } catch (error: Exception) {
+                if (teardownComplete) RRVpnService.cancelPendingReset()
+                if (error is CancellationException) throw error
+                Toast.makeText(
+                    this@MainActivity,
+                    "无法自动清除 RRBOX 数据：${error.message ?: error.javaClass.simpleName}",
+                    Toast.LENGTH_LONG
+                ).show()
+            } finally {
+                clearingApplicationData = false
+            }
         }
     }
 }

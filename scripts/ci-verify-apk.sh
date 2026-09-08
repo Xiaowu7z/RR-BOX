@@ -17,6 +17,8 @@ grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
 grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
 grep -q '^lib/arm64-v8a/libhev-socks5-tunnel\.so$' dist/APK-FILE-LIST.txt
+grep -q '^lib/arm64-v8a/librrbox-root-probe\.so$' dist/APK-FILE-LIST.txt
+grep -q '^lib/arm64-v8a/librrbox-root-engine\.so$' dist/APK-FILE-LIST.txt
 grep -q '^assets/rules/geosite-geolocation-cn\.srs$' dist/APK-FILE-LIST.txt
 grep -q '^assets/rules/geoip-cn\.srs$' dist/APK-FILE-LIST.txt
 if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' dist/APK-FILE-LIST.txt; then exit 1; fi
@@ -31,6 +33,7 @@ cp build-reports/SOURCE-AUDIT.json dist/SOURCE-AUDIT.json
 cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
 cp build-reports/HEV-DNS-REPORT.json dist/HEV-DNS-REPORT.json
 cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
+cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
 # RRBOX 1.0.0 Build Report
 
@@ -45,6 +48,9 @@ cat > dist/BUILD-REPORT.md <<EOF
 - Signing certificate SHA-256: ${certificate_sha256}
 - System engine: sing-box system TUN stable baseline
 - HEV engine: native/lwIP + unified real DNS + SOCKS5 pipeline + best-effort client TFO
+- Root engine: native nonpersistent TUN handed to System stack, UID policy routing, explicit DNS and dual-stack routes, supervised rollback
+- Root verification: isolated Linux TUN/FD/routing/cleanup integration; Android real-device acceptance still required
+- Root lab: optional isolated capability probe and export
 - Network continuity: event-driven physical path tracking + validated runtime recovery
 - Quick Settings: current persisted config checked before cache reuse
 - Routing: shared domestic DNS/route policy, WeChat / Douyin / TikTok separation

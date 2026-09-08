@@ -30,7 +30,8 @@ data class NetworkSnapshot(
     val validated: Boolean = false,
     val metered: Boolean = false,
     val vpnInterface: String? = null,
-    val vpnMtu: Int? = null
+    val vpnMtu: Int? = null,
+    val tunLabel: String = "VPN TUN"
 )
 
 data class DiagnosticReport(
@@ -264,7 +265,7 @@ fun DiagnosticReport.toPlainText(): String = buildString {
     appendLine("IPv4: ${snapshot.ipv4Addresses.joinToString().ifBlank { "--" }}")
     appendLine("IPv6: ${snapshot.ipv6Addresses.joinToString().ifBlank { "--" }}")
     appendLine("DNS: ${snapshot.dnsServers.joinToString().ifBlank { "--" }}")
-    appendLine("VPN TUN: ${snapshot.vpnInterface ?: "--"} / MTU ${snapshot.vpnMtu ?: 0}")
+    appendLine("${snapshot.tunLabel}: ${snapshot.vpnInterface ?: "--"} / MTU ${snapshot.vpnMtu ?: 0}")
     appendLine()
     checks.forEach { appendLine("[${it.status}] ${it.name}: ${it.detail}") }
 }

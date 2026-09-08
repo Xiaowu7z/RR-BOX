@@ -1,6 +1,7 @@
 package com.rr.client.core
 
 import com.rr.client.vpn.NetworkContinuityMonitor
+import com.rr.client.vpn.RootVpnEngine
 import com.rr.client.lab.ConnectionLogTracker
 import com.rr.client.lab.ConnectionLogObservation
 import com.rr.client.lab.CoreDiagnosticLog
@@ -52,13 +53,16 @@ import io.nekohasekai.libbox.NetworkInterface as BoxNetworkInterface
 class BoxServiceWrapper(
     private val workingDir: File,
     private val onLogReceived: (String) -> Unit,
-    private val onStatusUpdate: (StatusMessage) -> Unit
+    private val onStatusUpdate: (StatusMessage) -> Unit,
+    private val onServiceStopRequested: (() -> Unit)? = null,
+    private val onServiceReloadRequested: (() -> Unit)? = null
 ) : PlatformInterface, CommandServerHandler, CommandClientHandler {
 
     private var commandServer: CommandServer? = null
     private var commandClient: CommandClient? = null
     private var tunPfd: ParcelFileDescriptor? = null
     private var vpnService: VpnService? = null
+    private var rootEngine: RootVpnEngine? = null
     private var lastConfigJson: String? = null
     @Volatile private var isRunning = false
     @Volatile private var isStopping = false
@@ -94,7 +98,7 @@ class BoxServiceWrapper(
         return false
     }
 
-    fun startService(configJson: String, vpn: VpnService): Boolean {
+    fun startService(configJson: String, vpn: VpnService, root: RootVpnEngine? = null): Boolean {
         if (isRunning && commandServer != null) {
             recordLog("sing-box service already running, skipping restart")
             return true
@@ -106,6 +110,7 @@ class BoxServiceWrapper(
 
         return try {
             vpnService = vpn
+            rootEngine = root
             lastConfigJson = configJson
             workingDir.mkdirs()
             val configFile = File(workingDir, "config.json")
@@ -203,11 +208,20 @@ class BoxServiceWrapper(
         commandServer = null
 
         vpnService = null
+        rootEngine = null
         lastConfigJson = null
         isStopping = false
     }
 
     override fun openTun(options: TunOptions): Int {
+        rootEngine?.let { engine ->
+            check(engine.isPrepared) { "Root TUN is not prepared" }
+            check(tunPfd == null) { "Root TUN descriptor was already supplied" }
+            val descriptor = ParcelFileDescriptor.adoptFd(engine.takeTunFd())
+            tunPfd = descriptor
+            recordLog("Root Linux TUN 已接入 sing-box system 栈，fd=${descriptor.fd}；未建立 Android VPN")
+            return descriptor.fd
+        }
         val vpn = vpnService ?: error("VPN service is unavailable")
         if (VpnService.prepare(vpn) != null) {
             error("VPN permission has not been granted")
@@ -291,11 +305,14 @@ class BoxServiceWrapper(
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
 
     override fun autoDetectInterfaceControl(fd: Int) {
+        // Root routing excludes RRBOX's UID. Calling protect() would require Android VPN
+        // authorization even though this data plane never creates an Android VPN interface.
+        if (rootEngine != null) return
         val protected = vpnService?.protect(fd) == true
         if (!protected) error("Failed to protect outbound socket from VPN loop")
     }
 
-    override fun useProcFS(): Boolean = Build.VERSION.SDK_INT < 29
+    override fun useProcFS(): Boolean = rootEngine == null && Build.VERSION.SDK_INT < 29
 
     override fun findConnectionOwner(
         ipProtocol: Int,
@@ -311,15 +328,21 @@ class BoxServiceWrapper(
             setAndroidPackageNames(StringArray(emptyList()))
         }
         val vpn = vpnService ?: return owner
-        if (Build.VERSION.SDK_INT < 29) return owner
+        if (rootEngine == null && Build.VERSION.SDK_INT < 29) return owner
 
         return runCatching {
-            val connectivity = vpn.getSystemService(ConnectivityManager::class.java)
-            val uid = connectivity.getConnectionOwnerUid(
-                ipProtocol,
-                InetSocketAddress(sourceAddress, sourcePort),
-                InetSocketAddress(destinationAddress, destinationPort)
-            )
+            val root = rootEngine
+            val uid = if (root != null) {
+                root.findConnectionOwner(ipProtocol, sourceAddress, sourcePort, destinationAddress, destinationPort)
+            } else {
+                val connectivity = vpn.getSystemService(ConnectivityManager::class.java)
+                connectivity.getConnectionOwnerUid(
+                    ipProtocol,
+                    InetSocketAddress(sourceAddress, sourcePort),
+                    InetSocketAddress(destinationAddress, destinationPort)
+                )
+            }
+            if (uid < 0) return@runCatching owner
             val packages = vpn.packageManager.getPackagesForUid(uid)?.toList().orEmpty()
             ConnectionOwner().apply {
                 userId = uid
@@ -500,10 +523,22 @@ class BoxServiceWrapper(
         throw UnsupportedOperationException("Platform bridge is disabled")
 
     override fun serviceStop() {
+        if (isStopping) return
+        if (rootEngine != null) {
+            onServiceStopRequested?.invoke()
+            return
+        }
         stopService()
     }
 
     override fun serviceReload() {
+        if (isStopping) return
+        if (rootEngine != null) {
+            // The Root fd is transferred exactly once. Reload through the owner, which
+            // rolls back routing and prepares a fresh fd from the canonical config.
+            onServiceReloadRequested?.invoke()
+            return
+        }
         val config = lastConfigJson ?: return
         commandServer?.startOrReloadService(config, OverrideOptions())
     }

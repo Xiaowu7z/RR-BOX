@@ -9,6 +9,8 @@ import android.os.Build
 import com.rr.client.core.NodeLatencyState
 import com.rr.client.core.NodeLatencyTester
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.storage.PreferencesManager
+import com.rr.client.vpn.RRVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetAddress
@@ -33,11 +35,19 @@ object NetworkDiagnostics {
         val physicalCaps = physical?.capabilities
         val physicalLink = physical?.linkProperties
 
+        val rootMode = engine == PreferencesManager.TUN_ENGINE_ROOT
+        val rootInterfaceName = if (rootMode) RRVpnService.currentRootInterfaceName() else null
+        val tunLabel = if (rootMode) "Root TUN" else "VPN TUN"
         val tun = runCatching {
             Collections.list(NetworkInterface.getNetworkInterfaces())
                 .firstOrNull { nic ->
                     runCatching { nic.isUp }.getOrDefault(false) &&
-                        (nic.name.startsWith("tun") || nic.name.startsWith("ppp"))
+                        if (rootMode) {
+                            if (rootInterfaceName != null) nic.name == rootInterfaceName
+                            else Regex("^rr[0-9a-f]{12}$").matches(nic.name)
+                        } else {
+                            nic.name.startsWith("tun") || nic.name.startsWith("ppp")
+                        }
                 }
         }.getOrNull()
 
@@ -58,7 +68,8 @@ object NetworkDiagnostics {
                 else -> cm?.isActiveNetworkMetered == true
             },
             vpnInterface = tun?.name,
-            vpnMtu = tun?.let { runCatching { it.mtu }.getOrNull() }
+            vpnMtu = tun?.let { runCatching { it.mtu }.getOrNull() },
+            tunLabel = tunLabel
         )
 
         val checks = mutableListOf<LabCheck>()
@@ -92,6 +103,9 @@ object NetworkDiagnostics {
             snapshot.dnsServers.joinToString().ifBlank { "Android 未报告 DNS 服务器" }
         )
         checks += LabCheck("当前转发引擎", LabCheckStatus.INFO, engine)
+        if (rootMode) {
+            checks += LabCheck("Root 接管", LabCheckStatus.INFO, "使用超级用户 TUN；Android VPN 未连接属于正常状态")
+        }
 
         val continuity = NetworkContinuityObserver.state.value
         checks += LabCheck(
@@ -111,19 +125,21 @@ object NetworkDiagnostics {
 
         if (vpnRunning) {
             checks += LabCheck(
-                "VPN TUN",
+                tunLabel,
                 if (tun != null) LabCheckStatus.PASS else LabCheckStatus.FAIL,
                 tun?.let { "${it.name} / MTU ${runCatching { it.mtu }.getOrDefault(0)}" }
-                    ?: "VPN 显示运行，但没有发现活动 TUN 接口"
+                    ?: if (rootMode) "Root 显示运行，但没有发现本次 Root TUN 接口"
+                    else "VPN 显示运行，但没有发现活动 TUN 接口"
             )
             checks += LabCheck(
                 "节点主动探测",
                 LabCheckStatus.INFO,
-                "VPN 运行期间不执行额外直连 socket 探测，避免诊断工具干扰稳定数据面"
+                if (rootMode) "Root 运行期间不执行额外直连 socket 探测，避免干扰当前数据面"
+                else "VPN 运行期间不执行额外直连 socket 探测，避免诊断工具干扰稳定数据面"
             )
         } else {
             checks += LabCheck(
-                "VPN TUN",
+                tunLabel,
                 LabCheckStatus.INFO,
                 tun?.let { "发现 ${it.name}，但 RRBOX 当前未标记运行" } ?: "RRBOX 当前未连接"
             )
