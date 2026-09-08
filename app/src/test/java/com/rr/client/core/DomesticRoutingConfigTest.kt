@@ -131,7 +131,9 @@ class DomesticRoutingConfigTest {
         assertFalse(root.getAsJsonObject("dns").has("independent_cache"))
         val direct = root.getAsJsonArray("outbounds").map { it.asJsonObject }
             .first { it.get("tag").asString == "direct" }
-        assertEquals("dns-direct", direct.get("domain_resolver").asString)
+        val resolver = direct.getAsJsonObject("domain_resolver")
+        assertEquals("dns-direct", resolver.get("server").asString)
+        assertEquals("prefer_ipv4", resolver.get("strategy").asString)
     }
 
     @Test

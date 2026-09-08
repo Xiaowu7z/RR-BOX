@@ -12,6 +12,7 @@ import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.routing.RoutingPolicySnapshot
+import com.rr.client.routing.WeChatIpv6RecoveryPolicy
 import com.rr.client.routing.XDestinationRecoveryPolicy
 
 /** Stable sing-box 1.14 runtime configuration. */
@@ -76,7 +77,13 @@ object ConfigBuilder {
                     addProperty("tag", TAG_DIRECT)
                     // HEV submits mapped destinations as domains: resolve a direct business
                     // using the same local resolver chosen by its DNS policy.
-                    addProperty("domain_resolver", DNS_DIRECT)
+                    add("domain_resolver", JsonObject().apply {
+                        addProperty("server", DNS_DIRECT)
+                        // A recovered IPv6 literal becomes this exact business domain.
+                        // Prefer a working IPv4 path without removing IPv6-only answers
+                        // or the dialer's normal fallback when IPv4 is unavailable.
+                        addProperty("strategy", "prefer_ipv4")
+                    })
                 })
             })
 
@@ -118,6 +125,7 @@ object ConfigBuilder {
                                 addProperty("outbound", TAG_PROXY)
                             })
                         }
+                        addWeChatIpv6RecoveryRules(this, selectedNode, proxy, routingPolicy)
                         addDomainRoutingRules(this, routingPolicy)
 
                         // Minimal observed-IP exceptions must never override known
@@ -239,6 +247,56 @@ object ConfigBuilder {
         })
         // Keep the existing terminal package/domain rules and their priority unchanged.
         // A second override at the terminal rule would erase the resolved addresses.
+    }
+
+    private fun addWeChatIpv6RecoveryRules(
+        rules: JsonArray, selectedNode: ProxyNode, proxy: JsonObject, routingPolicy: RoutingPolicySnapshot
+    ) {
+        for (host in WeChatIpv6RecoveryPolicy.hosts(
+            routingPolicy, selectedNode.server, primitiveString(proxy.get("server"))
+        )) {
+            rules.add(JsonObject().apply {
+                addProperty("type", "logical")
+                addProperty("mode", "and")
+                add("rules", JsonArray().apply {
+                    add(JsonObject().apply { add("domain", JsonArray().apply { add(host) }) })
+                    add(JsonObject().apply { addProperty("ip_version", 6) })
+                    add(JsonObject().apply { addProperty("ip_is_private", true); addProperty("invert", true) })
+                    add(JsonObject().apply {
+                        add("ip_cidr", JsonArray().apply {
+                            WeChatIpv6RecoveryPolicy.excludedDestinationCidrs.forEach(::add)
+                        })
+                        addProperty("invert", true)
+                    })
+                    // Observed failures are TCP. Keep all UDP, including QUIC and calls,
+                    // on its original route; a DNS reverse-map alone cannot identify P2P.
+                    add(JsonObject().apply { addProperty("network", "tcp") })
+                    add(JsonObject().apply {
+                        addProperty("type", "logical")
+                        addProperty("mode", "or")
+                        add("rules", JsonArray().apply {
+                            add(JsonObject().apply {
+                                add("protocol", JsonArray().apply { add("http"); add("tls") })
+                            })
+                            // WeChat's short/long transport need not be HTTP or TLS. Only
+                            // its verified owner may use an exact domain recovered by DNS
+                            // reverse mapping for opaque TCP.
+                            add(JsonObject().apply {
+                                add("package_name", JsonArray().apply {
+                                    add(WeChatIpv6RecoveryPolicy.PACKAGE_NAME)
+                                })
+                            })
+                        })
+                    })
+                })
+                // One terminal action keeps package precedence and preserves the original
+                // TCP port. The direct dialer resolves the replacement using
+                // dns-direct and provides IPv4/IPv6 fallback; no unrelated IP is hard-mapped.
+                addProperty("action", "route")
+                addProperty("outbound", TAG_DIRECT)
+                addProperty("override_address", host)
+            })
+        }
     }
 
     private fun destinationRecoveryCondition(hosts: List<String>) = JsonObject().apply {

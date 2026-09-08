@@ -6,6 +6,7 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.Build
 import android.util.Log
 
 /**
@@ -128,10 +129,7 @@ class NetworkContinuityMonitor(
     private fun publishPreferredIfChanged() {
         if (!registered) return
         val best = synchronized(lock) {
-            candidates.values.maxWithOrNull(
-                compareBy<Candidate> { score(it.capabilities, it.linkProperties) }
-                    .thenBy { it.linkProperties?.interfaceName.orEmpty() }
-            )
+            preferredCandidate(candidates.values)
         }
         if (best == null) {
             val changed = synchronized(lock) {
@@ -153,8 +151,12 @@ class NetworkContinuityMonitor(
             ?.sorted()
             .orEmpty()
         val dns = link?.dnsServers?.mapNotNull { it.hostAddress }?.sorted().orEmpty()
+        val routes = link?.routes?.map {
+            val routeType = if (Build.VERSION.SDK_INT >= 33) it.type.toString() else it.toString()
+            "${it.destination};${it.gateway?.hostAddress.orEmpty()};${it.`interface`.orEmpty()};$routeType"
+        }?.sorted().orEmpty()
         val signature = listOf(best.network.networkHandle.toString(), transport, interfaceName,
-            addresses.joinToString(","), dns.joinToString(","),
+            addresses.joinToString(","), dns.joinToString(","), routes.joinToString(","),
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED).toString(),
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED).toString())
             .joinToString("|")
@@ -174,28 +176,6 @@ class NetworkContinuityMonitor(
         )
     }
 
-    private fun isPhysicalInternet(caps: NetworkCapabilities): Boolean =
-        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-
-    /** Same policy as Network Lab diagnostics: a validated Wi-Fi beats a validated cellular path. */
-    private fun score(caps: NetworkCapabilities, link: LinkProperties?): Int {
-        var score = 0
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 20_000
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) score += 4_000
-        score += when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3_000
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 2_000
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1_000
-            else -> 200
-        }
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) score += 100
-        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) score += 50
-        if (!link?.interfaceName.isNullOrBlank()) score += 20
-        if (!link?.linkAddresses.isNullOrEmpty()) score += 10
-        return score
-    }
-
     private fun transportLabel(caps: NetworkCapabilities): String = when {
         caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
         caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "蜂窝网络"
@@ -203,7 +183,45 @@ class NetworkContinuityMonitor(
         else -> "其他网络"
     }
 
-    private companion object {
-        const val TAG = "NetworkContinuity"
+    companion object {
+        private const val TAG = "NetworkContinuity"
+
+        /** Synchronous snapshot using exactly the same selection policy as libbox's monitor. */
+        fun preferredPhysicalLink(context: Context): LinkProperties? = runCatching {
+            val manager = context.applicationContext.getSystemService(ConnectivityManager::class.java)
+            val physical = manager.allNetworks.mapNotNull { network ->
+                val caps = manager.getNetworkCapabilities(network) ?: return@mapNotNull null
+                if (!isPhysicalInternet(caps)) return@mapNotNull null
+                Candidate(network, caps, manager.getLinkProperties(network))
+            }
+            preferredCandidate(physical)?.linkProperties
+        }.getOrNull()
+
+        private fun preferredCandidate(candidates: Collection<Candidate>): Candidate? = candidates.maxWithOrNull(
+            compareBy<Candidate> { score(it.capabilities, it.linkProperties) }
+                .thenBy { it.linkProperties?.interfaceName.orEmpty() }
+        )
+
+        private fun isPhysicalInternet(caps: NetworkCapabilities): Boolean =
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+
+        /** Same policy as Network Lab diagnostics: a validated Wi-Fi beats a validated cellular path. */
+        private fun score(caps: NetworkCapabilities, link: LinkProperties?): Int {
+            var score = 0
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 20_000
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) score += 4_000
+            score += when {
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3_000
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 2_000
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1_000
+                else -> 200
+            }
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) score += 100
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) score += 50
+            if (!link?.interfaceName.isNullOrBlank()) score += 20
+            if (!link?.linkAddresses.isNullOrEmpty()) score += 10
+            return score
+        }
     }
 }

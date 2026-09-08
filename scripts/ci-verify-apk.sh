@@ -32,6 +32,7 @@ python3 scripts/collect_reports.py
 cp build-reports/SOURCE-AUDIT.json dist/SOURCE-AUDIT.json
 cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
 cp build-reports/DESTINATION-RECOVERY-REPORT.json dist/DESTINATION-RECOVERY-REPORT.json
+cp build-reports/WECHAT-IPV6-REPORT.json dist/WECHAT-IPV6-REPORT.json
 cp build-reports/HEV-DNS-REPORT.json dist/HEV-DNS-REPORT.json
 cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
@@ -58,6 +59,7 @@ cat > dist/BUILD-REPORT.md <<EOF
 - Routing: shared domestic DNS/route policy, WeChat / Douyin / TikTok separation
 - Routing verification: pinned host core TCP/UDP/DNS fixtures including BIGO login domain precedence and exact-domain boundaries (device acceptance still required)
 - Destination recovery verification: System/HEV/Root production rules, actual observed destination, trusted DNS cache and QUIC original reply addresses; all fixture traffic terminates on loopback
+- WeChat IPv6 verification: enabled candidate rules with the real direct outbound, IPv4 TCP recovery, AAAA-only answers and dual-stack TCP fallback, unchanged UDP; Root physical-family gating is separate and Android/WeChat business acceptance remains required
 - App/notification icon resources: frozen validated production resources
 - Update channels: GitHub releases/latest + Obtainium
 EOF

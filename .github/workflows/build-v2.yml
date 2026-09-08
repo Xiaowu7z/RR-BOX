@@ -147,6 +147,12 @@ jobs:
           python3 scripts/verify-destination-recovery.py --sing-box build-reports/sing-box-routing-check --quic-generator build-reports/routing-quic-fixture --fixtures app/build/routing-fixtures --report build-reports/DESTINATION-RECOVERY-REPORT.json
       - name: Verify HEV DNS and reverse mapping with real core
         run: python3 scripts/verify-hev-dns.py --sing-box build-reports/sing-box-routing-check --fixtures app/build/hev-dns-fixtures --report build-reports/HEV-DNS-REPORT.json
+      - name: Verify WeChat TCP IPv6 recovery and unchanged UDP with real core
+        run: |
+          sudo unshare --net -- sh -eu <<'SH'
+          ip link set lo up
+          exec python3 scripts/verify-wechat-ipv6.py --sing-box build-reports/sing-box-routing-check --quic-generator build-reports/routing-quic-fixture --fixtures app/build/routing-fixtures --report build-reports/WECHAT-IPV6-REPORT.json
+          SH
       - name: Verify native HEV DNS packet forwarding
         run: |
           test "$(git -C hev-socks5-tunnel rev-parse HEAD)" = "$HEV_COMMIT"

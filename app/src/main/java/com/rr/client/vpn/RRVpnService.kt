@@ -11,6 +11,7 @@ import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.core.HevConfigAdapter
+import com.rr.client.core.WeChatRecoveryRuntimePolicy
 import com.rr.client.lab.RRLogStore
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
@@ -688,10 +689,23 @@ class RRVpnService : VpnService() {
 
     /** Must be called under coreMutex after the previous data plane has been fully stopped. */
     private suspend fun startDataPlane(config: String, engine: String, hevBenchmarkSelfTraffic: Boolean) {
+        val physical = if (engine == PreferencesManager.TUN_ENGINE_ROOT) {
+            PhysicalIpSupport.forPreferredNetwork(this)
+        } else PhysicalIpSupport.Support()
+        val recoverWechatIpv6 = engine == PreferencesManager.TUN_ENGINE_ROOT && physical.known &&
+            physical.hasIPv4 && !physical.hasUsableIPv6
+        // Only the live copy depends on the current physical path. Keep config and the
+        // persistent canonical cache intact so the next Root handoff can decide again.
+        val runtimeSource = WeChatRecoveryRuntimePolicy.apply(config, recoverWechatIpv6)
+        if (engine == PreferencesManager.TUN_ENGINE_ROOT) {
+            RRLogStore.record("CORE", "Root 微信 IPv6 兼容=${if (recoverWechatIpv6) "启用" else "未启用"}；" +
+                "物理快照=${physical.known}；IPv4 地址及默认路由=${physical.hasIPv4}；" +
+                "公网 IPv6 地址及默认路由=${physical.hasUsableIPv6}")
+        }
         when (engine) {
             PreferencesManager.TUN_ENGINE_ROOT -> {
                 val root = rootEngine ?: error("Root 引擎不可用")
-                val runtimeConfig = root.prepare(config)
+                val runtimeConfig = root.prepare(runtimeSource)
                 Libbox.checkConfig(runtimeConfig)
                 check(boxCore?.startService(runtimeConfig, this@RRVpnService, root) == true) {
                     boxCore?.lastError ?: "Root sing-box 内核未能启动"
@@ -701,7 +715,7 @@ class RRVpnService : VpnService() {
                 check(root.isRunning && boxCore?.isCoreRunning() == true) { "Root 数据面未完成激活" }
             }
             PreferencesManager.TUN_ENGINE_HEV -> {
-                val runtime = HevConfigAdapter.adapt(config)
+                val runtime = HevConfigAdapter.adapt(runtimeSource)
                 Libbox.checkConfig(runtime.configJson)
                 check(boxCore?.startService(runtime.configJson, this@RRVpnService) == true) {
                     boxCore?.lastError ?: "HEV sing-box 内核未能启动"
@@ -713,7 +727,7 @@ class RRVpnService : VpnService() {
                 check(boxCore?.isCoreRunning() == true && hevEngine?.isRunning == true) { "HEV 数据面未完成激活" }
             }
             else -> {
-                check(boxCore?.startService(config, this@RRVpnService) == true) {
+                check(boxCore?.startService(runtimeSource, this@RRVpnService) == true) {
                     boxCore?.lastError ?: "sing-box 内核未能启动"
                 }
                 check(boxCore?.isCoreRunning() == true) { "sing-box 数据面未完成激活" }
