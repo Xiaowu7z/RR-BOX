@@ -82,6 +82,25 @@ if scenario == "verify_query_error":
 if scenario in ("verify_missing", "verify_clean"):
     sys.exit(0)
 lookup = "42000" if scenario == "verify_numeric" else "rrbox_reserved"
+peer = "172.19.0.2" if family == "-4" else "fdfe:dcba:9876::2"
+peer_prefix = "/32" if family == "-4" else "/128"
+if scenario == "verify_wrong_peer":
+    peer = "172.19.0.3" if family == "-4" else "fdfe:dcba:9876::3"
+if scenario == "verify_wide_peer":
+    peer_prefix = "/30" if family == "-4" else "/126"
+if scenario == "verify_peer_bare":
+    peer_prefix = ""
+peer_selector = {
+    "verify_peer_uid": " uidrange 10003-10003",
+    "verify_peer_iif": " iif lo",
+    "verify_peer_oif": " oif rrtest",
+    "verify_peer_mark": " fwmark 0x10065",
+}.get(scenario, "")
+peer_rule = f"9000:\tfrom all to {peer}{peer_prefix}{peer_selector} lookup {lookup}"
+if scenario != "verify_missing_peer":
+    print(peer_rule)
+if scenario == "verify_duplicate_peer":
+    print(peer_rule)
 uid = "10004-10004" if scenario == "verify_wrong_uid" else "10002-10002"
 iif = "wlan0" if scenario == "verify_wrong_iif" else "lo"
 business = f"9000:\tfrom all iif {iif} uidrange {uid} lookup {lookup}"
@@ -94,6 +113,8 @@ destination = "192.168.50.1" if family == "-4" else "2001:db8::53"
 if scenario == "verify_wrong_dns":
     destination = "192.168.50.2" if family == "-4" else "2001:db8::54"
 prefix = "/32" if family == "-4" else "/128"
+if scenario == "verify_wide_dns":
+    prefix = "/24" if family == "-4" else "/64"
 print(f"9000:\tfrom all to {destination}{prefix} iif lo uidrange 10003-10003 lookup {lookup}")
 '''
 
@@ -132,12 +153,16 @@ int main(int argc, char **argv)
     if (!app_alive()) return 94;
     snprintf(current.socket_name, sizeof(current.socket_name), "rrbox-root-0123456789abcdef");
     snprintf(current.table, sizeof(current.table), "42000");
-    current.range_count = 3;
+    current.range_count = 5;
     current.ranges[0] = (struct uid_range){ .first = 10002, .last = 10002 };
     current.ranges[1] = (struct uid_range){ .first = 10003, .last = 10003, .family = 4 };
     current.ranges[2] = (struct uid_range){ .first = 10003, .last = 10003, .family = 6 };
     snprintf(current.ranges[1].destination, sizeof(current.ranges[1].destination), "192.168.50.1/32");
     snprintf(current.ranges[2].destination, sizeof(current.ranges[2].destination), "2001:db8::53/128");
+    current.ranges[3] = (struct uid_range){ .family = 4, .internal_peer = true };
+    current.ranges[4] = (struct uid_range){ .family = 6, .internal_peer = true };
+    snprintf(current.ranges[3].destination, sizeof(current.ranges[3].destination), "%s", SYSTEM_PEER_IPV4);
+    snprintf(current.ranges[4].destination, sizeof(current.ranges[4].destination), "%s", SYSTEM_PEER_IPV6);
     bool result = strcmp(argv[1], "reserve") == 0 ? reserve_table() :
         verify_rules(atoi(argv[2]), strcmp(argv[3], "present") == 0);
     printf("%s %s\n", result ? "true" : "false", current.table);
@@ -209,10 +234,12 @@ def main():
         for scenario in ("foreign_priority", "global_query_error", "filtered_query_error", "route_query_error"):
             check(scenario, action="reserve", expected=False)
         for family in (4, 6):
-            for scenario in ("verify_numeric", "verify_alias"):
+            for scenario in ("verify_numeric", "verify_alias", "verify_peer_bare"):
                 check(scenario, family=family)
             for scenario in ("verify_wrong_uid", "verify_wrong_iif", "verify_wrong_dns",
-                             "verify_missing", "verify_missing_dns", "verify_duplicate", "verify_query_error"):
+                             "verify_missing", "verify_missing_dns", "verify_duplicate", "verify_query_error",
+                             "verify_wrong_peer", "verify_wide_peer", "verify_missing_peer", "verify_duplicate_peer",
+                             "verify_peer_uid", "verify_peer_iif", "verify_peer_oif", "verify_peer_mark", "verify_wide_dns"):
                 check(scenario, family=family, expected=False)
             check("verify_alias", family=family, present=False, expected=False)
             check("verify_clean", family=family, present=False)

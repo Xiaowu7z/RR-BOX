@@ -126,6 +126,18 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$SING_BOX_COMMIT"
           go build -ldflags "-X github.com/sagernet/sing-box/constant.Version=${SING_BOX_TAG#v}" -o ../build-reports/sing-box-routing-check ./cmd/sing-box
+      - name: Verify Root TCP and UDP return paths without Linux main fallback
+        run: |
+          set -euo pipefail
+          test "$(git -C sing-box-src rev-parse HEAD)" = "$SING_BOX_COMMIT"
+          mkdir -p sing-box-src/cmd/rrbox-root-tcp-check
+          cp scripts/root-tcp-check/main.go sing-box-src/cmd/rrbox-root-tcp-check/main.go
+          cd sing-box-src
+          go build -o ../build-reports/root-tcp-stack-check ./cmd/rrbox-root-tcp-check
+          cd ..
+          sudo unshare --net -- python3 scripts/verify-root-tcp.py \
+            --helper "$PWD/build-reports/root-engine-host" --stack "$PWD/build-reports/root-tcp-stack-check" \
+            --report "$PWD/build-reports/ROOT-TCP-REPORT.json"
       - name: Verify domestic and overseas routing with real core
         run: python3 scripts/verify-routing.py --sing-box build-reports/sing-box-routing-check --fixtures app/build/routing-fixtures --report build-reports/ROUTING-CORE-REPORT.json
       - name: Verify HEV DNS and reverse mapping with real core

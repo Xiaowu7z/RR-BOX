@@ -50,11 +50,14 @@
 #define LEASE_MS 15000
 #define CLEANUP_TIMEOUT_MS 12000
 #define RULE_PRIORITY "9000"
+#define SYSTEM_PEER_IPV4 "172.19.0.2/32"
+#define SYSTEM_PEER_IPV6 "fdfe:dcba:9876::2/128"
 
 struct uid_range {
     uint32_t first, last;
-    int family; /* zero: both families; otherwise an explicit DNS destination. */
+    int family; /* zero: both families; otherwise an explicit host destination. */
     char destination[INET6_ADDRSTRLEN + 8];
+    bool internal_peer; /* system-stack TCP return path, not application traffic. */
     bool added4, added6;
 };
 struct route_entry { int family; char prefix[INET6_ADDRSTRLEN + 8]; bool is_throw, added; };
@@ -612,6 +615,9 @@ static int change_route(struct route_entry *route, bool remove)
 
 static int change_rule(struct uid_range *range, int family, bool remove)
 {
+    if (range->internal_peer)
+        return run_ip(remove, NULL, 0, family == 4 ? "-4" : "-6", "rule", remove ? "del" : "add",
+                      "pref", RULE_PRIORITY, "to", range->destination, "lookup", current.table, NULL);
     char uid_range[32];
     snprintf(uid_range, sizeof(uid_range), "%u-%u", range->first, range->last);
     if (*range->destination)
@@ -640,16 +646,30 @@ static bool verify_rules(int family, bool expect_present)
         if (end == line || *end != ':' || priority != 9000) continue;
         if (!expect_present) goto done;
         char *uid_field = strstr(line, "uidrange ");
-        if (strstr(line, "iif lo") == NULL || uid_field == NULL) goto done;
-        unsigned first, last;
-        int consumed = 0;
-        if (sscanf(uid_field + 9, "%u-%u%n", &first, &last, &consumed) != 2 ||
-            (uid_field[9 + consumed] && !isspace((unsigned char)uid_field[9 + consumed]))) goto done;
+        bool internal_peer = uid_field == NULL;
+        unsigned first = 0, last = 0;
+        if (internal_peer) {
+            /* Peer reachability must also serve kernel reverse-path lookups;
+             * an iif/UID/mark restriction would silently re-break TCP. */
+            if (strstr(line, "from all ") == NULL || strstr(line, " iif ") ||
+                strstr(line, " oif ") || strstr(line, " fwmark ") || strstr(line, " ipproto ") ||
+                strstr(line, " sport ") || strstr(line, " dport ")) goto done;
+        } else {
+            if (strstr(line, "iif lo") == NULL) goto done;
+            int consumed = 0;
+            if (sscanf(uid_field + 9, "%u-%u%n", &first, &last, &consumed) != 2 ||
+                (uid_field[9 + consumed] && !isspace((unsigned char)uid_field[9 + consumed]))) goto done;
+        }
         char actual_destination[INET6_ADDRSTRLEN + 8] = "";
         char *to = strstr(line, " to ");
         if (to && sscanf(to + 4, "%53s", actual_destination) != 1) goto done;
         char *suffix = strchr(actual_destination, '/');
-        if (suffix) *suffix = '\0';
+        if (suffix) {
+            char *prefix_end;
+            unsigned long bits = strtoul(suffix + 1, &prefix_end, 10);
+            if (prefix_end == suffix + 1 || *prefix_end || bits != (family == 4 ? 32U : 128U)) goto done;
+            *suffix = '\0';
+        }
         bool matched = false;
         for (size_t i = 0; i < current.range_count; ++i) {
             struct uid_range *range = &current.ranges[i];
@@ -658,7 +678,8 @@ static bool verify_rules(int family, bool expect_present)
             snprintf(expected_destination, sizeof(expected_destination), "%s", range->destination);
             suffix = strchr(expected_destination, '/');
             if (suffix) *suffix = '\0';
-            if (!seen[i] && range->first == first && range->last == last &&
+            if (!seen[i] && range->internal_peer == internal_peer &&
+                (internal_peer || (range->first == first && range->last == last)) &&
                 strcmp(expected_destination, actual_destination) == 0) {
                 seen[i] = true; matched = true; break;
             }
@@ -687,6 +708,23 @@ static bool activate(void)
     if (!plan_route(4, "default", false) || !plan_route(6, "default", false)) return false;
     for (size_t i = 0; i < sizeof(throws4) / sizeof(*throws4); ++i) if (!plan_route(4, throws4[i], true)) return false;
     for (size_t i = 0; i < sizeof(throws6) / sizeof(*throws6); ++i) if (!plan_route(6, throws6[i], true)) return false;
+    /* sing-tun's system stack rewrites TCP into a local listener at the first
+     * TUN address, with its next address as the synthetic peer. Listener replies
+     * belong to RRBOX's exempt UID. Android does not normally consult the main
+     * routing table, so the connected routes installed by `ip addr` cannot
+     * return these replies to TUN. Keep exactly these two internal hosts reachable
+     * for every UID and kernel reverse-path lookup; Internet egress stays exempt.
+     * These /32 and /128 routes override the LAN throws without capturing LANs.
+     * Prepend the peer rules so setup establishes the return path before capture
+     * and rollback removes them after all business/DNS selection rules. */
+    if (!plan_route(4, SYSTEM_PEER_IPV4, false) || !plan_route(6, SYSTEM_PEER_IPV6, false) ||
+        current.range_count > MAX_RANGES - 2) return false;
+    memmove(current.ranges + 2, current.ranges, current.range_count * sizeof(*current.ranges));
+    current.range_count += 2;
+    current.ranges[0] = (struct uid_range){ .family = 4, .internal_peer = true };
+    current.ranges[1] = (struct uid_range){ .family = 6, .internal_peer = true };
+    snprintf(current.ranges[0].destination, sizeof(current.ranges[0].destination), "%s", SYSTEM_PEER_IPV4);
+    snprintf(current.ranges[1].destination, sizeof(current.ranges[1].destination), "%s", SYSTEM_PEER_IPV6);
     for (size_t i = 0; i < current.dns_count; ++i) {
         bool v6 = strchr(current.dns[i], ':') != NULL;
         /* Local services remain local. Other resolver addresses override LAN throws. */
@@ -733,12 +771,12 @@ static bool activate(void)
     for (size_t i = 0; i < current.range_count; ++i) {
         if (current.ranges[i].family != 6) {
             current.ranges[i].added4 = true;
-            failure_stage = "install_ipv4_uid_rule";
+            failure_stage = current.ranges[i].internal_peer ? "install_ipv4_system_peer_rule" : "install_ipv4_uid_rule";
             if (change_rule(&current.ranges[i], 4, false) != 0) return false;
         }
         if (current.ranges[i].family != 4) {
             current.ranges[i].added6 = true;
-            failure_stage = "install_ipv6_uid_rule";
+            failure_stage = current.ranges[i].internal_peer ? "install_ipv6_system_peer_rule" : "install_ipv6_uid_rule";
             if (change_rule(&current.ranges[i], 6, false) != 0) return false;
         }
     }

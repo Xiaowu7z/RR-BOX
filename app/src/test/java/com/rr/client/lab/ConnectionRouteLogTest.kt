@@ -60,6 +60,45 @@ class ConnectionRouteLogTest {
         assertTrue(ConnectionRouteLog.enabledForConfig("""{"log":{"level":"info"}}"""))
     }
 
+    @Test fun sessionsAndIndividualRoutesDistinguishRootFromSystemUsingTheStartedConfig() {
+        val logs = ConnectionLogTracker()
+        val config = """{"inbounds":[{"type":"tun","stack":"system"}]}"""
+        val rootStart = logs.sessionStartedMessage(config, true, "hev-socks-in")
+        assertTrue(rootStart.contains("核心引擎：ROOT；TUN 栈：system"))
+        assertTrue(rootStart.contains("数据面就绪以启动结果为准"))
+        val rootSession = logs.sessionId
+        val observation = ConnectionLogObservation("one", connection())
+        assertTrue(logs.format(observation, 1)!!.message.contains("入口：ROOT / TUN（system 栈）"))
+        assertTrue(logs.sessionStoppedMessage().contains("核心引擎：ROOT"))
+
+        logs.clear()
+        val systemStart = logs.sessionStartedMessage(config, false, "hev-socks-in")
+        assertTrue(systemStart.contains("核心引擎：SYSTEM；TUN 栈：system"))
+        assertFalse(systemStart.contains("ROOT"))
+        assertNotEquals(rootSession, logs.sessionId)
+        assertNull(logs.format(observation.copy(closed = true), 2, rootSession))
+        assertTrue(logs.format(observation, 3)!!.message.contains("入口：SYSTEM / TUN（system 栈）"))
+    }
+
+    @Test fun runtimeContextRequiresTheActualHevInboundAndNeverCopiesArbitraryConfigValues() {
+        val hevConfig = """{"inbounds":[{"type":"socks","tag":"hev-socks-in"}]}"""
+        val logs = ConnectionLogTracker()
+        assertTrue(logs.sessionStartedMessage(hevConfig, false, "hev-socks-in").contains("核心引擎：HEV"))
+        val message = logs.format(ConnectionLogObservation("hev", connection().copy(hev = true)), 1)!!.message
+        assertTrue(message.contains("入口：HEV / SOCKS"))
+        assertTrue(message.contains("未知应用（HEV"))
+
+        val unrelatedSocks = ConnectionLogRuntime.fromConfig(
+            """{"inbounds":[{"type":"socks","tag":"manual-proxy"}]}""", false, "hev-socks-in")
+        assertEquals("UNKNOWN", unrelatedSocks.engine)
+        val secretStack = ConnectionLogRuntime.fromConfig(
+            """{"inbounds":[{"type":"tun","stack":"password=secret-token"}]}""", true, "hev-socks-in")
+        assertTrue(secretStack.summary.contains("TUN 栈：未提供"))
+        assertFalse(secretStack.summary.contains("secret-token"))
+        assertEquals("UNKNOWN", ConnectionLogRuntime.fromConfig("invalid", false, "hev-socks-in").engine)
+        assertEquals("ROOT", ConnectionLogRuntime.fromConfig("invalid", true, "hev-socks-in").engine)
+    }
+
     @Test fun sameConnectionGetsOneRouteAndOneEndButNoRepeatedSnapshots() {
         val logs = ConnectionLogTracker()
         val start = ConnectionLogObservation("one", connection(), createdAt = 100, uplinkTotal = 0, downlinkTotal = 0)

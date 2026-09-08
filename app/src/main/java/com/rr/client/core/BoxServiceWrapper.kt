@@ -128,7 +128,7 @@ class BoxServiceWrapper(
             collectConnectionLogs = ConnectionRouteLog.enabledForConfig(configJson)
             RRLogStore.setConnectionLoggingActive(false)
             if (collectConnectionLogs) RRLogStore.record("SESSION",
-                "详细采集开始；会话：${connectionLogs.sessionId}；sing-box 1.14.0；目标为核心记录的元数据，未提供最终拨号 IP。")
+                connectionLogs.sessionStartedMessage(configJson, root != null, HevConfigAdapter.SOCKS_TAG))
 
             runCatching {
                 val clientOptions = CommandClientOptions().apply {
@@ -183,7 +183,7 @@ class BoxServiceWrapper(
         if (isStopping) return
         isStopping = true
         if (collectConnectionLogs) RRLogStore.record("SESSION",
-            "详细采集停止；会话：${connectionLogs.sessionId}；未收到结束事件的连接结果未知。")
+            connectionLogs.sessionStoppedMessage())
         isRunning = false
         commandGeneration++
         collectConnectionLogs = false

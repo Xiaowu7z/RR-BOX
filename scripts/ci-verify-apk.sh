@@ -34,6 +34,7 @@ cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
 cp build-reports/HEV-DNS-REPORT.json dist/HEV-DNS-REPORT.json
 cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
+cp build-reports/ROOT-TCP-REPORT.json dist/ROOT-TCP-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
 # RRBOX 1.0.0 Build Report
 
@@ -48,8 +49,8 @@ cat > dist/BUILD-REPORT.md <<EOF
 - Signing certificate SHA-256: ${certificate_sha256}
 - System engine: sing-box system TUN stable baseline
 - HEV engine: native/lwIP + unified real DNS + SOCKS5 pipeline + best-effort client TFO
-- Root engine: native nonpersistent TUN handed to System stack, UID policy routing, explicit DNS and dual-stack routes, supervised rollback
-- Root verification: isolated Linux TUN/FD/routing/cleanup integration; Android real-device acceptance still required
+- Root engine: native nonpersistent TUN handed to System stack, UID policy routing, exact TCP peer return routes, explicit DNS and dual-stack routes, supervised rollback
+- Root verification: isolated Linux TUN/FD/routing/cleanup plus real System stack TCP/UDP with Android-style policy routing; Android real-device acceptance still required
 - Root lab: optional isolated capability probe and export
 - Network continuity: event-driven physical path tracking + validated runtime recovery
 - Quick Settings: current persisted config checked before cache reuse

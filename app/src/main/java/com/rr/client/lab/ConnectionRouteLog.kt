@@ -22,6 +22,38 @@ data class ConnectionRouteRecord(
 
 data class ConnectionRouteMessage(val timestamp: Long, val message: String)
 
+/** Captured from the config actually started by libbox, never from the selected UI preference. */
+internal class ConnectionLogRuntime private constructor(val engine: String, val tunStack: String?) {
+    val summary: String get() = "核心引擎：$engine" + (tunStack?.let { "；TUN 栈：$it" } ?: "")
+    val entrance: String get() = when (engine) {
+        "ROOT", "SYSTEM" -> "$engine / TUN（${tunStack ?: "未提供"} 栈）"
+        "HEV" -> "HEV / SOCKS"
+        else -> "未知引擎 / 其他"
+    }
+
+    companion object {
+        fun fromConfig(configJson: String, rootAttached: Boolean, hevSocksTag: String): ConnectionLogRuntime {
+            val inbounds = runCatching {
+                JsonParser.parseString(configJson).asJsonObject.getAsJsonArray("inbounds")
+                    ?.filter { it.isJsonObject }?.map { it.asJsonObject }.orEmpty()
+            }.getOrDefault(emptyList())
+            val tun = inbounds.firstOrNull { runCatching { it.get("type")?.asString == "tun" }.getOrDefault(false) }
+            // Only known stack names are persisted; arbitrary configuration values may contain secrets.
+            val stack = tun?.let { runCatching { it.get("stack")?.asString }.getOrNull() }
+                ?.takeIf { it in setOf("system", "gvisor", "mixed") }
+            val engine = when {
+                rootAttached -> "ROOT"
+                tun != null -> "SYSTEM"
+                inbounds.any { inbound -> runCatching {
+                    inbound.get("type")?.asString == "socks" && inbound.get("tag")?.asString == hevSocksTag
+                }.getOrDefault(false) } -> "HEV"
+                else -> "UNKNOWN"
+            }
+            return ConnectionLogRuntime(engine, if (engine in setOf("ROOT", "SYSTEM")) stack ?: "未提供" else null)
+        }
+    }
+}
+
 object ConnectionRouteLog {
     const val CHANNEL = "ROUTE"
 
@@ -33,7 +65,9 @@ object ConnectionRouteLog {
             log.get("level")?.asString?.lowercase(Locale.ROOT) in setOf("trace", "debug", "info")
     }.getOrDefault(false)
 
-    fun format(record: ConnectionRouteRecord): String {
+    fun format(record: ConnectionRouteRecord): String = format(record, null)
+
+    internal fun format(record: ConnectionRouteRecord, runtime: ConnectionLogRuntime?): String {
         val application = when {
             record.hev -> "未知应用（HEV 未提供原始应用身份）"
             record.packages.isNotEmpty() -> buildString {
@@ -64,7 +98,7 @@ object ConnectionRouteLog {
             append(" (").append(record.outbound.ifBlank { "未知" }.take(160))
             record.outboundType.takeIf(String::isNotBlank)?.let { append(" / ").append(it.take(40)) }
             append(")")
-            append("\n入口：").append(if (record.hev) "HEV / SOCKS" else "TUN / 其他")
+            append("\n入口：").append(runtime?.entrance ?: if (record.hev) "HEV / SOCKS" else "TUN / 其他")
             if (isSharedIpv4Target(destination)) {
                 append("；共享地址目标；可能为旧映射或运营商地址，尚未确认")
             }
@@ -127,8 +161,21 @@ internal class ConnectionLogTracker(private val capacity: Int = 4096) {
     init { require(capacity > 0) }
     private data class Seen(val ended: Boolean, val route: String, val createdAt: Long)
     private val connections = LinkedHashMap<String, Seen>()
+    private var runtime: ConnectionLogRuntime? = null
     @Volatile var sessionId: String = newSessionId()
         private set
+
+    @Synchronized
+    fun sessionStartedMessage(configJson: String, rootAttached: Boolean, hevSocksTag: String): String {
+        val context = ConnectionLogRuntime.fromConfig(configJson, rootAttached, hevSocksTag)
+        runtime = context
+        return "详细采集开始；会话：$sessionId；${context.summary}；sing-box 1.14.0；" +
+            "核心已启动，数据面就绪以启动结果为准；目标为核心记录的元数据，未提供最终拨号 IP。"
+    }
+
+    @Synchronized
+    fun sessionStoppedMessage(): String = "详细采集停止；会话：$sessionId；" +
+        (runtime?.summary?.let { "$it；" } ?: "") + "未收到结束事件的连接结果未知。"
 
     @Synchronized
     fun format(event: ConnectionLogObservation, now: Long, expectedSessionId: String = sessionId): ConnectionRouteMessage? {
@@ -137,7 +184,7 @@ internal class ConnectionLogTracker(private val capacity: Int = 4096) {
         val ended = event.closed || event.closedAt > 0
         if (!ended && event.record == null) return null
         if (previous != null && (!ended || previous.ended)) return null
-        val route = event.record?.let(ConnectionRouteLog::format)?.take(2800)
+        val route = event.record?.let { ConnectionRouteLog.format(it, runtime) }?.take(2800)
             ?: previous?.route ?: "目标及路由：核心未提供（无法补全）"
         val createdAt = event.createdAt.takeIf { it > 0 } ?: previous?.createdAt ?: 0
         // Ended IDs retain only a small tombstone; their route cannot be needed again.
@@ -170,6 +217,7 @@ internal class ConnectionLogTracker(private val capacity: Int = 4096) {
     @Synchronized
     fun clear() {
         connections.clear()
+        runtime = null
         sessionId = newSessionId()
     }
 
