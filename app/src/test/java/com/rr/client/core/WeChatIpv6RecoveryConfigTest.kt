@@ -61,7 +61,7 @@ class WeChatIpv6RecoveryConfigTest {
     )
 
     @Test
-    fun onlyReviewedPublicIpv6HostsRecoverAfterProxyPackagesBeforeOrdinaryDomains() {
+    fun onlyReviewedPublicIpv6HostsRecoverAfterProxyPoliciesBeforeDirectDomains() {
         val root = config()
         val all = rules(root)
         val recovery = recovery(root)
@@ -69,7 +69,14 @@ class WeChatIpv6RecoveryConfigTest {
         val packages = all.filter { it["outbound"]?.asString == "proxy" && it.has("rules") }
         assertTrue(packages.isNotEmpty())
         assertTrue(packages.all { all.indexOf(it) < all.indexOf(recovery.first()) })
-        assertTrue(all.indexOf(recovery.last()) < all.indexOfFirst { it.has("domain") || it.has("domain_suffix") })
+        val proxyDomains = all.filter {
+            it["outbound"]?.asString == "proxy" && (it.has("domain") || it.has("domain_suffix"))
+        }
+        assertTrue(proxyDomains.isNotEmpty())
+        assertTrue(proxyDomains.all { all.indexOf(it) < all.indexOf(recovery.first()) })
+        assertTrue(all.indexOf(recovery.last()) < all.indexOfFirst {
+            it["outbound"]?.asString == "direct" && (it.has("domain") || it.has("domain_suffix"))
+        })
         for (rule in recovery) {
             assertEquals("and", rule["mode"].asString)
             val match = parts(rule)

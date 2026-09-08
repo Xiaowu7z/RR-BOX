@@ -125,8 +125,7 @@ object ConfigBuilder {
                                 addProperty("outbound", TAG_PROXY)
                             })
                         }
-                        addWeChatIpv6RecoveryRules(this, selectedNode, proxy, routingPolicy)
-                        addDomainRoutingRules(this, routingPolicy)
+                        addDomainRoutingRules(this, selectedNode, proxy, routingPolicy)
 
                         // Minimal observed-IP exceptions must never override known
                         // international services or app-identity guards above.
@@ -211,8 +210,17 @@ object ConfigBuilder {
         })
     }
 
-    private fun addDomainRoutingRules(rules: JsonArray, routingPolicy: RoutingPolicySnapshot) {
+    private fun addDomainRoutingRules(
+        rules: JsonArray, selectedNode: ProxyNode, proxy: JsonObject, routingPolicy: RoutingPolicySnapshot
+    ) {
+        var directStarted = false
         routingPolicy.domainRules.forEach { policy ->
+            if (!directStarted && policy.destination == DomesticRoutingPolicy.Destination.DIRECT) {
+                // Preserve the existing priority of every explicit proxy domain policy.
+                // Recovery must precede the ordinary DIRECT rule that would consume it.
+                addWeChatIpv6RecoveryRules(rules, selectedNode, proxy, routingPolicy)
+                directStarted = true
+            }
             rules.add(domainCondition(policy).apply {
                 addProperty("outbound", when (policy.destination) {
                     DomesticRoutingPolicy.Destination.DIRECT -> TAG_DIRECT
