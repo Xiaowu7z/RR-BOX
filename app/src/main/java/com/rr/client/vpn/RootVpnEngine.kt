@@ -320,7 +320,9 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
 
     private fun readLine(peer: LocalSocket, deadline: Long): String {
         val result = StringBuilder()
-        while (result.length < 256) {
+        // Native ERROR responses carry a bounded phase/argv/exit diagnostic.
+        // Keep the absolute I/O deadline and an explicit size cap for every reply.
+        while (result.length < 1536) {
             setTimeout(peer, deadline)
             val value = peer.inputStream.read()
             if (value < 0) throw IOException("Root 控制通道意外关闭")

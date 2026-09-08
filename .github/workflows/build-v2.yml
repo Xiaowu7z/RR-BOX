@@ -39,13 +39,26 @@ jobs:
         run: |
           python3 scripts/source_audit.py
           bash scripts/source-regressions.sh
+          python3 scripts/verify-root-command-compat.py
           git diff --check
       - name: Verify Root helper in isolated host network
         run: |
           set -euo pipefail
           mkdir -p build-reports
+          real_ip="$(command -v ip)"
+          cat > build-reports/android-compatible-ip <<EOF
+          #!/bin/sh
+          for argument in "\$@"; do
+            if [ "\$argument" = '-N' ]; then
+              echo 'Android ip compatibility: -N is unsupported' >&2
+              exit 255
+            fi
+          done
+          exec "$real_ip" "\$@"
+          EOF
+          chmod 755 build-reports/android-compatible-ip
           gcc -std=c11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
-            "-DRRBOX_IP_PATH=\"$(command -v ip)\"" native/root_engine.c -o build-reports/root-engine-host
+            "-DRRBOX_IP_PATH=\"$PWD/build-reports/android-compatible-ip\"" native/root_engine.c -o build-reports/root-engine-host
           sudo unshare --net -- python3 scripts/verify-root-engine.py \
             --helper "$PWD/build-reports/root-engine-host" --report "$PWD/build-reports/ROOT-ENGINE-REPORT.json"
       - name: Set up JDK 17

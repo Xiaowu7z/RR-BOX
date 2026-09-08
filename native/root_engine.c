@@ -80,6 +80,25 @@ struct engine {
 static struct engine current = { .socket_fd = -1, .tun_fd = -1, .lock_fd = -1, .guardian_pipe = -1 };
 static volatile sig_atomic_t interrupted;
 static const char *configuration_error = "invalid_config";
+static const char *failure_stage = "startup";
+static char command_failure[1024];
+
+/* Only fixed ip argv and bounded command output; never node credentials/config.
+ * Keep this on the control response so diagnostics cannot race a su pipe drain. */
+static void describe_command_failure(const char *const *argv, int result, const char *output)
+{
+    size_t used = (size_t)snprintf(command_failure, sizeof(command_failure), "ip_exit=%d argv=", result);
+    for (size_t i = 1; argv[i] && used < sizeof(command_failure) - 1; ++i) {
+        int count = snprintf(command_failure + used, sizeof(command_failure) - used, "%s%s", i == 1 ? "" : " ", argv[i]);
+        if (count < 0) break;
+        size_t space = sizeof(command_failure) - used - 1;
+        used += (size_t)count < space ? (size_t)count : space;
+    }
+    if (used < sizeof(command_failure) - 1)
+        snprintf(command_failure + used, sizeof(command_failure) - used, " output=%s", output);
+    for (char *p = command_failure; *p; ++p)
+        if ((unsigned char)*p < 32 || (unsigned char)*p > 126) *p = ' ';
+}
 
 static void handle_signal(int number) { (void)number; interrupted = 1; }
 
@@ -175,6 +194,7 @@ static void guardian_pulse(void)
  * our own child. A killed supervisor cannot leave a still-running ip command. */
 static int run_ip(bool cleanup, char *output, size_t capacity, ...)
 {
+    if (!cleanup) command_failure[0] = '\0';
     if ((!cleanup && !session_alive()) ||
         (cleanup && current.cleanup_deadline_ms > 0 && boot_ms() >= current.cleanup_deadline_ms)) return -1;
     const char *arguments[24] = { RRBOX_IP_PATH };
@@ -190,10 +210,16 @@ static int run_ip(bool cleanup, char *output, size_t capacity, ...)
     arguments[argc] = NULL;
     if (capacity > 0) output[0] = '\0';
     int pipes[2];
-    if (pipe2(pipes, O_CLOEXEC) != 0) return -1;
+    if (pipe2(pipes, O_CLOEXEC) != 0) {
+        if (!cleanup) describe_command_failure(arguments, -1, strerror(errno));
+        return -1;
+    }
     pid_t parent = getpid();
     pid_t child = fork();
-    if (child < 0) { close(pipes[0]); close(pipes[1]); return -1; }
+    if (child < 0) {
+        if (!cleanup) describe_command_failure(arguments, -1, strerror(errno));
+        close(pipes[0]); close(pipes[1]); return -1;
+    }
     if (child == 0) {
         if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent) _exit(126);
         signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGHUP, SIG_DFL);
@@ -201,11 +227,13 @@ static int run_ip(bool cleanup, char *output, size_t capacity, ...)
         if (dup2(pipes[1], STDOUT_FILENO) < 0 || dup2(pipes[1], STDERR_FILENO) < 0) _exit(126);
         close(pipes[1]);
         execv(RRBOX_IP_PATH, (char *const *)arguments);
+        dprintf(STDERR_FILENO, "exec failed: %s", strerror(errno));
         _exit(127);
     }
     close(pipes[1]);
     int flags = fcntl(pipes[0], F_GETFL);
     if (flags < 0 || fcntl(pipes[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+        if (!cleanup) describe_command_failure(arguments, -1, strerror(errno));
         kill(child, SIGKILL); (void)waitpid(child, NULL, 0); close(pipes[0]); return -1;
     }
     int64_t end = boot_ms() + COMMAND_TIMEOUT_MS;
@@ -213,10 +241,17 @@ static int run_ip(bool cleanup, char *output, size_t capacity, ...)
     bool failed = false, exited = false;
     int status = 0;
     size_t total = 0, observed = 0;
+    char diagnostic[384] = "";
+    size_t diagnostic_size = 0;
     for (;;) {
         char data[2048];
         ssize_t count;
         while ((count = read(pipes[0], data, sizeof(data))) > 0) {
+            size_t capture = (size_t)count < sizeof(diagnostic) - diagnostic_size - 1
+                ? (size_t)count : sizeof(diagnostic) - diagnostic_size - 1;
+            memcpy(diagnostic + diagnostic_size, data, capture);
+            diagnostic_size += capture;
+            diagnostic[diagnostic_size] = '\0';
             observed += (size_t)count;
             if (observed > COMMAND_OUTPUT || boot_ms() >= end) { failed = true; break; }
             if (capacity > 0) {
@@ -248,7 +283,10 @@ static int run_ip(bool cleanup, char *output, size_t capacity, ...)
     /* Initial activation is one authenticated command with an absolute boot
      * deadline. Renew the guardian only when a bounded ip operation completes. */
     if (!failed && !cleanup && current.activating && session_alive()) guardian_pulse();
-    return failed || !WIFEXITED(status) ? -1 : WEXITSTATUS(status);
+    int result = failed || !WIFEXITED(status) ? -1 : WEXITSTATUS(status);
+    if (!cleanup && result != 0)
+        describe_command_failure(arguments, result, *diagnostic ? diagnostic : "no output (timeout/session closed if exit=-1)");
+    return result;
 }
 
 static bool send_text(const char *text)
@@ -509,40 +547,41 @@ static bool priority_free(const char *rules)
     return true;
 }
 
-static bool table_in_rules(const char *rules, const char *table)
-{
-    const char *where = rules;
-    while ((where = strstr(where, "lookup ")) != NULL) {
-        where += 7;
-        size_t length = strlen(table);
-        if (strncmp(where, table, length) == 0 && (where[length] == '\0' || isspace((unsigned char)where[length]))) return true;
-    }
-    return false;
-}
-
 static bool reserve_table(void)
 {
+    failure_stage = "allocate_rule_snapshot";
     char *rules4 = malloc(COMMAND_OUTPUT), *rules6 = malloc(COMMAND_OUTPUT), *routes = malloc(COMMAND_OUTPUT);
     bool result = false;
     if (!rules4 || !rules6 || !routes) goto done;
-    if (run_ip(false, rules4, COMMAND_OUTPUT, "-N", "-4", "rule", "show", NULL) != 0 ||
-        run_ip(false, rules6, COMMAND_OUTPUT, "-N", "-6", "rule", "show", NULL) != 0 ||
-        !priority_free(rules4) || !priority_free(rules6)) goto done;
+    failure_stage = "read_ipv4_rules";
+    if (run_ip(false, rules4, COMMAND_OUTPUT, "-4", "rule", "show", NULL) != 0) goto done;
+    failure_stage = "read_ipv6_rules";
+    if (run_ip(false, rules6, COMMAND_OUTPUT, "-6", "rule", "show", NULL) != 0) goto done;
+    failure_stage = "priority_9000_in_use";
+    if (!priority_free(rules4) || !priority_free(rules6)) goto done;
     unsigned hash = 0;
     for (const char *p = current.socket_name; *p; ++p) hash = hash * 33 + (unsigned char)*p;
     for (unsigned attempt = 0; attempt < 32; ++attempt) {
         snprintf(current.table, sizeof(current.table), "%u", 42000 + (hash + attempt) % 1000);
-        if (table_in_rules(rules4, current.table) || table_in_rules(rules6, current.table)) continue;
         bool free_table = true;
         for (int family = 4; family <= 6; family += 2) {
+            /* Android's iproute2-ss171113 has no -N option. Filtering by numeric
+             * table uses the kernel table ID even when output prints an alias. */
+            failure_stage = family == 4 ? "check_ipv4_table_rules" : "check_ipv6_table_rules";
+            if (run_ip(false, routes, COMMAND_OUTPUT, family == 4 ? "-4" : "-6",
+                       "rule", "show", "table", current.table, NULL) != 0) goto done;
+            if (*routes) { free_table = false; break; }
+            failure_stage = family == 4 ? "check_ipv4_table_routes" : "check_ipv6_table_routes";
             int status = run_ip(false, routes, COMMAND_OUTPUT, family == 4 ? "-4" : "-6",
                                 "route", "show", "table", current.table, NULL);
             if (status == 0 && *routes == '\0') continue;
-            if (status > 0 && strstr(routes, "FIB table does not exist") != NULL) continue;
+            if (status > 0 && strstr(routes, "FIB table does not exist") != NULL) { command_failure[0] = '\0'; continue; }
+            if (status != 0) goto done;
             free_table = false;
             break;
         }
         if (free_table) { result = true; break; }
+        failure_stage = "no_free_route_table";
     }
 done:
     free(rules4); free(rules6); free(routes);
@@ -588,7 +627,8 @@ static bool verify_rules(int family, bool expect_present)
     char *rules = malloc(COMMAND_OUTPUT);
     if (!rules) return false;
     bool answer = false;
-    if (run_ip(!expect_present, rules, COMMAND_OUTPUT, "-N", family == 4 ? "-4" : "-6", "rule", "show", NULL) != 0) goto done;
+    if (run_ip(!expect_present, rules, COMMAND_OUTPUT, family == 4 ? "-4" : "-6",
+               "rule", "show", "table", current.table, NULL) != 0) goto done;
     size_t found = 0, expected = 0;
     bool seen[MAX_RANGES] = { false };
     for (size_t i = 0; i < current.range_count; ++i)
@@ -597,7 +637,7 @@ static bool verify_rules(int family, bool expect_present)
     for (char *line = strtok_r(rules, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         char *end;
         unsigned long priority = strtoul(line, &end, 10);
-        if (end == line || *end != ':' || priority != 9000 || !table_in_rules(line, current.table)) continue;
+        if (end == line || *end != ':' || priority != 9000) continue;
         if (!expect_present) goto done;
         char *uid_field = strstr(line, "uidrange ");
         if (strstr(line, "iif lo") == NULL || uid_field == NULL) goto done;
@@ -636,7 +676,11 @@ static bool start_guardian(void);
 
 static bool activate(void)
 {
-    if (!current.configured || current.active || !session_alive() || !reserve_table()) return false;
+    failure_stage = "activation_precondition";
+    command_failure[0] = '\0';
+    if (!current.configured || current.active || !session_alive()) return false;
+    if (!reserve_table()) return false;
+    failure_stage = "plan_routes";
     static const char *const throws4[] = { "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",
         "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4" };
     static const char *const throws6[] = { "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8" };
@@ -677,24 +721,33 @@ static bool activate(void)
         current.ranges[i].added4 = current.ranges[i].family != 6;
         current.ranges[i].added6 = current.ranges[i].family != 4;
     }
+    failure_stage = "start_cleanup_guardian";
     if (!start_guardian()) return false;
     for (size_t i = 0; i < current.route_count; ++i) {
         /* Journal intent in memory before invoking ip: timeout can race a
          * successful kernel operation, so rollback must include that attempt. */
         current.routes[i].added = true;
+        failure_stage = current.routes[i].family == 4 ? "install_ipv4_route" : "install_ipv6_route";
         if (change_route(&current.routes[i], false) != 0) return false;
     }
     for (size_t i = 0; i < current.range_count; ++i) {
         if (current.ranges[i].family != 6) {
             current.ranges[i].added4 = true;
+            failure_stage = "install_ipv4_uid_rule";
             if (change_rule(&current.ranges[i], 4, false) != 0) return false;
         }
         if (current.ranges[i].family != 4) {
             current.ranges[i].added6 = true;
+            failure_stage = "install_ipv6_uid_rule";
             if (change_rule(&current.ranges[i], 6, false) != 0) return false;
         }
     }
-    if (!verify_rules(4, true) || !verify_rules(6, true) || !session_alive()) return false;
+    failure_stage = "verify_ipv4_uid_rules";
+    if (!verify_rules(4, true)) return false;
+    failure_stage = "verify_ipv6_uid_rules";
+    if (!verify_rules(6, true)) return false;
+    failure_stage = "activation_session_closed";
+    if (!session_alive()) return false;
     current.active = true;
     current.activating = false;
     current.lease_ms = boot_ms() + LEASE_MS;
@@ -882,8 +935,15 @@ int main(int argc, char **argv)
         } else { error = "invalid_command"; break; }
     }
 done:
-    if (error && current.socket_fd >= 0) {
-        char message[96]; snprintf(message, sizeof(message), "ERROR %s\n", error); (void)send_text(message);
+    if (error) {
+        char message[1280];
+        snprintf(message, sizeof(message), "ERROR %s stage=%s%s%s\n", error, failure_stage,
+                 *command_failure ? " " : "", command_failure);
+        if (current.socket_fd >= 0) (void)send_text(message);
+        int flags = fcntl(STDERR_FILENO, F_GETFL);
+        if (flags >= 0) (void)fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK);
+        ssize_t ignored = write(STDERR_FILENO, message, strlen(message));
+        (void)ignored;
     }
     bool removed = current.cleaned ? current.cleanup_ok : cleanup();
     if (current.socket_fd >= 0) close(current.socket_fd);
