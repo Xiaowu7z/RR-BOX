@@ -4,7 +4,7 @@
 
 # RRBOX
 
-**Android 原生代理客户端 · System / HEV 双引擎 · 大陆分流 · 移动网络连续性**
+**Android 原生代理客户端 · System / HEV · 可选 Root 模式 · 智能分流与规则更新**
 
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](#安装)
 [![ABI](https://img.shields.io/badge/ABI-arm64--v8a-00E5FF)](#安装)
@@ -19,7 +19,18 @@
 
 RRBOX 为用户自己的节点和订阅提供 Android VPN / 代理连接，不提供线路、账户或服务器。以 **数据面正确性、移动网络稳定性、可测量性能** 为优先级，不替用户自动挑选地区或擅自切换业务节点。
 
-当前正式版本 **1.0.0（100）**，仅发布 **arm64-v8a**，最低 Android 8.0。不需要 Root。默认使用 System TUN，HEV native 数据面为可选项；图标、分流拓扑和两个核心的固定源码版本保持不变。
+当前正式版本 **1.0.1（101）**，仅发布 **arm64-v8a**，最低 Android 8.0。默认使用 System TUN，不需要 Root；HEV native 数据面与需要授权的 Root 高级模式均为可选项。
+
+## 1.0.1 正式版
+
+本版整合此前 1.0.0 修复构建中的 Root 完整接管与 TCP 回程修复、分流规则在线更新、X 旧目的地址恢复及微信 IPv6 直连恢复，同时保留石墨蓝界面、日志导出、节点分享和分组改名。
+
+- **Root 接管与恢复**：按 UID 接管 IPv4 / IPv6，保留应用分流、自身出口防循环和断开清理；修复 System stack 内部 TCP 回包路径，并将物理路由变化纳入切网判断。
+- **分流规则在线更新**：通过“立即更新分流规则”获取签名的中国域名 / IP 和自定义策略；校验后应用，启动失败时恢复旧配置。普通规则数据可独立更新，新的客户端功能仍需升级 APK。
+- **X 地址恢复**：对已识别且规则允许的精确 X 服务域名重新解析，减少快捷开关重连后应用沿用旧公网地址造成的断网；保留原端口和现有分流优先级。
+- **微信网络兼容**：Android 13 及以上的 Root 模式，在物理网络快照明确具有 IPv4 地址及默认路由、缺少公网 IPv6 地址或默认路由时，为符合条件的微信 TCP 连接重新解析并回退。正常双栈、纯 IPv6、状态未知及 System / HEV 模式不启用这项恢复；微信 UDP 不改写。
+
+微信兼容判断依据本机地址与路由快照，不是外网 IPv6 连通性探测。自动化验证覆盖核心收发及恢复边界，不等同于所有手机、Wi-Fi 和微信业务均已实测通过。
 
 ## 核心能力
 
@@ -27,12 +38,12 @@ RRBOX 为用户自己的节点和订阅提供 Android VPN / 代理连接，不�
 |---|---|
 | System / HEV 双引擎 | 默认 System TUN；HEV 通过 native/lwIP → 本地 SOCKS5 → sing-box 转发，可切回 System |
 | 移动网络连续性 | 监听 Android 物理网络事件；健康 VPN 不因普通切网反复重启；本地数据面停止时尝试恢复 |
-| 大陆与应用分流 | 内置中国域名 / IP SRS；全部代理、仅选中应用代理、选中应用绕过 |
+| 大陆与应用分流 | 内置中国域名 / IP SRS；全部代理、仅选中应用代理、选中应用绕过；在线更新签名分流规则 |
 | 节点与订阅 | 剪贴板、扫码、二维码图片、文本、JSON / YAML；单节点和订阅地址的链接、二维码及文件分享 |
 | 本地管理 | 节点与订阅分组重命名、节点编辑、ICMP Ping、本地节点删除、订阅节点覆盖与恢复 |
 | Quick Settings | 快捷开关；启动前核对当前节点和配置，避免误用旧缓存；不枚举已安装应用 |
 | Network Lab | 网络诊断、A/B、Raw 校验；日志保留数量可配置或不限，本地保存、全历史搜索和 TXT 导出 |
-| Root 高级模式（测试分支） | 原生 TUN 接入稳定内核，按 UID 接管 IPv4 / IPv6，保留应用分流；[测试与回滚说明](docs/ROOT-LAB.md) |
+| Root 高级模式（可选） | 原生 TUN 接入稳定内核，按 UID 接管 IPv4 / IPv6，保留应用分流；[兼容性验证与回滚说明](docs/ROOT-LAB.md) |
 | 交付与隐私 | 固定核心源码构建、Release 单元测试与 Lint、签名 / SHA-256 报告、可选 PIN 锁、日志自动脱敏 |
 
 ## 双引擎与历史实测
@@ -56,11 +67,13 @@ HEV:    Android TUN → HEV native/lwIP → loopback SOCKS5 → sing-box outboun
 
 ## 安装
 
-打开 [最新正式 Release](https://github.com/Xiaowu7z/RR-BOX/releases/latest)，选择 `RRBOX-1.0.0-arm64-v8a.apk`。首次连接授权系统 VPN；通知、相机和后台电池优化权限按对应功能需要设置。
+打开 [最新正式 Release](https://github.com/Xiaowu7z/RR-BOX/releases/latest)，选择 `RRBOX-1.0.1-arm64-v8a.apk`。使用默认 System 或 HEV 模式时，首次连接授权系统 VPN；选择 Root 模式时需另行授予 Root 权限。通知、相机和后台电池优化权限按对应功能需要设置。
 
 <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.rr.client%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FXiaowu7z%2FRR-BOX%22%2C%22author%22%3A%22Xiaowu7z%22%2C%22name%22%3A%22RRBOX%22%2C%22preferredApkIndex%22%3A0%2C%22additionalSettings%22%3A%22%7B%5C%22includePrereleases%5C%22%3Afalse%2C%5C%22fallbackToOlderReleases%5C%22%3Atrue%2C%5C%22apkFilterRegEx%5C%22%3A%5C%22RRBOX-%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B-arm64-v8a%5C%5C%5C%5C.apk%24%5C%22%2C%5C%22autoApkFilterByArch%5C%22%3Atrue%7D%22%2C%22overrideSource%22%3A%22GitHub%22%2C%22allowIdChange%22%3Afalse%7D"><img alt="Add to Obtainium" src="https://img.shields.io/badge/Add_to_Obtainium-6750A3?style=for-the-badge"></a>
 
-**本次继续使用 1.0.0 / 100，但 APK 内容已更新。** 已安装 1.0.0 的用户应重新下载覆盖安装，不要先卸载，否则会丢失本地配置。App 内更新按版本号比较，Obtainium 也可能不提示同版本替换；不能把“已是最新版”当作本次修复包已经安装的证明。通过 Release 的 `BUILD-REPORT.md`、源码提交和 `SHA256SUMS.txt` 区分构建。
+**从 1.0.0 升级到 1.0.1，请直接覆盖安装，无需卸载。** 包名与正式签名保持一致，覆盖安装保留本地节点、订阅和设置。版本号由 1.0.0 / 100 提升为 1.0.1 / 101，App 内“检查更新”可识别这次升级，Obtainium 也可跟踪正式 Release。安装后重新连接 RRBOX；“立即更新分流规则”只更新规则数据，不能替代本次 APK 升级。
+
+Release 同时提供 `BUILD-REPORT.md`、源码提交和 `SHA256SUMS.txt`，用于核对安装包来源与具体构建。
 
 ## 导入和重命名
 
