@@ -57,7 +57,18 @@ class TikTokAppPolicyConfigTest {
     fun hevRetainsRulesButDoesNotInventOriginalAppIdentity() {
         val stable = config()
         val hev = JsonParser.parseString(HevConfigAdapter.adapt(stable.toString()).configJson).asJsonObject
-        assertEquals(stable.get("route"), hev.get("route"))
+        val businessRoute = hev.getAsJsonObject("route").deepCopy()
+        val resolver = businessRoute.getAsJsonArray("rules").remove(0).asJsonObject
+        assertEquals(JsonParser.parseString("""{
+            "inbound": ["hev-socks-in"],
+            "ip_cidr": ["198.18.0.2/32"],
+            "port": 53,
+            "network": ["tcp", "udp"],
+            "action": "hijack-dns"
+        }"""), resolver)
+        assertEquals(stable.get("route"), businessRoute)
+        assertEquals(stable.get("dns"), hev.get("dns"))
+        assertEquals(stable.get("outbounds"), hev.get("outbounds"))
         assertTrue(rules(hev).any { it.has("domain_suffix") })
         val inbound = hev.getAsJsonArray("inbounds")[0].asJsonObject
         assertEquals("hev-socks-in", inbound.get("tag").asString)
