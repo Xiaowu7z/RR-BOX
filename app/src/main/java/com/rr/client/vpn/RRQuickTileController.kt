@@ -56,7 +56,7 @@ object RRQuickTileController {
 
             val targetNode = selectableNodes.firstOrNull { it.id == storedId } ?: selectableNodes.first()
             val ruleSets = if (smartRouting) {
-                ChinaRuleSetManager.ensureBundled(context).getOrNull()
+                ChinaRuleSetManager.ensureBundled(context).getOrThrow()
             } else {
                 null
             }
@@ -69,7 +69,8 @@ object RRQuickTileController {
                 perAppMode = perAppMode,
                 selectedPackages = selectedPackages,
                 fastForwarding = fastForwarding,
-                ruleSets = ruleSets
+                ruleSets = ruleSets,
+                routingPolicy = ruleSets?.policy ?: com.rr.client.routing.RoutingPolicySnapshot.bundled()
             )
             // Validate against CURRENT persisted nodes/settings before using a cached runtime.
             // ConfigBuilder does not need installed-app enumeration for per-app include/exclude.

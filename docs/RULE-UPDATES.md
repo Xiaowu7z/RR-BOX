@@ -1,0 +1,51 @@
+# RRBOX 可独立更新的分流规则
+
+支持本协议的 APK 通过设置页“立即更新分流规则”获取仓库维护的规则。第一次接入仍需升级 APK，之后修改已有域名、后缀、精确 IP 例外和应用包名数据无需用户重装 APK。核心、转发引擎、新规则格式或 UI 的变化仍需升级应用。
+
+## 维护入口与版本
+
+唯一策略源为 `app/src/main/assets/rules/rrbox-policy.json`。该文件作为离线内置规则，同时参与 ConfigBuilder 的路由和 DNS 配置生成。不要另写一份与 APK 不同的在线策略。
+
+1. 修改规则数据并递增 `ruleVersion`。相同版本必须保持完全相同的文件字节；说明、空白等变化也需要递增版本。
+2. 更新相关回归案例，覆盖需要修正的目的地和不能受影响的邻近域名。包名仅限精确匹配；不要为某一应用放宽整个共享云域名或整个 IP 网段。
+3. 推送受支持的源分支。现有 CI 会完成全部 JVM、Lint、真实核心分流、Root TCP/UDP 和 HEV 验证，并验证原 APK 签名。
+4. 所有门禁通过后，同一工作流将实际测试的策略 JSON、两个中国 SRS 文件和签名清单发布为独立规则版本。用户点击按钮即可取得。
+
+源分支 `main` 和 `feat/domestic-routing-wechat-douyin` 可以发布当前规则频道。其他构建分支不会移动频道。此功能不发布、合并或更新正式版 APK；规则 Release 始终为 prerelease，`make_latest=false`。
+
+`bundleVersion = GITHUB_RUN_ID * 100 + GITHUB_RUN_ATTEMPT`。它是每次完整规则包的递增标识，区别于策略自身的 `ruleVersion`。中国规则更新、策略字节不变时，允许只增加 bundleVersion。构建重跑获得新 bundleVersion，已有 Release 不被覆写。回滚分类数据时，将审核过的旧内容发布为一个更高 ruleVersion，客户端不接受版本下降。
+
+## 发布物与信任
+
+`rules-channel` 是独立数据分支，包含频道指针与签名规则包的镜像，不在 APK 构建触发分支列表内：
+
+```json
+{"schemaVersion":1,"bundleVersion":3419782534801}
+```
+
+客户端从 `https://raw.githubusercontent.com/Xiaowu7z/RR-BOX/rules-channel/channel.json` 获取频道，备用为该分支的 jsDelivr 镜像。频道只允许版本数字，不能指定任意 URL。客户端据此构造固定仓库 Release 路径 `rules-v1-<bundleVersion>`，以及数据分支 `bundles/<bundleVersion>/<filename>` 的 raw GitHub 和 jsDelivr 路径。各来源必须通过相同签名和摘要校验；镜像不是新的信任来源。
+
+每个 Release 有且仅需四个文件：
+
+- `rrbox-policy.json`
+- `geosite-geolocation-cn.srs`
+- `geoip-cn.srs`
+- `bundle-manifest.json`
+
+清单 envelope 有 `schemaVersion`、`payload`、`signature`、`certificate` 四个字段；后三者使用规范 Base64。payload 为原始 UTF-8 JSON 字节，包含固定的文件名、长度、SHA-256、规则包和策略版本、发布时间、来源提交、最低应用版本、策略格式版本及固定核心版本 `1.14.0`。签名算法为 `SHA256withRSA`。
+
+签名继续使用现有 APK 的原始 RSA 4096 位证书；证书 SHA-256 固定为 `fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16e8cf66e180d816`。工作流通过现有 `RR_KEYSTORE_*` secrets 读取密钥，Java helper 在 keystore 内使用私钥完成签名，不导出私钥。客户端先验证固定证书和原始 payload 签名，再解释清单。HTTPS 或本地哈希不能替代该签名。
+
+发布脚本先验证已有频道签名及版本关系，然后创建草稿 Release，上传全部文件并核对 GitHub 返回的长度和摘要。全部就绪后公开规则 Release，将完全相同的四个文件写入数据分支的版本目录，并把频道指针与该目录一起原子提交，最后以非强制 git 更新移动频道。上传损坏、构建失败或并发旧构建都不会覆盖当前频道。若发布中断留下草稿，用重跑生成新版本，不要修改已公开版本。
+
+数据分支保留旧版本目录，避免缓存旧频道的客户端找不到对应文件；Git 历史也会随规则发布增长。不要单独改写已经发布的目录。raw 与 jsDelivr 回退使 Root 排除 RRBOX 自身 UID 时，更新仍有直连可用来源；若所有来源都不可达，客户端保留旧规则并报告更新失败。
+
+## 客户端边界
+
+客户端只接受数据字段，不接受远程脚本、出站节点、Root 命令或完整核心配置。策略 JSON 上限 1 MiB，SRS 各 8 MiB，签名清单 128 KiB；格式、兼容性、签名、完整性和核心规则解析都须通过。
+
+DNS 与路由必须从同一代规则快照生成。下载或验证失败时保留当前版本；运行时更新采用候选启动确认和旧版恢复，启动失败不能把失败候选记为生效。用户停止连接或切换节点后，迟到的候选不能重新启动之前的连接。内置规则仍是离线启动的最后保底。
+
+System 和 Root 可以在取得应用身份时按包名匹配。HEV 无原始应用身份时继续使用同一规则包的域名/IP 部分；更新规则不会凭空补出 UID。正确选路也不能证明每个服务登录或响应成功，应结合连接错误、收发记录与手机实际操作排查。
+
+远程规则更新是手动动作。加载新规则可能产生一次短暂重连，不承诺已有长连接完全无感。签名和回退可防损坏或不兼容更新，但不能证明分类策略本身绝对正确，因此仍需回归案例和设备测试。

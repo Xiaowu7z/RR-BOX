@@ -40,6 +40,7 @@ jobs:
           python3 scripts/source_audit.py
           bash scripts/source-regressions.sh
           python3 scripts/verify-root-command-compat.py
+          python3 scripts/test-rule-publishing.py
           git diff --check
       - name: Verify Root helper in isolated host network
         run: |
@@ -149,6 +150,14 @@ jobs:
           python3 scripts/verify-hev-native-dns.py --hev-library hev-socks5-tunnel/bin/libhev-socks5-tunnel.so --fixtures app/build/hev-dns-fixtures --report build-reports/HEV-NATIVE-DNS-REPORT.json
       - name: Verify APK, signer continuity and test reports
         run: bash scripts/ci-verify-apk.sh
+      - name: Publish signed rules and advance manual update channel
+        if: "${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/domestic-routing-wechat-douyin' }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RR_KEYSTORE_PASS: ${{ secrets.RR_KEYSTORE_PASSWORD }}
+          RR_KEY_ALIAS: ${{ secrets.RR_KEY_ALIAS }}
+          RR_KEY_PASS: ${{ secrets.RR_KEY_PASSWORD }}
+        run: python3 scripts/publish-rule-bundle.py
       - name: Upload signed build
         uses: actions/upload-artifact@v4
         with:

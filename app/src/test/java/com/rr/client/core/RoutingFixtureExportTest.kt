@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.ChinaRuleSetManager
+import com.rr.client.routing.RoutingPolicySnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.File
@@ -18,6 +19,10 @@ class RoutingFixtureExportTest {
         val appDirectory = if (File("src/main/AndroidManifest.xml").isFile) File(".") else File("app")
         val output = File(appDirectory, "build/routing-fixtures").apply { mkdirs() }
         val assets = File(appDirectory, "src/main/assets/rules").absoluteFile
+        // The maintained JSON is canonical. Never let native checks silently exercise
+        // the older compiled emergency baseline after a data-only policy update.
+        val policyBytes = File(assets, "rrbox-policy.json").readBytes()
+        val policy = RoutingPolicySnapshot.parse(policyBytes)
         val node = ProxyNode(
             id = "routing-validation",
             tag = "Local verification fixture",
@@ -37,7 +42,8 @@ class RoutingFixtureExportTest {
                 allNodes = listOf(node),
                 appRoutes = emptyList(),
                 smartRouting = rulesMode != "off",
-                ruleSets = paths
+                ruleSets = paths,
+                routingPolicy = policy
             )
             for (engine in listOf("system", "hev")) {
                 val filename = "$engine-$rulesMode.json"
@@ -57,6 +63,9 @@ class RoutingFixtureExportTest {
             JsonObject().apply {
                 addProperty("schema", 1)
                 addProperty("producer", "ConfigBuilder + HevConfigAdapter")
+                addProperty("policy_rule_version", policy.ruleVersion)
+                addProperty("policy_sha256", java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(policyBytes).joinToString("") { "%02x".format(it.toInt() and 0xff) })
                 add("variants", variants)
             }
         ))

@@ -36,7 +36,8 @@ captures/
 # Generated native dependencies, rule snapshots and verification reports
 app/libs/
 app/src/main/jniLibs/
-app/src/main/assets/rules/
+app/src/main/assets/rules/*
+!app/src/main/assets/rules/rrbox-policy.json
 app/src/main/assets/licenses/sing-box-LICENSE.txt
 sing-box-src/
 hev-socks5-tunnel/

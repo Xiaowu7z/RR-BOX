@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 rules_dir="app/src/main/assets/rules"
-rm -rf "$rules_dir"
 mkdir -p "$rules_dir" build-reports
+# The JSON is maintained source; replace only downloaded binary dependencies.
+test -s "$rules_dir/rrbox-policy.json"
+rm -f "$rules_dir/geosite-geolocation-cn.srs" "$rules_dir/geoip-cn.srs" "$rules_dir"/*.tmp
 fetch_rule() {
   local output="$1"; shift
   local tmp="${output}.tmp"

@@ -82,6 +82,10 @@ fun SettingsScreen(
     onChangePin: () -> Unit,
     onPinMaxFailedAttemptsChanged: (Int) -> Unit,
     onCheckAppUpdate: () -> Unit,
+    ruleVersion: Long = 0L,
+    ruleBundleVersion: Long = 0L,
+    ruleDescription: String = "",
+    ruleUpdateMessage: String = "",
     onVpnPermissionPendingChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -205,13 +209,21 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
             Text(
                 text = if (ruleSetLastUpdated > 0L) {
-                    "本地规则更新时间：${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(ruleSetLastUpdated))}"
+                    "上次保存时间：${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(ruleSetLastUpdated))}"
                 } else {
                     "使用 APK 内置规则快照；可手动更新。"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
+            Text(
+                text = "自定义规则：$ruleVersion" + if (ruleBundleVersion > 0L) " · 规则包：$ruleBundleVersion" else " · 内置快照",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
+            if (ruleDescription.isNotBlank()) Text(ruleDescription, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            if (ruleUpdateMessage.isNotBlank()) Text(ruleUpdateMessage, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            Text("同时更新中国基础规则与 RRBOX 自定义规则；更新失败继续使用原有规则。", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = onUpdateRuleSets,
@@ -219,7 +231,7 @@ fun SettingsScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary)
             ) {
                 Text(
-                    if (ruleSetUpdating) "正在更新…" else "立即更新中国规则",
+                    if (ruleSetUpdating) "正在更新…" else "立即更新分流规则",
                     color = DarkBackground,
                     fontWeight = FontWeight.Bold
                 )

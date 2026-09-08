@@ -11,6 +11,7 @@ import android.util.Log
 import com.rr.client.RRApplication
 import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.core.HevConfigAdapter
+import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.storage.TrafficHistoryEntity
@@ -19,6 +20,7 @@ import com.rr.client.traffic.TrafficSpeed
 import io.nekohasekai.libbox.Libbox
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -57,6 +59,15 @@ class RRVpnService : VpnService() {
     private var activeNodeId = ""
     private var activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
     @Volatile private var requestedEngine = PreferencesManager.TUN_ENGINE_SYSTEM
+
+    private data class PreparedRuleActivation(
+        val candidateGeneration: String,
+        val baseGeneration: String,
+        val operation: Long,
+        val previousConfig: String,
+        val engine: String,
+        val nodeId: String
+    )
 
     private var startElapsedRealtime = 0L
     private var lastCalculationTime = 0L
@@ -106,6 +117,9 @@ class RRVpnService : VpnService() {
 
         const val EXTRA_RECOVERY_REQUEST = "EXTRA_RECOVERY_REQUEST"
         const val EXTRA_ROUTING_UPDATE_GENERATION = "EXTRA_ROUTING_UPDATE_GENERATION"
+        const val EXTRA_RULE_UPDATE_CANDIDATE_GENERATION = "EXTRA_RULE_UPDATE_CANDIDATE_GENERATION"
+        const val EXTRA_RULE_UPDATE_BASE_GENERATION = "EXTRA_RULE_UPDATE_BASE_GENERATION"
+        const val EXTRA_RULE_UPDATE_OPERATION = "EXTRA_RULE_UPDATE_OPERATION"
         const val EXTRA_CONFIG_JSON = "EXTRA_CONFIG_JSON"
         const val EXTRA_NODE_TAG = "EXTRA_NODE_TAG"
         const val EXTRA_NODE_ID = "EXTRA_NODE_ID"
@@ -294,6 +308,10 @@ class RRVpnService : VpnService() {
             }
 
             RRNotificationManager.ACTION_RESTART_VPN -> {
+                if (intent.hasExtra(EXTRA_RULE_UPDATE_CANDIDATE_GENERATION)) {
+                    activatePreparedRules(intent)
+                    return START_NOT_STICKY
+                }
                 if (intent.hasExtra(EXTRA_ROUTING_UPDATE_GENERATION) &&
                     !RoutingUpdatePolicy.mayApply(
                         VpnConnectionIntentStore.isDesiredRunning(this),
@@ -400,6 +418,38 @@ class RRVpnService : VpnService() {
     private fun advanceRuntimeGeneration(): Long =
         runtimeGenerationSequence.incrementAndGet().also { requestGeneration = it }
 
+    private fun activatePreparedRules(intent: Intent) {
+        val candidate = intent.getStringExtra(EXTRA_RULE_UPDATE_CANDIDATE_GENERATION).orEmpty()
+        val base = intent.getStringExtra(EXTRA_RULE_UPDATE_BASE_GENERATION).orEmpty()
+        val operation = intent.getLongExtra(EXTRA_RULE_UPDATE_OPERATION, -1L)
+        val config = intent.getStringExtra(EXTRA_CONFIG_JSON)
+        val previous = activeConfigJson
+        val current = RoutingUpdatePolicy.mayApply(
+            VpnConnectionIntentStore.isDesiredRunning(this),
+            intent.getStringExtra(EXTRA_NODE_ID), activeNodeId,
+            intent.getLongExtra(EXTRA_ROUTING_UPDATE_GENERATION, -1L), requestGeneration
+        )
+        if (!current || stopping || !_isRunning.value || _isStarting.value ||
+            operation <= 0L || candidate.isBlank() || base.isBlank() || config.isNullOrBlank() || previous.isNullOrBlank() ||
+            !ChinaRuleSetManager.matchesPreparedConfig(this, candidate, config)
+        ) {
+            ChinaRuleSetManager.noteActivationFailure(this, candidate, "连接状态已变化，请重新更新分流规则", operation)
+            Log.i(TAG, "Discarding prepared rules for an ended, starting or replaced runtime")
+            if (!_isRunning.value && !_isStarting.value) {
+                ensureForeground("RRBOX · 已取消分流更新")
+                stopVpn(persistTraffic = false)
+            }
+            return
+        }
+        // Keep node, engine, canonical config and recovery cache tied to the live session.
+        ensureForeground("$activeNodeTag · 正在应用分流规则")
+        launchCore(
+            stableConfigJson = config,
+            restarting = true,
+            ruleActivation = PreparedRuleActivation(candidate, base, operation, previous, activeEngine, activeNodeId)
+        )
+    }
+
     private fun ensureForeground(title: String) {
         startForeground(
             RRNotificationManager.NOTIFICATION_ID,
@@ -410,7 +460,8 @@ class RRVpnService : VpnService() {
     private fun launchCore(
         stableConfigJson: String,
         restarting: Boolean,
-        hevBenchmarkSelfTraffic: Boolean = false
+        hevBenchmarkSelfTraffic: Boolean = false,
+        ruleActivation: PreparedRuleActivation? = null
     ) {
         val measurementStartedAt = SystemClock.elapsedRealtime()
         val generation = advanceRuntimeGeneration()
@@ -420,9 +471,13 @@ class RRVpnService : VpnService() {
 
         val previousSession = _sessionTraffic.value
         startJob?.cancel()
+        // Completion may run even when cancellation prevented the coroutine body from starting.
+        val ruleUpdateCommitted = AtomicBoolean(false)
         startJob = serviceScope.launch {
             var resolvedEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             var startupFailure: String? = null
+            var activatedConfig = stableConfigJson
+            var ruleUpdateRestored = false
 
             val started = withContext(Dispatchers.IO) {
                 coreMutex.withLock {
@@ -430,7 +485,7 @@ class RRVpnService : VpnService() {
 
                     try {
                         val prefs = RRApplication.instance.preferencesManager
-                        resolvedEngine = prefs.tunEngine.first()
+                        resolvedEngine = ruleActivation?.engine ?: prefs.tunEngine.first()
                         requestedEngine = resolvedEngine
                         completePendingCleanup()
 
@@ -444,36 +499,70 @@ class RRVpnService : VpnService() {
                         }
                         _activeRuntimeEngine.value = resolvedEngine
 
-                        when (resolvedEngine) {
-                            PreferencesManager.TUN_ENGINE_ROOT -> {
-                                val root = rootEngine ?: error("Root 引擎不可用")
-                                val runtimeConfig = root.prepare(stableConfigJson)
-                                Libbox.checkConfig(runtimeConfig)
-                                check(boxCore?.startService(runtimeConfig, this@RRVpnService, root) == true) {
-                                    boxCore?.lastError ?: "Root sing-box 内核未能启动"
+                        if (ruleActivation == null) {
+                            startDataPlane(stableConfigJson, resolvedEngine, hevBenchmarkSelfTraffic)
+                        } else {
+                            fun current(): Boolean = !stopping && generation == requestGeneration &&
+                                activeNodeId == ruleActivation.nodeId &&
+                                VpnConnectionIntentStore.isDesiredRunning(this@RRVpnService)
+                            when (val result = RuleUpdateActivationRunner.activate(
+                                isCurrent = ::current,
+                                startCandidate = { startDataPlane(stableConfigJson, resolvedEngine, false) },
+                                commitCandidate = {
+                                    // Stop/switch arrives on Main too: commit and canonical publication
+                                    // are one non-suspending operation after the last identity check.
+                                    withContext(Dispatchers.Main.immediate) {
+                                        if (!current() || !isDataPlaneHealthy(resolvedEngine)) false else {
+                                            ChinaRuleSetManager.commitPrepared(
+                                                this@RRVpnService,
+                                                ruleActivation.candidateGeneration,
+                                                ruleActivation.baseGeneration,
+                                                ruleActivation.operation
+                                            ).also { committed ->
+                                                if (committed) {
+                                                    ruleUpdateCommitted.set(true)
+                                                    activeConfigJson = stableConfigJson
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                stopCandidate = { stopDataPlane() },
+                                restorePrevious = {
+                                    startDataPlane(ruleActivation.previousConfig, resolvedEngine, false)
                                 }
-                                // The helper installs capture rules only after libbox owns the TUN fd.
-                                root.activate()
-                                check(root.isRunning) { "Root 数据面未完成激活" }
-                            }
-                            PreferencesManager.TUN_ENGINE_HEV -> {
-                                val runtime = HevConfigAdapter.adapt(stableConfigJson)
-                                Libbox.checkConfig(runtime.configJson)
-                                check(boxCore?.startService(runtime.configJson, this@RRVpnService) == true) {
-                                    boxCore?.lastError ?: "HEV sing-box 内核未能启动"
+                            )) {
+                                RuleUpdateActivationRunner.Result.Activated -> Unit
+                                is RuleUpdateActivationRunner.Result.Restored -> {
+                                    activatedConfig = ruleActivation.previousConfig
+                                    ruleUpdateRestored = true
+                                    startupFailure = "新规则未能启用，已恢复原规则：${result.candidateFailure.message}"
                                 }
-                                check(hevEngine?.start(
-                                    policy = runtime.perAppPolicy,
-                                    includeSelfForBenchmark = hevBenchmarkSelfTraffic
-                                ) == true) { hevEngine?.lastError ?: "HEV 极速引擎未能启动" }
-                            }
-                            else -> check(boxCore?.startService(stableConfigJson, this@RRVpnService) == true) {
-                                boxCore?.lastError ?: "sing-box 内核未能启动"
+                                is RuleUpdateActivationRunner.Result.Failed -> throw result.failure
+                                RuleUpdateActivationRunner.Result.Superseded -> {
+                                    withContext(Dispatchers.Main.immediate) {
+                                        ChinaRuleSetManager.noteActivationFailure(
+                                            this@RRVpnService, ruleActivation.candidateGeneration,
+                                            "连接状态已变化，已取消本次规则启用", ruleActivation.operation
+                                        )
+                                    }
+                                    return@withLock false
+                                }
                             }
                         }
                         true
                     } catch (cancelled: CancellationException) {
-                        withContext(NonCancellable) { runCatching { stopDataPlane() } }
+                        withContext(NonCancellable) {
+                            runCatching { stopDataPlane() }
+                            if (ruleActivation != null && !ruleUpdateCommitted.get()) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    ChinaRuleSetManager.noteActivationFailure(
+                                        this@RRVpnService, ruleActivation.candidateGeneration,
+                                        "连接状态已变化，已取消本次规则启用", ruleActivation.operation
+                                    )
+                                }
+                            }
+                        }
                         throw cancelled
                     } catch (error: Throwable) {
                         startupFailure = error.message ?: error.javaClass.simpleName
@@ -488,8 +577,8 @@ class RRVpnService : VpnService() {
 
             if (generation != requestGeneration) return@launch
 
-            if (started && (resolvedEngine != PreferencesManager.TUN_ENGINE_ROOT || rootEngine?.isRunning == true)) {
-                activeConfigJson = stableConfigJson
+            if (started && (ruleUpdateCommitted.get() || isDataPlaneHealthy(resolvedEngine))) {
+                activeConfigJson = activatedConfig
                 activeEngine = resolvedEngine
                 sessionPersisted = false
                 resetTrafficState()
@@ -497,6 +586,12 @@ class RRVpnService : VpnService() {
                 _isRunning.value = true
                 _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
                 VpnConnectionIntentStore.setDesiredRunning(this@RRVpnService, true)
+                if (ruleUpdateRestored && ruleActivation != null) {
+                    ChinaRuleSetManager.noteActivationFailure(
+                        this@RRVpnService, ruleActivation.candidateGeneration, startupFailure.orEmpty(), ruleActivation.operation
+                    )
+                    Log.w(TAG, startupFailure.orEmpty())
+                }
                 notificationMgr.updateNotification(displayNodeTag(), TrafficSpeed(), 0L)
                 publishRestartMeasurement(
                     measurementStartedAt = measurementStartedAt,
@@ -506,7 +601,7 @@ class RRVpnService : VpnService() {
                 val cacheNodeTag = activeNodeTag
                 val cacheNodeId = activeNodeId
                 serviceScope.launch(Dispatchers.IO) {
-                    refreshRuntimeCache(stableConfigJson, cacheNodeTag, cacheNodeId, generation)
+                    refreshRuntimeCache(activatedConfig, cacheNodeTag, cacheNodeId, generation)
                 }
                 Log.i(
                     TAG,
@@ -517,6 +612,12 @@ class RRVpnService : VpnService() {
                             ""
                         }
                 )
+                // A process exit immediately after commit is a runtime failure. A Root
+                // callback may have arrived while _isStarting was true; replay all three
+                // engines' health here, retaining the committed config for recovery.
+                if (ruleUpdateCommitted.get() && !isDataPlaneHealthy(resolvedEngine)) {
+                    handleUnexpectedDataPlaneExit("规则启用后数据面意外退出", resolvedEngine)
+                }
             } else {
                 val reason = startupFailure
                     ?: hevEngine?.lastError
@@ -527,6 +628,9 @@ class RRVpnService : VpnService() {
                         "sing-box 内核未能启动"
                     }
                 _lastError.value = reason
+                if (ruleActivation != null) {
+                    ChinaRuleSetManager.noteActivationFailure(this@RRVpnService, ruleActivation.candidateGeneration, reason, ruleActivation.operation)
+                }
                 Log.e(TAG, reason)
                 _isStarting.value = false
                 publishRestartMeasurement(
@@ -552,6 +656,64 @@ class RRVpnService : VpnService() {
                     stopVpn(persistTraffic = false)
                 }
             }
+        }.also { job ->
+            if (ruleActivation != null) {
+                val context = applicationContext
+                job.invokeOnCompletion { cause ->
+                    if (ruleUpdateCommitted.get()) return@invokeOnCompletion
+                    // Cancellation can happen before launch enters its body, while waiting
+                    // for IO, or before coreMutex is acquired. The inner teardown catch is
+                    // not reached in those cases. The manager atomically matches the pending
+                    // operation and candidate, so a reused generation in a newer operation
+                    // cannot be cleared by this completed job.
+                    runCatching {
+                        ChinaRuleSetManager.noteActivationFailure(
+                            context,
+                            ruleActivation.candidateGeneration,
+                            if (cause is CancellationException) "连接状态已变化，已取消本次规则启用"
+                            else "规则启用任务已结束，未提交候选版本",
+                            ruleActivation.operation
+                        )
+                    }.onFailure { error ->
+                        Log.w(TAG, "Unable to finalize prepared rules activation status", error)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Must be called under coreMutex after the previous data plane has been fully stopped. */
+    private suspend fun startDataPlane(config: String, engine: String, hevBenchmarkSelfTraffic: Boolean) {
+        when (engine) {
+            PreferencesManager.TUN_ENGINE_ROOT -> {
+                val root = rootEngine ?: error("Root 引擎不可用")
+                val runtimeConfig = root.prepare(config)
+                Libbox.checkConfig(runtimeConfig)
+                check(boxCore?.startService(runtimeConfig, this@RRVpnService, root) == true) {
+                    boxCore?.lastError ?: "Root sing-box 内核未能启动"
+                }
+                // Capture is installed only after libbox owns the TUN fd.
+                root.activate()
+                check(root.isRunning && boxCore?.isCoreRunning() == true) { "Root 数据面未完成激活" }
+            }
+            PreferencesManager.TUN_ENGINE_HEV -> {
+                val runtime = HevConfigAdapter.adapt(config)
+                Libbox.checkConfig(runtime.configJson)
+                check(boxCore?.startService(runtime.configJson, this@RRVpnService) == true) {
+                    boxCore?.lastError ?: "HEV sing-box 内核未能启动"
+                }
+                check(hevEngine?.start(
+                    policy = runtime.perAppPolicy,
+                    includeSelfForBenchmark = hevBenchmarkSelfTraffic
+                ) == true) { hevEngine?.lastError ?: "HEV 极速引擎未能启动" }
+                check(boxCore?.isCoreRunning() == true && hevEngine?.isRunning == true) { "HEV 数据面未完成激活" }
+            }
+            else -> {
+                check(boxCore?.startService(config, this@RRVpnService) == true) {
+                    boxCore?.lastError ?: "sing-box 内核未能启动"
+                }
+                check(boxCore?.isCoreRunning() == true) { "sing-box 数据面未完成激活" }
+            }
         }
     }
 
@@ -564,18 +726,22 @@ class RRVpnService : VpnService() {
                 PerAppPolicyResolver.MODE_DISALLOW_LIST -> prefs.bypassSelectedAppPackages.first()
                 else -> emptySet()
             }
-            if (generation != requestGeneration) return
-            VpnRuntimeStateStore(this).save(
-                VpnRuntimeState(
-                    configJson = stableConfigJson,
-                    nodeTag = nodeTag,
-                    nodeId = nodeId,
-                    perAppMode = perAppMode,
-                    selectedPackages = selectedPackages,
-                    smartRouting = prefs.smartRouting.first(),
-                    fastForwarding = prefs.fastForwarding.first()
-                )
+            val state = VpnRuntimeState(
+                configJson = stableConfigJson,
+                nodeTag = nodeTag,
+                nodeId = nodeId,
+                perAppMode = perAppMode,
+                selectedPackages = selectedPackages,
+                smartRouting = prefs.smartRouting.first(),
+                fastForwarding = prefs.fastForwarding.first()
             )
+            // Preference reads above suspend. Publish only after rechecking the final
+            // session identity, serialized with Main's stop/switch and rule commit.
+            withContext(Dispatchers.Main.immediate) {
+                if (generation == requestGeneration && activeConfigJson == stableConfigJson &&
+                    VpnConnectionIntentStore.isDesiredRunning(this@RRVpnService)
+                ) VpnRuntimeStateStore(this@RRVpnService).save(state)
+            }
         }.onFailure { error ->
             Log.w(TAG, "Unable to refresh validated runtime cache", error)
         }
@@ -611,7 +777,9 @@ class RRVpnService : VpnService() {
         if (pendingCleanupServices.none { it !== this }) cleanupFailure = null
     }
 
-    private fun isDataPlaneHealthyInternal(): Boolean = when (activeEngine) {
+    private fun isDataPlaneHealthyInternal(): Boolean = isDataPlaneHealthy(activeEngine)
+
+    private fun isDataPlaneHealthy(engine: String): Boolean = when (engine) {
         PreferencesManager.TUN_ENGINE_ROOT ->
             boxCore?.isCoreRunning() == true && rootEngine?.isRunning == true
         PreferencesManager.TUN_ENGINE_HEV ->
@@ -673,9 +841,12 @@ class RRVpnService : VpnService() {
         // must finish first, including a Root rollback during an engine transition.
     }
 
-    private fun handleUnexpectedRootExit(reason: String) {
+    private fun handleUnexpectedRootExit(reason: String) =
+        handleUnexpectedDataPlaneExit(reason, PreferencesManager.TUN_ENGINE_ROOT)
+
+    private fun handleUnexpectedDataPlaneExit(reason: String, expectedEngine: String) {
         serviceScope.launch {
-            if (requestedEngine != PreferencesManager.TUN_ENGINE_ROOT || stopping || _isStarting.value) return@launch
+            if (requestedEngine != expectedEngine || stopping || _isStarting.value) return@launch
             val generation = advanceRuntimeGeneration()
             startJob?.cancel()
             startJob = null
@@ -687,9 +858,19 @@ class RRVpnService : VpnService() {
             if (generation != requestGeneration) return@launch
             _lastError.value = if (cleanup.isSuccess) reason else
                 "$reason\nRoot 清理未确认：${cleanup.exceptionOrNull()?.message.orEmpty()}"
-            ensureForeground("$activeNodeTag · Root 数据面停止")
+            ensureForeground("${displayNodeTag()} · 数据面停止")
             Log.e(TAG, _lastError.value.orEmpty())
             // Retain canonical config and desired-running state for the guarded recovery path.
+            // The generation advance above invalidates a pending success-path cache write;
+            // persist that same committed canonical config under the recovery generation.
+            val config = activeConfigJson
+            if (!config.isNullOrBlank()) {
+                val cacheNodeTag = activeNodeTag
+                val cacheNodeId = activeNodeId
+                serviceScope.launch(Dispatchers.IO) {
+                    refreshRuntimeCache(config, cacheNodeTag, cacheNodeId, generation)
+                }
+            }
         }
     }
 

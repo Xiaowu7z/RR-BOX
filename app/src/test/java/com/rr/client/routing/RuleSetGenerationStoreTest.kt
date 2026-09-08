@@ -241,6 +241,186 @@ class RuleSetGenerationStoreTest {
         }
     }
 
+    @Test
+    fun preparedCandidateDoesNotBecomeCurrentUntilActivation() = withDirectory { directory ->
+        val store = newStore(directory)
+        val previous = install(store, "old")
+        val candidate = store.prepare(updatedAtMillis = 250L) { write(it, "new") }
+
+        assertTrue(candidate.changed)
+        assertSnapshotEquals(previous, store.current())
+        assertSnapshotEquals(previous, newStore(directory).current())
+        assertPayload(candidate.snapshot, "new")
+        assertTrue(store.activate(candidate.snapshot, previous.generation))
+        assertSnapshotEquals(candidate.snapshot, store.current())
+        assertEquals(250L, store.current()?.updatedAtMillis)
+    }
+
+    @Test
+    fun unchangedPreparationPreservesContentTimestamp() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = store.install(updatedAtMillis = 100L) { write(it, "same") }.snapshot
+
+        val candidate = store.prepare(updatedAtMillis = 200L) { write(it, "same") }
+
+        assertFalse(candidate.changed)
+        assertSnapshotEquals(original, candidate.snapshot)
+        assertEquals(100L, candidate.snapshot.updatedAtMillis)
+        assertEquals(100L, newStore(directory).current()?.updatedAtMillis)
+    }
+
+    @Test
+    fun firstPreparedCandidateIsNeverARecoveryFallback() = withDirectory { directory ->
+        val store = newStore(directory)
+        val candidate = store.prepare { write(it, "first") }.snapshot
+
+        assertEquals(null, store.current())
+        assertEquals(null, newStore(directory).current())
+        File(directory, "active.properties").writeText("damaged pointer")
+        assertEquals(null, newStore(directory).current())
+        assertTrue(store.activate(candidate, null))
+        assertPayload(requireNotNull(newStore(directory).current()), "first")
+    }
+
+    @Test
+    fun staleCandidateCannotOverwriteNewerActivation() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = install(store, "old")
+        val first = store.prepare { write(it, "first") }.snapshot
+        val second = store.prepare { write(it, "second") }.snapshot
+
+        assertTrue(store.activate(first, original.generation))
+        assertFalse(store.activate(second, original.generation))
+        assertSnapshotEquals(first, store.current())
+    }
+
+    @Test
+    fun rollbackUsesCompareAndSwapAndRestoresContentTimestamp() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = store.install(updatedAtMillis = 100L) { write(it, "old") }.snapshot
+        val candidate = store.prepare(updatedAtMillis = 200L) { write(it, "new") }.snapshot
+        assertTrue(store.activate(candidate, original.generation))
+        val reopened = newStore(directory)
+        val oldSnapshot = requireNotNull(reopened.snapshot(original.generation))
+
+        assertTrue(reopened.activate(oldSnapshot, candidate.generation))
+        assertSnapshotEquals(original, reopened.current())
+        assertEquals(100L, reopened.current()?.updatedAtMillis)
+        val later = install(reopened, "later")
+        assertFalse(reopened.activate(oldSnapshot, candidate.generation))
+        assertSnapshotEquals(later, reopened.current())
+    }
+
+    @Test
+    fun activationRehashesCandidateEvenWhenSizeAndTimestampMatchCache() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = install(store, "old")
+        val candidate = store.prepare { write(it, "new") }.snapshot
+        val changedFile = candidate.files[0]
+        val timestamp = changedFile.lastModified()
+        changedFile.writeText("rule:bad")
+        assertTrue(changedFile.setLastModified(timestamp))
+
+        assertTrue(runCatching { store.activate(candidate, original.generation) }.isFailure)
+        assertSnapshotEquals(original, store.current())
+    }
+
+    @Test
+    fun activationRejectsDamagedValidationMetadataBeforeChangingPointer() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = install(store, "old")
+        val candidate = store.prepare { write(it, "new") }.snapshot
+        File(candidate.files[0].parentFile, "manifest.properties").writeText("schema=untrusted")
+
+        assertTrue(runCatching { store.activate(candidate, original.generation) }.isFailure)
+        assertSnapshotEquals(original, store.current())
+    }
+
+    @Test
+    fun candidatePathsCannotBeSubstitutedByCaller() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = install(store, "old")
+        val candidate = store.prepare { write(it, "new") }.snapshot
+        val forged = candidate.copy(files = original.files)
+
+        assertTrue(runCatching { store.activate(forged, original.generation) }.isFailure)
+        assertSnapshotEquals(original, store.current())
+        assertEquals(null, store.snapshot("../active.properties"))
+    }
+
+    @Test
+    fun failedPointerCommitCanRetryPersistedCandidateAfterReopen() = withDirectory { directory ->
+        var reject = false
+        val store = newStore(directory, atomicMove = { source, target ->
+            if (reject && target.name == "active.properties") throw IOException("pointer commit failed")
+            atomicMove(source, target)
+        })
+        val original = install(store, "old")
+        val candidate = store.prepare(updatedAtMillis = 123L) { write(it, "new") }.snapshot
+        reject = true
+
+        assertTrue(runCatching { store.activate(candidate, original.generation) }.isFailure)
+        val reopened = newStore(directory)
+        assertSnapshotEquals(original, reopened.current())
+        val restoredCandidate = requireNotNull(reopened.snapshot(candidate.generation))
+        assertEquals(123L, restoredCandidate.updatedAtMillis)
+        assertTrue(reopened.activate(restoredCandidate, original.generation))
+        assertSnapshotEquals(candidate, reopened.current())
+    }
+
+    @Test
+    fun pendingCandidateSurvivesCleanupAfterProcessReopen() = withDirectory { directory ->
+        val store = newStore(directory)
+        install(store, "old")
+        val pending = store.prepare { write(it, "pending") }.snapshot
+        val reopened = newStore(directory)
+
+        repeat(5) { install(reopened, "later-$it") }
+
+        assertEquals(listOf(pending.generation), reopened.preparedGenerations())
+        assertPayload(pending, "pending")
+        assertSnapshotEquals(pending, reopened.snapshot(pending.generation))
+        File(directory, "active.properties").writeText("damaged pointer")
+        assertTrue(newStore(directory).current()?.generation != pending.generation)
+    }
+
+    @Test
+    fun discardingPendingCandidatePreservesIssuedPathsUntilProcessReopen() = withDirectory { directory ->
+        val store = newStore(directory)
+        install(store, "old")
+        val pending = store.prepare { write(it, "pending") }.snapshot
+
+        store.discardPrepared(pending.generation)
+        assertTrue(store.preparedGenerations().isEmpty())
+        assertPayload(pending, "pending")
+        install(newStore(directory), "later")
+
+        assertTrue(pending.files.none(File::exists))
+    }
+
+    @Test
+    fun concurrentActivationsFromSameBaseHaveExactlyOneWinner() = withDirectory { directory ->
+        val store = newStore(directory)
+        val original = install(store, "old")
+        val candidates = listOf("one", "two").map { payload -> store.prepare { write(it, payload) }.snapshot }
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val attempts = candidates.map { candidate ->
+                executor.submit(Callable {
+                    assertTrue(start.await(10, TimeUnit.SECONDS))
+                    store.activate(candidate, original.generation)
+                })
+            }
+            start.countDown()
+            assertEquals(1, attempts.count { it.get(30, TimeUnit.SECONDS) })
+            assertTrue(store.current()?.generation in candidates.map { it.generation })
+        } finally {
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS))
+        }
+    }
+
     private fun newStore(
         directory: File,
         protectedPaths: () -> Set<String> = { emptySet() },

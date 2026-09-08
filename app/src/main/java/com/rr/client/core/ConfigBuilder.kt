@@ -8,11 +8,10 @@ import com.google.gson.JsonParser
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
-import com.rr.client.routing.BigoAppPolicy
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.PerAppPolicyResolver
-import com.rr.client.routing.TikTokAppPolicy
+import com.rr.client.routing.RoutingPolicySnapshot
 
 /** Stable sing-box 1.14 runtime configuration. */
 object ConfigBuilder {
@@ -36,7 +35,8 @@ object ConfigBuilder {
         perAppMode: String = PerAppPolicyResolver.MODE_ALL,
         selectedPackages: Set<String> = emptySet(),
         fastForwarding: Boolean = false,
-        ruleSets: ChinaRuleSetManager.Paths? = null
+        ruleSets: ChinaRuleSetManager.Paths? = null,
+        routingPolicy: RoutingPolicySnapshot = RoutingPolicySnapshot.bundled()
     ): String {
         val proxy = buildSelectedOutbound(selectedNode)
             ?: throw IllegalArgumentException("节点「${selectedNode.tag}」缺少 sing-box 1.14 可用参数")
@@ -52,7 +52,7 @@ object ConfigBuilder {
                 addProperty("timestamp", true)
             })
 
-            add("dns", buildDnsConfig(selectedNode, smartRouting, ruleSets))
+            add("dns", buildDnsConfig(selectedNode, smartRouting, ruleSets, routingPolicy))
 
             add("inbounds", JsonArray().apply {
                 add(JsonObject().apply {
@@ -94,56 +94,37 @@ object ConfigBuilder {
                     }
 
                     if (smartRouting) {
-                        // Android System can identify these clients even on a shared CDN/IP.
-                        // Do not apply the guard to local device traffic. HEV has no original
-                        // app identity and therefore continues through the domain rules below.
-                        add(JsonObject().apply {
-                            addProperty("type", "logical")
-                            addProperty("mode", "and")
-                            add("rules", JsonArray().apply {
-                                add(JsonObject().apply {
-                                    add("package_name", JsonArray().apply {
-                                        TikTokAppPolicy.proxyPackages.forEach(::add)
+                        // Package identity is available in System / Root. HEV still
+                        // evaluates the shared domain policy when the owner is unavailable.
+                        routingPolicy.proxyPackageGroups.forEach { packages ->
+                            add(JsonObject().apply {
+                                addProperty("type", "logical")
+                                addProperty("mode", "and")
+                                add("rules", JsonArray().apply {
+                                    add(JsonObject().apply {
+                                        add("package_name", JsonArray().apply { packages.forEach(::add) })
+                                    })
+                                    add(JsonObject().apply {
+                                        addProperty("ip_is_private", true)
+                                        addProperty("invert", true)
                                     })
                                 })
-                                add(JsonObject().apply {
-                                    addProperty("ip_is_private", true)
-                                    addProperty("invert", true)
-                                })
+                                addProperty("action", "route")
+                                addProperty("outbound", TAG_PROXY)
                             })
-                            addProperty("action", "route")
-                            addProperty("outbound", TAG_PROXY)
-                        })
-                        // BIGO can use shared domestic infrastructure and direct-IP requests.
-                        // Scope this separately to its exact Android identity; private device
-                        // traffic stays outside the guard, and HEV uses the domain policy.
-                        add(JsonObject().apply {
-                            addProperty("type", "logical")
-                            addProperty("mode", "and")
-                            add("rules", JsonArray().apply {
-                                add(JsonObject().apply {
-                                    add("package_name", JsonArray().apply {
-                                        BigoAppPolicy.proxyPackages.forEach(::add)
-                                    })
-                                })
-                                add(JsonObject().apply {
-                                    addProperty("ip_is_private", true)
-                                    addProperty("invert", true)
-                                })
-                            })
-                            addProperty("action", "route")
-                            addProperty("outbound", TAG_PROXY)
-                        })
-                        addDomainRoutingRules(this)
+                        }
+                        addDomainRoutingRules(this, routingPolicy)
 
-                        // Minimal observed-IP exceptions must never override a known
-                        // international service or the app-identity guard above.
-                        add(JsonObject().apply {
-                            add("ip_cidr", JsonArray().apply {
-                                DomesticRoutingPolicy.observedMainlandIpv4Exceptions.forEach(::add)
+                        // Minimal observed-IP exceptions must never override known
+                        // international services or app-identity guards above.
+                        if (routingPolicy.directIpExceptions.isNotEmpty()) {
+                            add(JsonObject().apply {
+                                add("ip_cidr", JsonArray().apply {
+                                    routingPolicy.directIpExceptions.forEach(::add)
+                                })
+                                addProperty("outbound", TAG_DIRECT)
                             })
-                            addProperty("outbound", TAG_DIRECT)
-                        })
+                        }
 
                         add(JsonObject().apply {
                             addProperty("ip_is_private", true)
@@ -217,8 +198,8 @@ object ConfigBuilder {
         })
     }
 
-    private fun addDomainRoutingRules(rules: JsonArray) {
-        DomesticRoutingPolicy.domainRules.forEach { policy ->
+    private fun addDomainRoutingRules(rules: JsonArray, routingPolicy: RoutingPolicySnapshot) {
+        routingPolicy.domainRules.forEach { policy ->
             rules.add(domainCondition(policy).apply {
                 addProperty("outbound", when (policy.destination) {
                     DomesticRoutingPolicy.Destination.DIRECT -> TAG_DIRECT
@@ -241,7 +222,8 @@ object ConfigBuilder {
     private fun buildDnsConfig(
         selectedNode: ProxyNode,
         smartRouting: Boolean,
-        ruleSets: ChinaRuleSetManager.Paths?
+        ruleSets: ChinaRuleSetManager.Paths?,
+        routingPolicy: RoutingPolicySnapshot
     ): JsonObject = JsonObject().apply {
         add("servers", JsonArray().apply {
             add(JsonObject().apply {
@@ -271,7 +253,7 @@ object ConfigBuilder {
                 })
             }
             if (smartRouting) {
-                DomesticRoutingPolicy.domainRules.forEach { policy ->
+                routingPolicy.domainRules.forEach { policy ->
                     add(domainCondition(policy).apply {
                         addProperty("action", "route")
                         addProperty("server", when (policy.destination) {

@@ -235,6 +235,7 @@ class MainActivity : ComponentActivity() {
             initial = PreferencesManager.DEFAULT_PIN_MAX_FAILED_ATTEMPTS
         )
         val ruleSetLastUpdated by prefs.chinaRuleSetLastUpdated.collectAsState(initial = 0L)
+        val ruleUpdateStatus by ChinaRuleSetManager.status.collectAsState()
 
         var subProfiles by remember { mutableStateOf<List<SubProfile>>(emptyList()) }
         var selectedNodeId by remember { mutableStateOf<String?>(null) }
@@ -468,19 +469,29 @@ class MainActivity : ComponentActivity() {
             mode: String,
             packages: Set<String>,
             smart: Boolean,
-            fast: Boolean = fastForwarding
+            fast: Boolean = fastForwarding,
+            ruleUpdate: ChinaRuleSetManager.UpdateResult? = null
         ) {
-            if (!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) return
+            if ((!RRVpnService.isRunning.value && !RRVpnService.isStarting.value) ||
+                (ruleUpdate != null && RRVpnService.isStarting.value)) {
+                ruleUpdate?.let { ChinaRuleSetManager.noteActivationFailure(this@MainActivity, it.generation, "请等待连接完成后再更新", it.operation) }
+                return
+            }
             // Updating rules must preserve the running node, even if another node is selected in UI.
-            val activeId = RRVpnService.activeRuntimeNodeId.value ?: return
+            val activeId = RRVpnService.activeRuntimeNodeId.value
             val nodesSnapshot = latestAllNodes
-            val node = nodesSnapshot.firstOrNull { it.id == activeId } ?: return
+            val node = nodesSnapshot.firstOrNull { it.id == activeId }
+            if (node == null) {
+                ruleUpdate?.let { ChinaRuleSetManager.noteActivationFailure(this@MainActivity, it.generation, "当前节点已变化，请重试", it.operation) }
+                return
+            }
             val runtimeGeneration = RRVpnService.currentRuntimeGeneration()
 
             routingRestartJob?.cancel()
             val updateGeneration = ++routingRestartGeneration
             routingRestartJob = lifecycleScope.launch {
                 applyingRouting = true
+                var dispatched = false
                 try {
                     delay(300L)
                     if (!com.rr.client.vpn.RoutingUpdatePolicy.mayApply(
@@ -495,7 +506,7 @@ class MainActivity : ComponentActivity() {
                         return@launch
                     }
 
-                    val result = buildRuntimeConfig(node, nodesSnapshot, apps, smart, mode, packages, fast)
+                    val result = buildRuntimeConfig(node, nodesSnapshot, apps, smart, mode, packages, fast, ruleUpdate?.paths)
                     currentCoroutineContext().ensureActive()
                     if (!com.rr.client.vpn.RoutingUpdatePolicy.mayApply(
                             com.rr.client.vpn.VpnConnectionIntentStore.isDesiredRunning(this@MainActivity),
@@ -503,12 +514,16 @@ class MainActivity : ComponentActivity() {
                             runtimeGeneration, RRVpnService.currentRuntimeGeneration()
                         )) return@launch
                     result.onSuccess { config ->
-                        sendRestartVpn(config, node.tag, node.id, runtimeGeneration)
+                        sendRestartVpn(config, node.tag, node.id, runtimeGeneration, ruleUpdate)
+                        dispatched = true
                     }.onFailure { error ->
                         toast("分流配置失败：${error.message ?: error.javaClass.simpleName}")
                     }
                     delay(400L)
                 } finally {
+                    if (!dispatched && ruleUpdate != null) {
+                        ChinaRuleSetManager.noteActivationFailure(this@MainActivity, ruleUpdate.generation, "连接或设置发生变化，继续使用原有规则", ruleUpdate.operation)
+                    }
                     if (updateGeneration == routingRestartGeneration) applyingRouting = false
                 }
             }
@@ -828,8 +843,12 @@ class MainActivity : ComponentActivity() {
                         smartRouting = smartRouting,
                         fastForwarding = fastForwarding,
                         backgroundProtected = backgroundProtected,
-                        ruleSetLastUpdated = ruleSetLastUpdated,
-                        ruleSetUpdating = updatingRuleSets,
+                        ruleSetLastUpdated = ruleUpdateStatus.savedAtMillis.takeIf { it > 0 } ?: ruleSetLastUpdated,
+                        ruleSetUpdating = updatingRuleSets || ruleUpdateStatus.busy,
+                        ruleVersion = ruleUpdateStatus.policyVersion,
+                        ruleBundleVersion = ruleUpdateStatus.bundleVersion,
+                        ruleDescription = ruleUpdateStatus.description,
+                        ruleUpdateMessage = ruleUpdateStatus.message,
                         pinEnabled = pinEnabled,
                         pinMaxFailedAttempts = pinMaxFailedAttempts,
                         checkingAppUpdate = checkingAppUpdate,
@@ -846,36 +865,41 @@ class MainActivity : ComponentActivity() {
                         },
                         onRequestBackgroundProtection = { requestBackgroundProtection() },
                         onUpdateRuleSets = {
-                            if (!updatingRuleSets) {
+                            if (!updatingRuleSets && !ruleUpdateStatus.busy) {
                                 updatingRuleSets = true
                                 lifecycleScope.launch {
+                                    var candidate: ChinaRuleSetManager.UpdateResult? = null
+                                    var handedOff = false
                                     try {
-                                        val result = ChinaRuleSetManager.update(this@MainActivity)
+                                        val update = ChinaRuleSetManager.update(this@MainActivity).getOrThrow()
+                                        candidate = update
                                         currentCoroutineContext().ensureActive()
-                                        result.onSuccess { update ->
+                                        val live = RRVpnService.isRunning.value || RRVpnService.isStarting.value
+                                        val needsApply = smartRouting && live &&
+                                            com.rr.client.core.RuleSetRuntimePolicy.needsReload(
+                                                RRVpnService.currentRuntimeConfig(), update.paths.geositeChina, update.paths.geoipChina
+                                            )
+                                        if (needsApply) {
+                                            scheduleRoutingRestart(perAppMode, packagesFor(perAppMode), smartRouting, ruleUpdate = update)
+                                            handedOff = true
+                                            toast("规则校验完成，正在应用；连接可能短暂重连")
+                                        } else {
+                                            // This nonsuspending decision + commit cannot interleave a UI start/stop.
+                                            check(!RRVpnService.isStarting.value) { "连接正在启动，请稍后重试" }
+                                            check(ChinaRuleSetManager.commitPrepared(this@MainActivity, update.generation, update.baseGeneration, update.operation)) {
+                                                "规则版本已变化，请重新更新"
+                                            }
+                                            handedOff = true
                                             prefs.setChinaRuleSetLastUpdated(update.updatedAtMillis)
-                                            val paths = withContext(Dispatchers.IO) {
-                                                ChinaRuleSetManager.currentPaths(this@MainActivity)
-                                            }
-                                            val needsApply = smartRouting &&
-                                                (RRVpnService.isRunning.value || RRVpnService.isStarting.value) &&
-                                                (update.changed || (paths != null &&
-                                                    com.rr.client.core.RuleSetRuntimePolicy.needsReload(
-                                                        RRVpnService.currentRuntimeConfig(),
-                                                        paths.geositeChina, paths.geoipChina
-                                                    )))
-                                            if (update.changed || needsApply) {
-                                                toast("中国规则已保存，共 ${update.totalBytes / 1024} KB")
-                                                if (needsApply) {
-                                                    scheduleRoutingRestart(perAppMode, packagesFor(perAppMode), smartRouting)
-                                                }
-                                            } else {
-                                                toast("中国规则已是最新，无需重启连接")
-                                            }
-                                        }.onFailure { error ->
-                                            toast("规则更新失败，继续使用可用规则：${error.message ?: "网络错误"}")
+                                            toast(if (update.changed) "分流规则已保存，下次连接使用新规则" else "分流规则已是最新")
                                         }
+                                    } catch (error: Exception) {
+                                        if (error is CancellationException) throw error
+                                        toast("规则更新未完成，原有规则继续可用：${error.message ?: "网络错误"}")
                                     } finally {
+                                        if (!handedOff) candidate?.let {
+                                            ChinaRuleSetManager.noteActivationFailure(this@MainActivity, it.generation, "更新未完成或已取消", it.operation)
+                                        }
                                         updatingRuleSets = false
                                     }
                                 }
@@ -1002,10 +1026,11 @@ class MainActivity : ComponentActivity() {
         smartRouting: Boolean,
         perAppMode: String,
         selectedPackages: Set<String>,
-        fastForwarding: Boolean
+        fastForwarding: Boolean,
+        preparedRules: ChinaRuleSetManager.Paths? = null
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val ruleSets = if (smartRouting) ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrNull() else null
+            val ruleSets = if (smartRouting) preparedRules ?: ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrThrow() else null
             val configJson = ConfigBuilder.buildSingBoxConfig(
                 selectedNode = targetNode,
                 allNodes = allNodes,
@@ -1014,7 +1039,8 @@ class MainActivity : ComponentActivity() {
                 perAppMode = perAppMode,
                 selectedPackages = selectedPackages,
                 fastForwarding = fastForwarding,
-                ruleSets = ruleSets
+                ruleSets = ruleSets,
+                routingPolicy = ruleSets?.policy ?: com.rr.client.routing.RoutingPolicySnapshot.bundled()
             )
             Libbox.checkConfig(configJson)
             configJson
@@ -1153,11 +1179,17 @@ class MainActivity : ComponentActivity() {
         clearPendingVpn()
     }
 
-    private fun sendRestartVpn(config: String, nodeTag: String, nodeId: String, runtimeGeneration: Long) {
+    private fun sendRestartVpn(config: String, nodeTag: String, nodeId: String, runtimeGeneration: Long,
+        ruleUpdate: ChinaRuleSetManager.UpdateResult? = null) {
         ContextCompat.startForegroundService(
             this,
             vpnIntent(RRNotificationManager.ACTION_RESTART_VPN, config, nodeTag, nodeId).apply {
                 putExtra(RRVpnService.EXTRA_ROUTING_UPDATE_GENERATION, runtimeGeneration)
+                ruleUpdate?.let {
+                    putExtra(RRVpnService.EXTRA_RULE_UPDATE_CANDIDATE_GENERATION, it.generation)
+                    putExtra(RRVpnService.EXTRA_RULE_UPDATE_BASE_GENERATION, it.baseGeneration)
+                    putExtra(RRVpnService.EXTRA_RULE_UPDATE_OPERATION, it.operation)
+                }
             }
         )
     }
