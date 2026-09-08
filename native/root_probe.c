@@ -207,8 +207,11 @@ static int verify_no_addresses(unsigned int interface_index)
         ssize_t size = receive_netlink(fd, buffer.bytes, sizeof(buffer.bytes), start + NETLINK_TIMEOUT_MS);
         if (size < 0) goto done;
         int remaining = (int)size;
+        /* NLMSG_NEXT may make this signed remainder negative on bad padding.
+         * Guard it before the unsigned length comparison in NDK NLMSG_OK. */
         for (struct nlmsghdr *header = (struct nlmsghdr *)buffer.bytes;
-             NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {
+             remaining > 0 && NLMSG_OK(header, (unsigned int)remaining);
+             header = NLMSG_NEXT(header, remaining)) {
             if (header->nlmsg_seq != request.header.nlmsg_seq) { errno = EPROTO; goto done; }
             int control = netlink_control(header);
             if (control < 0) goto done;
@@ -491,8 +494,10 @@ static int lookup_own_socket(int socket_fd, int protocol, uint16_t local_port)
         ssize_t size = receive_netlink(fd, buffer.bytes, sizeof(buffer.bytes), start + NETLINK_TIMEOUT_MS);
         if (size < 0) goto done;
         int remaining = (int)size;
+        /* Keep a negative padding remainder invalid before the unsigned cast. */
         for (struct nlmsghdr *header = (struct nlmsghdr *)buffer.bytes;
-             NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {
+             remaining > 0 && NLMSG_OK(header, (unsigned int)remaining);
+             header = NLMSG_NEXT(header, remaining)) {
             if (header->nlmsg_seq != request.header.nlmsg_seq) { errno = EPROTO; goto done; }
             int control = netlink_control(header);
             if (control < 0) goto done;

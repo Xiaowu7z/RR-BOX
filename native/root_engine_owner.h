@@ -181,8 +181,11 @@ static int rr_owner_dump(int fd, int protocol, int family, uint32_t sequence,
         if (count < 0) return -1;
         ++*datagrams;
         int remaining = (int)count;
+        /* NLMSG_NEXT may make this signed remainder negative on bad padding.
+         * Guard it before the unsigned length comparison in NDK NLMSG_OK. */
         for (struct nlmsghdr *header = (struct nlmsghdr *)buffer.bytes;
-             NLMSG_OK(header, remaining); header = NLMSG_NEXT(header, remaining)) {
+             remaining > 0 && NLMSG_OK(header, (unsigned int)remaining);
+             header = NLMSG_NEXT(header, remaining)) {
             if (header->nlmsg_seq != sequence) { errno = EPROTO; return -1; }
             if ((header->nlmsg_flags & NLM_F_DUMP_INTR) != 0) { errno = EINTR; return -1; }
             if (header->nlmsg_type == NLMSG_ERROR) {
