@@ -154,13 +154,18 @@ class DomesticRoutingConfigTest {
     fun hevKeepsKnownDomainAndDnsPoliciesAndDoesNotAddGlobalDnsOrUdpInterference() {
         val stable = config(binaries = true)
         val hev = JsonParser.parseString(HevConfigAdapter.adapt(stable.toString()).configJson).asJsonObject
-        listOf("route", "dns", "outbounds").forEach { assertEquals(stable.get(it), hev.get(it)) }
+        listOf("dns", "outbounds").forEach { assertEquals(stable.get(it), hev.get(it)) }
+        val businessRoute = hev.getAsJsonObject("route").deepCopy()
+        val resolver = businessRoute.getAsJsonArray("rules").remove(0).asJsonObject
+        assertEquals("hijack-dns", resolver.get("action").asString)
+        assertEquals(listOf("198.18.0.2/32"), resolver.getAsJsonArray("ip_cidr").map { it.asString })
+        assertEquals(stable.get("route"), businessRoute)
         assertPolicy(hev, listOf("long.weixin.qq.com", "v.douyinvod.com"), direct = true)
         assertPolicy(hev, listOf("v.tiktokcdn.com", "p.ibyteimg.com"), direct = false)
         val rules = hev.getAsJsonObject("route").getAsJsonArray("rules")
         assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "resolve" })
         assertFalse(rules.any { it.asJsonObject.get("action")?.asString == "reject" })
-        assertFalse(rules.any { it.asJsonObject.has("network") })
+        assertFalse(rules.drop(1).any { it.asJsonObject.has("network") })
         assertEquals("proxy", hev.getAsJsonObject("route").get("final").asString)
     }
 }

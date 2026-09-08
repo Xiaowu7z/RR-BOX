@@ -6,13 +6,15 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.routing.ResolvedPerAppPolicy
+import com.rr.client.vpn.HevTunnelConfig
 
 /**
  * Converts the already-validated stable system-TUN config into the HEV data-plane form.
  *
  * The stable config remains the canonical source of truth. HEV only replaces the TUN inbound
  * with a loopback SOCKS5 inbound and extracts Android per-app policy from the removed TUN.
- * Route/DNS/outbound semantics are preserved byte-for-byte at the JSON object level.
+ * Business route/DNS/outbound policies are preserved. One narrow resolver-endpoint rule is
+ * prepended because SOCKS does not have the System TUN's built-in DNS endpoint handling.
  */
 object HevConfigAdapter {
     const val SOCKS_PORT = 20808
@@ -43,6 +45,23 @@ object HevConfigAdapter {
                 addProperty("listen", "127.0.0.1")
                 addProperty("listen_port", SOCKS_PORT)
             })
+        })
+
+        val route = root.getAsJsonObject("route")
+            ?: throw IllegalArgumentException("稳定配置缺少 route")
+        val rules = route.getAsJsonArray("rules") ?: JsonArray()
+        route.add("rules", JsonArray().apply {
+            // This is the DNS server advertised by our VpnService, not a general port-53
+            // redirect. Keep it working even when protocol sniffing / DNS interception is off.
+            // Resolve before private-IP or business rules, for both UDP and TCP fallback.
+            add(JsonObject().apply {
+                add("inbound", JsonArray().apply { add(SOCKS_TAG) })
+                add("ip_cidr", JsonArray().apply { add("${HevTunnelConfig.DNS_ADDRESS}/32") })
+                addProperty("port", 53)
+                add("network", JsonArray().apply { add("tcp"); add("udp") })
+                addProperty("action", "hijack-dns")
+            })
+            rules.forEach(::add)
         })
 
         return Runtime(

@@ -2,6 +2,7 @@ package com.rr.client.vpn
 
 import com.rr.client.core.HevConfigAdapter
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class HevTunnelConfigTest {
@@ -11,8 +12,8 @@ class HevTunnelConfigTest {
 
         assertTrue(yaml.contains("mtu: 8500"))
         assertTrue(yaml.contains("ipv4: 198.18.0.1"))
-        assertTrue(yaml.contains("address: 198.18.0.2"))
-        assertTrue(yaml.contains("network: 100.64.0.0"))
+        assertFalse(yaml.contains("mapdns:"))
+        assertFalse(yaml.contains("100.64."))
         assertTrue(yaml.contains("port: ${HevConfigAdapter.SOCKS_PORT}"))
         assertTrue(yaml.contains("pipeline: true"))
         assertTrue(yaml.contains("tcp-fastopen: true"))

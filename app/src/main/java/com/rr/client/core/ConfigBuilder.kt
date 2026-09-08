@@ -115,6 +115,15 @@ object ConfigBuilder {
                         })
                         addDomainRoutingRules(this)
 
+                        // Minimal observed-IP exceptions must never override a known
+                        // international service or the app-identity guard above.
+                        add(JsonObject().apply {
+                            add("ip_cidr", JsonArray().apply {
+                                DomesticRoutingPolicy.observedMainlandIpv4Exceptions.forEach(::add)
+                            })
+                            addProperty("outbound", TAG_DIRECT)
+                        })
+
                         add(JsonObject().apply {
                             addProperty("ip_is_private", true)
                             addProperty("outbound", TAG_DIRECT)

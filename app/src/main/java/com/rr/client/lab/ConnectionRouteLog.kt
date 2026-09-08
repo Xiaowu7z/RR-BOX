@@ -3,6 +3,8 @@ package com.rr.client.lab
 import com.google.gson.JsonParser
 import com.rr.client.security.SecretRedactor
 import java.util.Locale
+import java.security.MessageDigest
+import java.util.UUID
 
 /** Values come from libbox ConnectionEvents, never from inferred log-message matches. */
 data class ConnectionRouteRecord(
@@ -36,7 +38,7 @@ object ConnectionRouteLog {
             record.hev -> "未知应用（HEV 未提供原始应用身份）"
             record.packages.isNotEmpty() -> buildString {
                 record.application?.takeIf(String::isNotBlank)?.let { append(it).append(" ") }
-                append("(").append(record.packages.joinToString(", ")).append(")")
+                append("(").append(record.packages.take(16).joinToString(", ") { it.take(160) }.take(1000)).append(")")
             }
             record.uid != null && record.uid >= 0 -> "未知应用（UID ${record.uid}）"
             else -> "未知应用"
@@ -62,9 +64,38 @@ object ConnectionRouteLog {
             append(" (").append(record.outbound.ifBlank { "未知" }.take(160))
             record.outboundType.takeIf(String::isNotBlank)?.let { append(" / ").append(it.take(40)) }
             append(")")
-            if (record.rule.isNotBlank()) append("\n命中：").append(record.rule.take(1024))
+            append("\n入口：").append(if (record.hev) "HEV / SOCKS" else "TUN / 其他")
+            if (isSharedIpv4Target(destination)) {
+                append("；共享地址目标；可能为旧映射或运营商地址，尚未确认")
+            }
+            if (record.rule.isNotBlank()) {
+                append("\n命中：").append(record.rule.take(1024))
+                append("\n规则摘要 ID：").append(diagnosticId(record.rule))
+            } else {
+                append("\n命中：核心未提供具体规则（可能使用默认出口）")
+            }
         })
     }
+
+    /** Strict numeric parsing only: never perform DNS lookups while formatting diagnostics. */
+    internal fun isSharedIpv4Target(endpoint: String): Boolean {
+        val parts = endpoint.split(':')
+        if (parts.size !in 1..2) return false
+        if (parts.size == 2 && (parts[1].isEmpty() || parts[1].any { it !in '0'..'9' } ||
+                parts[1].toIntOrNull() !in 0..65535)) return false
+        val octets = parts[0].split('.')
+        if (octets.size != 4) return false
+        val values = octets.map { value ->
+            if (value.isEmpty() || value.length > 3 || value.any { it !in '0'..'9' } ||
+                (value.length > 1 && value.startsWith('0'))) return false
+            value.toIntOrNull()?.takeIf { it in 0..255 } ?: return false
+        }
+        return values[0] == 100 && values[1] in 64..127
+    }
+
+    /** Correlation labels are hashes, never credentials or native UUIDs redacted by the log store. */
+    internal fun diagnosticId(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8)).take(8).joinToString("") { "%02x".format(it) }
 
     /** Keep the endpoint useful for tests, but never retain URI credentials/path/query/fragment. */
     internal fun endpointOnly(raw: String): String = raw.trim().take(2048)
@@ -75,17 +106,83 @@ object ConnectionRouteLog {
         .take(300)
 }
 
-/** Bounded ID history keeps connection updates/reconnect snapshots out of the diagnostic log. */
-internal class ConnectionLogDeduplicator(private val capacity: Int = 4096) {
-    private val ids = LinkedHashSet<String>()
+/** Snapshot values only; traffic deltas are deliberately excluded from persistent diagnostics. */
+internal data class ConnectionLogObservation(
+    val id: String,
+    val record: ConnectionRouteRecord?,
+    val createdAt: Long = 0,
+    val closedAt: Long = 0,
+    val uplinkTotal: Long? = null,
+    val downlinkTotal: Long? = null,
+    val closed: Boolean = false,
+    val snapshot: Boolean = false
+)
+
+/**
+ * At most one observation and one end record per retained ID. The upstream initial snapshot uses
+ * NEW even for already closed connections, which must be logged as history, never as a success.
+ * Only bounded, redacted route summaries are cached; no packet data or ongoing deltas are retained.
+ */
+internal class ConnectionLogTracker(private val capacity: Int = 4096) {
+    init { require(capacity > 0) }
+    private data class Seen(val ended: Boolean, val route: String, val createdAt: Long)
+    private val connections = LinkedHashMap<String, Seen>()
+    @Volatile var sessionId: String = newSessionId()
+        private set
 
     @Synchronized
-    fun accept(id: String): Boolean {
-        if (id.isBlank() || !ids.add(id)) return false
-        if (ids.size > capacity) ids.iterator().run { next(); remove() }
-        return true
+    fun format(event: ConnectionLogObservation, now: Long, expectedSessionId: String = sessionId): ConnectionRouteMessage? {
+        if (expectedSessionId != sessionId || event.id.isBlank()) return null
+        val previous = connections[event.id]
+        val ended = event.closed || event.closedAt > 0
+        if (!ended && event.record == null) return null
+        if (previous != null && (!ended || previous.ended)) return null
+        val route = event.record?.let(ConnectionRouteLog::format)?.take(2800)
+            ?: previous?.route ?: "目标及路由：核心未提供（无法补全）"
+        val createdAt = event.createdAt.takeIf { it > 0 } ?: previous?.createdAt ?: 0
+        // Ended IDs retain only a small tombstone; their route cannot be needed again.
+        connections[event.id] = Seen(ended, if (ended) "" else route, createdAt)
+        if (connections.size > capacity) connections.entries.iterator().run { next(); remove() }
+        return ConnectionRouteMessage(
+            timestamp = if (ended) event.closedAt.takeIf { it > 0 } ?: now else createdAt.takeIf { it > 0 } ?: now,
+            message = buildString {
+                append(route)
+                append("\n会话：").append(sessionId).append("；连接：").append(ConnectionRouteLog.diagnosticId(event.id))
+                append("\n状态：")
+                when {
+                    ended && event.snapshot -> append("已结束（历史快照）")
+                    ended -> append("已结束（核心事件）")
+                    event.snapshot -> append("活跃连接快照（未确认拨号成功）")
+                    else -> append("已记录路由（未确认拨号成功）")
+                }
+                append("\n核心计数：上行 ").append(byteCount(event.uplinkTotal))
+                append("；下行 ").append(byteCount(event.downlinkTotal))
+                if (ended) {
+                    append("；历时 ")
+                    if (createdAt > 0 && event.closedAt >= createdAt) append(event.closedAt - createdAt).append(" ms")
+                    else append("未知")
+                    append("\n结束原因：核心连接 API 未提供；收发计数不等于业务成功，可结合 CORE 错误日志判断。")
+                }
+            }
+        )
     }
 
     @Synchronized
-    fun clear() = ids.clear()
+    fun clear() {
+        connections.clear()
+        sessionId = newSessionId()
+    }
+
+    private fun byteCount(value: Long?): String = value?.takeIf { it >= 0 }?.let { "$it B" } ?: "未知"
+    private fun newSessionId(): String = UUID.randomUUID().toString().replace("-", "").take(16)
+}
+
+/** sing-box 1.14 log levels: panic=0, fatal=1, error=2, warn=3, info=4, debug=5, trace=6. */
+internal object CoreDiagnosticLog {
+    fun format(level: Int, raw: String, sessionId: String): String? {
+        val label = when (level) { 0 -> "PANIC"; 1 -> "FATAL"; 2 -> "ERROR"; 3 -> "WARN"; else -> return null }
+        val safeMessage = SecretRedactor.redact(raw).take(3500).trim()
+        if (safeMessage.isEmpty()) return null
+        return "[$label] $safeMessage\n会话：$sessionId；时间为接收时间，可能含核心缓冲补录；未与连接 ID 强行关联。"
+    }
 }

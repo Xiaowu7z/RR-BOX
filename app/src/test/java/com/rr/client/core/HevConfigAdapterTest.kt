@@ -4,6 +4,7 @@ import com.google.gson.JsonParser
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.PerAppPolicyResolver
+import com.rr.client.vpn.HevTunnelConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,7 +39,7 @@ class HevConfigAdapterTest {
     }
 
     @Test
-    fun hevReplacesOnlyTunInboundWithLoopbackSocks() {
+    fun hevReplacesTunWithSocksAndAddsOnlyItsInternalResolverRule() {
         val source = JsonParser.parseString(stable(PerAppPolicyResolver.MODE_ALL)).asJsonObject
         val runtime = HevConfigAdapter.adapt(source.toString())
         val adapted = JsonParser.parseString(runtime.configJson).asJsonObject
@@ -51,7 +52,30 @@ class HevConfigAdapterTest {
 
         assertEquals(source.get("outbounds"), adapted.get("outbounds"))
         assertEquals(source.get("dns"), adapted.get("dns"))
-        assertEquals(source.get("route"), adapted.get("route"))
+        val route = adapted.getAsJsonObject("route").deepCopy()
+        val resolver = route.getAsJsonArray("rules").remove(0).asJsonObject
+        assertEquals("hijack-dns", resolver.get("action").asString)
+        assertEquals(listOf(HevConfigAdapter.SOCKS_TAG), resolver.getAsJsonArray("inbound").map { it.asString })
+        assertEquals(listOf("${HevTunnelConfig.DNS_ADDRESS}/32"), resolver.getAsJsonArray("ip_cidr").map { it.asString })
+        assertEquals(53, resolver.get("port").asInt)
+        assertEquals(listOf("tcp", "udp"), resolver.getAsJsonArray("network").map { it.asString })
+        assertEquals(source.get("route"), route)
+    }
+
+    @Test
+    fun resolverWorksWithoutSmartRoutingDnsInterceptionOrSniffing() {
+        val node = node()
+        val source = JsonParser.parseString(ConfigBuilder.buildSingBoxConfig(
+            selectedNode = node, allNodes = listOf(node), appRoutes = emptyList(),
+            smartRouting = false, enableDnsRules = false, fastForwarding = true
+        )).asJsonObject
+        assertTrue(source.getAsJsonObject("route").getAsJsonArray("rules").isEmpty)
+        val runtime = JsonParser.parseString(HevConfigAdapter.adapt(source.toString()).configJson).asJsonObject
+        val rules = runtime.getAsJsonObject("route").getAsJsonArray("rules")
+        assertEquals(1, rules.size())
+        assertEquals("hijack-dns", rules[0].asJsonObject.get("action").asString)
+        assertEquals(source.get("dns"), runtime.get("dns"))
+        assertEquals(source.get("outbounds"), runtime.get("outbounds"))
     }
 
     @Test

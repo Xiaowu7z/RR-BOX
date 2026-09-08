@@ -59,7 +59,7 @@ class HevVpnEngine(
                 .setMtu(HevTunnelConfig.MTU)
                 .addAddress(HevTunnelConfig.IPV4_CLIENT, HevTunnelConfig.IPV4_PREFIX)
                 .addRoute("0.0.0.0", 0)
-                .addDnsServer(HevTunnelConfig.MAPPED_DNS)
+                .addDnsServer(HevTunnelConfig.DNS_ADDRESS)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
@@ -92,6 +92,7 @@ class HevVpnEngine(
                 )
             }
             onLog("HEV 高性能握手：SOCKS5 pipeline=true；tcp-fastopen=true（best-effort）")
+            onLog("HEV DNS：由 sing-box 统一解析真实地址；已停用临时合成地址映射")
             onLog("HEV native 极速数据面已启动：TUN → lwIP → SOCKS5 → sing-box")
             true
         }.getOrElse { error ->

@@ -41,6 +41,26 @@
         "vk",
         "steam"
       ]
+    },
+    {
+      "url": "https://www.sdo.com/public/js/home.js",
+      "reviewed": "2026-09-08",
+      "note": "Official Daoyu tool assets reference gskd.sdoprofile.com and pics.sdoprofile.com."
+    },
+    {
+      "url": "https://help.aliyun.com/zh/live/developer-reference/integrate-the-queen-sdk-for-wechat-mini-programs",
+      "reviewed": "2026-09-08",
+      "note": "Official Queen SDK request domain vpp-license-proxy.aliyuncs.com; exact hostname only."
+    },
+    {
+      "url": "https://rdap.apnic.net/ip/8.134.241.67",
+      "reviewed": "2026-09-08",
+      "note": "Aliyun/CN resource ownership, not verified physical server location."
+    },
+    {
+      "url": "https://stat.ripe.net/data/prefix-overview/data.json?resource=8.134.241.67",
+      "reviewed": "2026-09-08",
+      "note": "AS37963 announces the enclosing /23. Only three observed /32 hosts are policy exceptions, never the entire announced prefix."
     }
   ],
   "note": "Domain suffix coverage probes, including representative/synthetic subdomains. These are not captured application sessions or a complete endpoint inventory.",
@@ -268,6 +288,43 @@
         "notccb.com",
         "account.xiaomi.com.evil.invalid"
       ]
+    },
+    {
+      "name": "verified-mainland-service-endpoints",
+      "outbound": "direct",
+      "domains": [
+        "gskd.sdoprofile.com",
+        "pics.sdoprofile.com",
+        "vpp-license-proxy.aliyuncs.com"
+      ]
+    },
+    {
+      "name": "exact-service-endpoint-boundaries",
+      "outbound": "proxy",
+      "domains": [
+        "gskd.sdoprofile.com.evil.invalid",
+        "pics.sdoprofile.com.evil.invalid",
+        "other.sdoprofile.com",
+        "sub.pics.sdoprofile.com",
+        "customer.aliyuncs.com",
+        "sub.vpp-license-proxy.aliyuncs.com",
+        "vpp-license-proxy.aliyuncs.com.evil.invalid"
+      ]
     }
+  ],
+  "observed_mainland_ipv4_exceptions": [
+    "8.134.241.67",
+    "8.134.241.7",
+    "8.134.240.5"
+  ],
+  "observed_mainland_ipv4_boundaries": [
+    "8.134.241.66",
+    "8.134.241.68",
+    "8.134.241.6",
+    "8.134.241.8",
+    "8.134.240.4",
+    "8.134.240.6",
+    "8.132.237.147",
+    "8.153.65.227"
   ]
 }

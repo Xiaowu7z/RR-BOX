@@ -21,6 +21,19 @@ package com.rr.client.routing
 object DomesticRoutingPolicy {
     const val SOURCE_REVISION = "9ff2d61d76ce28edb513920a2727f222793041c0"
 
+    /**
+     * Narrow route exceptions observed in domestic Douyin/Fanqie/Hongguo traffic.
+     * Reviewed 2026-09-08: APNIC identifies Aliyun (CN); RIPE RIS identifies AS37963
+     * within 8.134.240.0/23. This is operator evidence, NOT verified physical location.
+     * Keep only the three observed /32s, after international domain/package policies;
+     * never expand this to the announced /23, its parent allocation, or all cloud IPs.
+     * https://rdap.apnic.net/ip/8.134.241.67
+     * https://stat.ripe.net/data/prefix-overview/data.json?resource=8.134.241.67
+     */
+    val observedMainlandIpv4Exceptions = listOf(
+        "8.134.241.67/32", "8.134.241.7/32", "8.134.240.5/32"
+    )
+
     enum class Destination { DIRECT, PROXY }
 
     data class DomainRule(
@@ -180,6 +193,20 @@ object DomesticRoutingPolicy {
             domains = listOf(
                 // data/xiaomi-iot identifies these actual account and domestic IoT endpoints.
                 "account.xiaomi.com", "cn-ha.mqtt.io.mi.com", "ha.api.io.mi.com"
+            )
+        ),
+        DomainRule(
+            id = "verified-mainland-service-endpoints",
+            destination = Destination.DIRECT,
+            suffixes = emptyList(),
+            domains = listOf(
+                // Reviewed 2026-09-08: Shengqu's official site references these Daoyu assets.
+                // https://www.sdo.com/ and https://www.sdo.com/public/js/home.js
+                // https://gskd.sdoprofile.com/sq_protocol/daoyu_service.html
+                "gskd.sdoprofile.com", "pics.sdoprofile.com",
+                // Aliyun Queen SDK's documented request endpoint, also observed in Xianyu.
+                // https://help.aliyun.com/zh/live/developer-reference/integrate-the-queen-sdk-for-wechat-mini-programs
+                "vpp-license-proxy.aliyuncs.com"
             )
         ),
         // Always available offline, even before/without a downloaded China domain list.

@@ -29,8 +29,10 @@ test "$certificate_sha256" = "fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16
 python3 scripts/collect_reports.py
 cp build-reports/SOURCE-AUDIT.json dist/SOURCE-AUDIT.json
 cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
+cp build-reports/HEV-DNS-REPORT.json dist/HEV-DNS-REPORT.json
+cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
-# RRBOX 1.0.0 Stable Build Report
+# RRBOX 1.0.0 Build Report
 
 - Source commit: $(git rev-parse HEAD)
 - Package: com.rr.client
@@ -42,7 +44,7 @@ cat > dist/BUILD-REPORT.md <<EOF
 - APK SHA-256: ${apk_sha256}
 - Signing certificate SHA-256: ${certificate_sha256}
 - System engine: sing-box system TUN stable baseline
-- HEV engine: native/lwIP + mapped DNS + SOCKS5 pipeline + best-effort client TFO
+- HEV engine: native/lwIP + unified real DNS + SOCKS5 pipeline + best-effort client TFO
 - Network continuity: event-driven physical path tracking + validated runtime recovery
 - Quick Settings: current persisted config checked before cache reuse
 - Routing: shared domestic DNS/route policy, WeChat / Douyin / TikTok separation

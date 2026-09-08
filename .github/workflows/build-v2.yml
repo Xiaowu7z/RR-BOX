@@ -99,6 +99,13 @@ jobs:
           go build -ldflags "-X github.com/sagernet/sing-box/constant.Version=${SING_BOX_TAG#v}" -o ../build-reports/sing-box-routing-check ./cmd/sing-box
       - name: Verify domestic and overseas routing with real core
         run: python3 scripts/verify-routing.py --sing-box build-reports/sing-box-routing-check --fixtures app/build/routing-fixtures --report build-reports/ROUTING-CORE-REPORT.json
+      - name: Verify HEV DNS and reverse mapping with real core
+        run: python3 scripts/verify-hev-dns.py --sing-box build-reports/sing-box-routing-check --fixtures app/build/hev-dns-fixtures --report build-reports/HEV-DNS-REPORT.json
+      - name: Verify native HEV DNS packet forwarding
+        run: |
+          test "$(git -C hev-socks5-tunnel rev-parse HEAD)" = "$HEV_COMMIT"
+          make -C hev-socks5-tunnel -j2 shared CFLAGS=-Wno-error=unused-result
+          python3 scripts/verify-hev-native-dns.py --hev-library hev-socks5-tunnel/bin/libhev-socks5-tunnel.so --fixtures app/build/hev-dns-fixtures --report build-reports/HEV-NATIVE-DNS-REPORT.json
       - name: Verify APK, signer continuity and test reports
         run: bash scripts/ci-verify-apk.sh
       - name: Upload signed build

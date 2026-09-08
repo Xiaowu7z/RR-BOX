@@ -425,6 +425,31 @@ def run_variant(binary, original, meta, cases, directory, report, observers, dns
             for kind, payload in (("http", f"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()), ("tls-client-hello", tls_hello(host))):
                 verify(f"{kind}-foreign-host-cn-ip", host, "proxy",
                        lambda p=payload: tcp_exchange(port, "223.5.5.5", 443, p).decode().strip(), "tiktok-priority-over-china-ip")
+        # Narrow observed-host exceptions work even when bundled SRS files are absent.
+        # Observers terminate these probes locally; none contacts the named addresses.
+        for host in cases["observed_mainland_ipv4_exceptions"]:
+            expected = "direct" if meta["smart"] else "proxy"
+            for transport in ("tcp", "udp"):
+                method = tcp_exchange if transport == "tcp" else udp_exchange
+                verify(f"{transport}-observed-ip-exception", host, expected,
+                       lambda h=host, m=method: m(port, h, 443, b"RRBOX endpoint probe").decode().strip(),
+                       "observed-mainland-host-only")
+            # A known overseas hostname at the same literal IP must still win.
+            for name in ("api.tiktokv.com", "chatgpt.com"):
+                for kind, payload in (("http", f"GET / HTTP/1.1\r\nHost: {name}\r\n\r\n".encode()),
+                                      ("tls-client-hello", tls_hello(name))):
+                    verify(f"{kind}-foreign-host-observed-ip", f"{name} [{host}]", "proxy",
+                           lambda h=host, p=payload: tcp_exchange(port, h, 443, p).decode().strip(),
+                           "international-priority-over-observed-ip")
+        # A maintained future China SRS may legitimately include these neighbors, so
+        # evaluate the hard-coded exception boundary in fallback/off configurations.
+        if meta["rules"] != "bundled":
+            for host in cases["observed_mainland_ipv4_boundaries"]:
+                for transport in ("tcp", "udp"):
+                    method = tcp_exchange if transport == "tcp" else udp_exchange
+                    verify(f"{transport}-observed-ip-boundary", host, "proxy",
+                           lambda h=host, m=method: m(port, h, 443, b"RRBOX boundary probe").decode().strip(),
+                           "unobserved-host-stays-default")
         # Query through the same native inbound and production hijack-DNS action.
         # DNS observations happen after route cases, avoiding reverse-cache effects
         # from intentionally reused fixture DNS answers on the route-only probes.

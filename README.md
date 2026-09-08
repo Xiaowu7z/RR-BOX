@@ -41,7 +41,7 @@ System: Android TUN → sing-box system stack → routing / DNS / outbound
 HEV:    Android TUN → HEV native/lwIP → loopback SOCKS5 → sing-box outbound
 ```
 
-保留 1.0 封板前的同机 A/B 记录：相同设备与节点，每个引擎 3 轮固定 2 MiB HTTPS，以 3 次有效运行的 run-level 中位数汇总。**这是历史样本，不是本次代码检查重新测得的性能。**
+保留 1.0 封板前使用旧 mapped DNS 的同机 A/B 记录：相同设备与节点，每个引擎 3 轮固定 2 MiB HTTPS，以 3 次有效运行的 run-level 中位数汇总。**这是历史样本，不代表当前真实 DNS 修复构建的性能。**
 
 | 指标 | System | HEV |
 |---|---:|---:|

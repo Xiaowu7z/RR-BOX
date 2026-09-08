@@ -45,7 +45,6 @@ import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
-import com.rr.client.vpn.HevTunnelConfig
 import com.rr.client.vpn.RRVpnService
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -237,7 +236,7 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "HEV 模式使用 ${HevTunnelConfig.MTU} MTU、mapped DNS、SOCKS5 pipeline 与 best-effort TCP Fast Open。它是正式的高性能可选引擎；System 稳定模式仍为默认并始终保留。",
+                "HEV 与 System 使用同一套 DNS 分流并返回真实地址，避免切换引擎后遗留虚拟地址。HEV 保留高性能转发参数，System 稳定模式仍为默认。",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )

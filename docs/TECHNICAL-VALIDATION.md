@@ -12,12 +12,21 @@
 ### HEV Native
 - Android VpnService 建立 TUN，HEV JNI 在 RRBOX 进程内启动 lwIP 数据面。
 - TUN → HEV/lwIP → loopback SOCKS5 → sing-box outbound。
-- MTU 8500，mapped DNS，SOCKS5 pipeline，best-effort client TCP Fast Open。
+- MTU 8500，SOCKS5 pipeline，best-effort client TCP Fast Open。
+- 当前修复构建停用 HEV mapdns。VPN 的内部 DNS 请求经本机 SOCKS 交给 sing-box，使用与 System 相同的域名解析策略并返回真实地址；不再生成 `100.64/10` 合成映射。
 - sing-box 远端 socket 经 VpnService protect，避免 VPN 自环。
+
+### DNS 修复验收
+
+- `HevDnsFixtureExportTest` 导出实际生产配置，覆盖智能分流、智能 DNS、轻量模式的八种组合。
+- `verify-hev-dns.py` 使用固定 sing-box 核心与本机 DNS / 出口观察器，检查内部 DNS 的 UDP / TCP 收发、真实 IP 的域名反向映射分流，以及其他入站、端口和共享地址不被误截。
+- `verify-hev-native-dns.py` 加载同一固定源码的 HEV 主机库，经外部 TUN 文件描述符注入 IPv4 TCP / UDP 包，检查原始 DNS 查询及 A / AAAA 答复在 native HEV 和本机 SOCKS 之间完整收发；这不等于支持 IPv6 TUN。
+- `verify-routing.py` 检查三个新增精确服务域名和三个 `/32`，并验证同 IP 上的明确国际域名仍优先代理。
+- 自动检查的结果以对应构建报告为准；手机上的应用缓存、真实网络切换、Android UID 与端到端性能仍需实机验收。
 
 ## A/B 实机结果
 
-固定同一设备、网络、节点和 2 MiB HTTPS 负载。每个引擎每轮 3 次请求，并以 sing-box session traffic 交叉验证；HEV 额外验证 native RX。
+以下是使用旧 mapped DNS 配置时登记的历史测量，不代表当前真实 DNS 修复构建的性能。固定同一设备、网络、节点和 2 MiB HTTPS 负载。每个引擎每轮 3 次请求，并以 sing-box session traffic 交叉验证；HEV 额外验证 native RX。
 
 三次有效运行的 run-level 中位数：
 

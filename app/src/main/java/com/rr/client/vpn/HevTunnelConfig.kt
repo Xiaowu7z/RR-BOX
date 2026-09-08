@@ -4,15 +4,18 @@ package com.rr.client.vpn
  * HEV native data-plane profile.
  *
  * Real-device A/B testing through v2.8 established the production HEV profile used by RRBOX:
- * 8500-byte virtual TUN MTU, mapped DNS, enlarged native buffers, SOCKS5 handshake pipelining and
+ * 8500-byte virtual TUN MTU, enlarged native buffers, SOCKS5 handshake pipelining and
  * best-effort client TCP Fast Open. The pipeline/TFO pair reduced HEV cold TLS/TTFB variance while
  * preserving its throughput and CPU advantage in the validated A/B path.
+ * DNS now traverses the same bridge to sing-box and returns real upstream addresses. Native
+ * mapdns is deliberately disabled: its volatile address map cannot survive engine changes.
  */
 object HevTunnelConfig {
     const val MTU = 8500
     const val IPV4_CLIENT = "198.18.0.1"
     const val IPV4_PREFIX = 30
-    const val MAPPED_DNS = "198.18.0.2"
+    // A resolver endpoint only, never an address pool. HevConfigAdapter handles this /32:53.
+    const val DNS_ADDRESS = "198.18.0.2"
     const val SOCKS_HOST = "127.0.0.1"
 
     fun build(socksPort: Int): String = buildString {
@@ -32,16 +35,8 @@ object HevTunnelConfig {
         appendLine("  tcp-fastopen: true")
         appendLine()
 
-        // HEV mapped DNS replies with synthetic A records and converts those destinations back
-        // to domain-form SOCKS5 requests. That preserves sing-box domain routing without an
-        // extra DNS round trip in the TUN -> SOCKS bridge.
-        appendLine("mapdns:")
-        appendLine("  address: $MAPPED_DNS")
-        appendLine("  port: 53")
-        appendLine("  network: 100.64.0.0")
-        appendLine("  netmask: 255.192.0.0")
-        appendLine("  cache-size: 16384")
-        appendLine()
+        // Omitted mapdns uses upstream HEV's default cache-size=0. UDP and TCP DNS follow
+        // the ordinary SOCKS path; no new synthetic 100.64 addresses are issued or reused.
 
         appendLine("misc:")
         appendLine("  task-stack-size: 86016")
