@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -58,6 +59,7 @@ import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.AppManager
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
+import com.rr.client.routing.AutoProxySelectionPolicy
 import com.rr.client.security.PinSecurity
 import com.rr.client.storage.PreferencesManager
 import com.rr.client.subscription.SubscriptionFetcher
@@ -218,6 +220,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MainApp() {
+        val routingUiScope = rememberCoroutineScope()
         var selectedTab by rememberSaveable { mutableIntStateOf(0) }
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
         val isVpnStarting by RRVpnService.isStarting.collectAsState()
@@ -243,10 +246,13 @@ class MainActivity : ComponentActivity() {
         var fastForwarding by remember { mutableStateOf(false) }
         var perAppMode by remember { mutableStateOf(PerAppPolicyResolver.MODE_ALL) }
         var proxySelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
+        var autoProxyExcludedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
         var bypassSelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
         var refreshingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
         var addingProfile by remember { mutableStateOf(false) }
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
+        var routingSelectionReady by remember { mutableStateOf(false) }
+        var selectingAutomatically by remember { mutableStateOf(false) }
         var latencyStates by remember { mutableStateOf<Map<String, NodeLatencyState>>(emptyMap()) }
         var editingNode by remember { mutableStateOf<ProxyNode?>(null) }
         var applyingRouting by remember { mutableStateOf(false) }
@@ -328,6 +334,7 @@ class MainActivity : ComponentActivity() {
             fastForwarding = runCatching { prefs.fastForwarding.first() }.getOrDefault(false)
             perAppMode = runCatching { prefs.perAppMode.first() }.getOrDefault(PerAppPolicyResolver.MODE_ALL)
             proxySelectedPackages = runCatching { prefs.proxySelectedAppPackages.first() }.getOrDefault(emptySet())
+            autoProxyExcludedPackages = runCatching { prefs.autoProxyExcludedPackages.first() }.getOrDefault(emptySet())
             bypassSelectedPackages = runCatching { prefs.bypassSelectedAppPackages.first() }.getOrDefault(emptySet())
 
             val nodesNow = loadedProfiles.flatMap { it.nodes }
@@ -338,8 +345,13 @@ class MainActivity : ComponentActivity() {
             if (resolved != null) prefs.setSelectedNodeId(resolved)
 
             val appMgr = AppManager(this@MainActivity)
-            apps = withContext(Dispatchers.IO) { appMgr.getInstalledApps(includeSystem = false) }
-            withContext(Dispatchers.IO) { ChinaRuleSetManager.ensureBundled(this@MainActivity) }
+            apps = withContext(Dispatchers.IO) {
+                val groups = ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrNull()
+                    ?.policy?.proxyPackageGroups.orEmpty()
+                appMgr.getInstalledApps(includeSystem = true, visiblePackages = proxySelectedPackages + bypassSelectedPackages +
+                    AutoProxySelectionPolicy.recommendedPackages(groups))
+            }
+            routingSelectionReady = true
             db.profileDao().observeProfiles().collect { entities ->
                 refreshFromProfiles(entities.map { SubProfile.fromEntity(it) })
             }
@@ -800,11 +812,53 @@ class MainActivity : ComponentActivity() {
                             perAppMode = perAppMode,
                             selectedPackages = activePackages,
                             applyingRouting = applyingRouting,
+                            loadingApps = !routingSelectionReady,
+                            selectingAutomatically = selectingAutomatically,
                             onModeChanged = { mode ->
                                 if (mode == perAppMode) return@AppRoutingScreen
                                 perAppMode = mode
                                 lifecycleScope.launch { prefs.setPerAppMode(mode) }
                                 scheduleRoutingRestart(mode, packagesFor(mode), smartRouting)
+                            },
+                            onAutoSelect = {
+                                if (perAppMode != PerAppPolicyResolver.MODE_ALLOW_LIST ||
+                                    !routingSelectionReady || applyingRouting || selectingAutomatically) return@AppRoutingScreen
+                                selectingAutomatically = true
+                                routingUiScope.launch {
+                                    try {
+                                        val (installedApps, groups) = withContext(Dispatchers.IO) {
+                                            val policy = ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrThrow().policy
+                                            val visible = proxySelectedPackages + bypassSelectedPackages +
+                                                AutoProxySelectionPolicy.recommendedPackages(policy.proxyPackageGroups)
+                                            AppManager(this@MainActivity).getInstalledApps(includeSystem = true, visiblePackages = visible) to policy.proxyPackageGroups
+                                        }
+                                        val previous = proxySelectedPackages
+                                        val updated = AutoProxySelectionPolicy.select(
+                                            installedPackages = installedApps.map { it.packageName }.toSet(),
+                                            currentSelection = previous,
+                                            excludedPackages = autoProxyExcludedPackages,
+                                            extraPackageGroups = groups
+                                        )
+                                        // Persist the entire batch before one runtime update; never loop through app switches.
+                                        prefs.setProxyAppSelection(updated, autoProxyExcludedPackages)
+                                        apps = installedApps
+                                        proxySelectedPackages = updated
+                                        if (updated != previous) {
+                                            scheduleRoutingRestart(PerAppPolicyResolver.MODE_ALLOW_LIST, updated, smartRouting)
+                                        }
+                                        val added = (updated - previous).size
+                                        toast(when {
+                                            updated.isEmpty() -> "没有可自动选择的应用，请手动勾选需要代理的应用"
+                                            added == 0 -> "名单已更新，保留你的手动选择，共 ${updated.size} 个应用"
+                                            else -> "自动新增 $added 个应用，共选择 ${updated.size} 个，可继续手动调整"
+                                        })
+                                    } catch (error: Exception) {
+                                        if (error is CancellationException) throw error
+                                        toast("自动选择失败，已保留原名单：${error.message ?: error.javaClass.simpleName}")
+                                    } finally {
+                                        selectingAutomatically = false
+                                    }
+                                }
                             },
                             onAppSelectionChanged = { packageName, selected ->
                                 when (perAppMode) {
@@ -812,9 +866,17 @@ class MainActivity : ComponentActivity() {
                                         val updated = proxySelectedPackages.toMutableSet().apply {
                                             if (selected) add(packageName) else remove(packageName)
                                         }.toSet()
+                                        val exclusions = autoProxyExcludedPackages.toMutableSet().apply {
+                                            if (selected) remove(packageName) else add(packageName)
+                                        }.toSet()
                                         proxySelectedPackages = updated
-                                        lifecycleScope.launch { prefs.setProxySelectedAppPackages(updated) }
-                                        scheduleRoutingRestart(perAppMode, updated, smartRouting)
+                                        autoProxyExcludedPackages = exclusions
+                                        lifecycleScope.launch {
+                                            prefs.setProxyAppSelection(updated, exclusions)
+                                            if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST && proxySelectedPackages == updated) {
+                                                scheduleRoutingRestart(PerAppPolicyResolver.MODE_ALLOW_LIST, updated, smartRouting)
+                                            }
+                                        }
                                     }
                                     PerAppPolicyResolver.MODE_DISALLOW_LIST -> {
                                         val updated = bypassSelectedPackages.toMutableSet().apply {

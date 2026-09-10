@@ -462,6 +462,24 @@ def run_variant(binary, original, meta, cases, directory, report, observers, dns
                                       ("tls-client-hello", tls_hello(host))):
                     verify(f"{kind}-bigo-cn-ip", host, expected,
                            lambda p=payload: tcp_exchange(port, "223.5.5.5", 443, p).decode().strip(), group)
+        # ChatGPT's shared authentication/CDN providers must follow the same remote
+        # policy as its primary host even when an old answer is classified as China.
+        # Real TLS ClientHello sniffing covers the no-UID HEV boundary; neighboring
+        # tenants remain on normal IP rules. This does not decrypt TLS certificates.
+        for group, hosts in (("chatgpt-priority-over-china-ip", cases["chatgpt_priority_hosts"]),
+                             ("chatgpt-exact-domain-boundaries", cases["chatgpt_boundary_hosts"])):
+            expected = "direct" if group.endswith("boundaries") and meta["smart"] and meta["rules"] == "bundled" else "proxy"
+            for host in hosts:
+                for kind, payload in (("http", f"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()),
+                                      ("tls-client-hello", tls_hello(host))):
+                    verify(f"{kind}-chatgpt-cn-ip", host, expected,
+                           lambda p=payload: tcp_exchange(port, "223.5.5.5", 443, p).decode().strip(), group)
+        websocket = (b"GET / HTTP/1.1\r\nHost: ws.chatgpt.com\r\nConnection: Upgrade\r\n"
+                     b"Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"
+                     b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+        verify("websocket-upgrade-route", "ws.chatgpt.com", "proxy",
+               lambda: tcp_exchange(port, "223.5.5.5", 443, websocket).decode().strip(),
+               "chatgpt-websocket-routing-only")
         # Narrow observed-host exceptions work even when bundled SRS files are absent.
         # Observers terminate these probes locally; none contacts the named addresses.
         for host in cases["observed_mainland_ipv4_exceptions"]:

@@ -39,13 +39,13 @@ for name in paths:
                 dest = path.parent / target.split('#')[0]
                 assert dest.exists(), f'{name}: missing local documentation target {target}'
 version = (root / 'app/build.gradle.kts').read_text()
-assert 'versionName = "1.0.2"' in version and 'versionCode = 102' in version
+assert 'versionName = "1.0.3"' in version and 'versionCode = 103' in version
 obtainium = json.loads((root / 'obtainium.json').read_text())
 assert obtainium['url'] == 'https://github.com/Xiaowu7z/RR-BOX'
 settings = json.loads(obtainium['additionalSettings'])
 assert settings['includePrereleases'] is False
-assert re.search(settings['apkFilterRegEx'], 'RRBOX-1.0.2-arm64-v8a.apk')
-assert not re.search(settings['apkFilterRegEx'], 'RRBOX-1.0.2-debug.apk')
+assert re.search(settings['apkFilterRegEx'], 'RRBOX-1.0.3-arm64-v8a.apk')
+assert not re.search(settings['apkFilterRegEx'], 'RRBOX-1.0.3-debug.apk')
 report = {
     'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
     'tracked_and_local_files': len(paths),

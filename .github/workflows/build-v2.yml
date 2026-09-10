@@ -1,8 +1,8 @@
-name: RRBOX 1.0.2 Build & Release (arm64-v8a)
+name: RRBOX 1.0.3 Build & Release (arm64-v8a)
 
 on:
   push:
-    branches: ["main", "dev", "audit/stable-1.0.0", "audit/stable-1.0.1", "audit/stable-1.0.2", "feat/domestic-routing-wechat-douyin"]
+    branches: ["main", "dev", "audit/stable-1.0.0", "audit/stable-1.0.1", "audit/stable-1.0.3", "feat/domestic-routing-wechat-douyin"]
   workflow_dispatch:
 
 permissions:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "102"
-  VERSION_NAME: "1.0.2"
-  OUTPUT_APK_NAME: RRBOX-1.0.2-arm64-v8a.apk
+  VERSION_CODE: "103"
+  VERSION_NAME: "1.0.3"
+  OUTPUT_APK_NAME: RRBOX-1.0.3-arm64-v8a.apk
 
 jobs:
   build:
-    name: Test, lint and sign RRBOX 1.0.2
+    name: Test, lint and sign RRBOX 1.0.3
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -171,36 +171,36 @@ jobs:
       - name: Upload signed build
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-1.0.2-arm64-v8a
+          name: RRBOX-1.0.3-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
       - name: Create stable tag at tested source without moving prior releases
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.2') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.3') }}"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.2" --jq .object.sha > "$RUNNER_TEMP/rrbox-stable-tag-sha"; then
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.3" --jq .object.sha > "$RUNNER_TEMP/rrbox-stable-tag-sha"; then
             test "$(cat "$RUNNER_TEMP/rrbox-stable-tag-sha")" = "$GITHUB_SHA"
           else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v1.0.2" -f sha="$GITHUB_SHA"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v1.0.3" -f sha="$GITHUB_SHA"
           fi
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.2" --jq .object.sha)" = "$GITHUB_SHA"
-      - name: Publish audited RRBOX 1.0.2 stable release
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.2') }}"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.3" --jq .object.sha)" = "$GITHUB_SHA"
+      - name: Publish audited RRBOX 1.0.3 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.3') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.2
+          tag_name: v1.0.3
           target_commitish: ${{ github.sha }}
-          name: RRBOX 1.0.2 正式版
+          name: RRBOX 1.0.3 正式版
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body_path: dist/RELEASE-NOTES.md
           files: |
-            dist/RRBOX-1.0.2-arm64-v8a.apk
+            dist/RRBOX-1.0.3-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
@@ -216,7 +216,7 @@ jobs:
             dist/ROOT-TCP-REPORT.json
             dist/obtainium.json
       - name: Verify published APK digest and update channel
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.2') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.3') }}"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -227,7 +227,7 @@ jobs:
             if python3 - <<'PY'
           import json, os, pathlib
           release=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'latest.json').read_text())
-          assert release['tag_name']=='v1.0.2' and not release['draft'] and not release['prerelease']
+          assert release['tag_name']=='v1.0.3' and not release['draft'] and not release['prerelease']
           assets=[a for a in release['assets'] if a['name']==os.environ['OUTPUT_APK_NAME']]
           assert len(assets)==1 and assets[0]['state']=='uploaded'
           digest=pathlib.Path('dist/SHA256SUMS.txt').read_text().split()[0]

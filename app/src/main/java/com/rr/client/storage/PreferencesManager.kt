@@ -33,6 +33,7 @@ class PreferencesManager(private val context: Context) {
         // Legacy 0.1.6/0.1.7 shared selection. Keep only as a migration seed.
         val PER_APP_SELECTED_PACKAGES = stringSetPreferencesKey("per_app_selected_packages")
         val PROXY_SELECTED_PACKAGES = stringSetPreferencesKey("proxy_selected_packages")
+        val AUTO_PROXY_EXCLUDED_PACKAGES = stringSetPreferencesKey("auto_proxy_excluded_packages")
         val BYPASS_SELECTED_PACKAGES = stringSetPreferencesKey("bypass_selected_packages")
 
         val NODE_OVERRIDES_JSON = stringPreferencesKey("node_overrides_json")
@@ -75,6 +76,10 @@ class PreferencesManager(private val context: Context) {
         preferences[BYPASS_SELECTED_PACKAGES]?.toSet()
             ?: preferences[PER_APP_SELECTED_PACKAGES]?.toSet()
             ?: emptySet()
+    }
+
+    val autoProxyExcludedPackages: Flow<Set<String>> = context.dataStore.data.map {
+        it[AUTO_PROXY_EXCLUDED_PACKAGES]?.toSet() ?: emptySet()
     }
 
     val backgroundGuideShown: Flow<Boolean> = context.dataStore.data.map {
@@ -141,6 +146,14 @@ class PreferencesManager(private val context: Context) {
         setPackageSet(PROXY_SELECTED_PACKAGES, packages)
     }
 
+    /** Save the selection and explicit opt-outs together, before rebuilding the tunnel. */
+    suspend fun setProxyAppSelection(packages: Set<String>, autoExcludedPackages: Set<String>) {
+        context.dataStore.edit {
+            it[PROXY_SELECTED_PACKAGES] = packages.map(String::trim).filter(String::isNotEmpty).toSet()
+            it[AUTO_PROXY_EXCLUDED_PACKAGES] = autoExcludedPackages.map(String::trim).filter(String::isNotEmpty).toSet()
+        }
+    }
+
     suspend fun setBypassSelectedAppPackages(packages: Set<String>) {
         setPackageSet(BYPASS_SELECTED_PACKAGES, packages)
     }
@@ -148,7 +161,8 @@ class PreferencesManager(private val context: Context) {
     private suspend fun setPackageSet(key: androidx.datastore.preferences.core.Preferences.Key<Set<String>>, packages: Set<String>) {
         val cleaned = packages.asSequence().map(String::trim).filter(String::isNotEmpty).toSet()
         context.dataStore.edit { preferences ->
-            if (cleaned.isEmpty()) preferences.remove(key) else preferences[key] = cleaned
+            // An explicit empty list must not revive the legacy migration seed on restart.
+            preferences[key] = cleaned
         }
     }
 

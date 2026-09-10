@@ -96,6 +96,11 @@ object HevConfigAdapter {
         if (include.isNotEmpty() && exclude.isNotEmpty()) {
             throw IllegalArgumentException("稳定配置同时包含 include_package 与 exclude_package")
         }
+        // An explicit allow-list must remain an allow-list after excluding the bridge
+        // app. Never broaden an empty / self-only selection into all-app interception.
+        require(!tun.has("include_package") || include.isNotEmpty()) {
+            "HEV 仅选中代理模式至少需要选择 1 个其他应用"
+        }
 
         return when {
             include.isNotEmpty() -> ResolvedPerAppPolicy(allowedPackages = include)

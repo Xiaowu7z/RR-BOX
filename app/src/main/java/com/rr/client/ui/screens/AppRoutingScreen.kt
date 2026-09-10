@@ -48,10 +48,14 @@ fun AppRoutingScreen(
     perAppMode: String,
     selectedPackages: Set<String>,
     applyingRouting: Boolean,
+    loadingApps: Boolean,
+    selectingAutomatically: Boolean,
     onModeChanged: (String) -> Unit,
+    onAutoSelect: () -> Unit,
     onAppSelectionChanged: (String, Boolean) -> Unit
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    val busy = applyingRouting || loadingApps || selectingAutomatically
 
     val sortedApps = remember(apps, selectedPackages) {
         apps.sortedWith(
@@ -92,7 +96,7 @@ fun AppRoutingScreen(
                 val selected = perAppMode == mode
                 OutlinedButton(
                     onClick = { onModeChanged(mode) },
-                    enabled = !applyingRouting,
+                    enabled = !busy,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.outlinedButtonColors(
@@ -120,7 +124,12 @@ fun AppRoutingScreen(
         // Fixed-height status row: text changes, layout does not jump.
         Spacer(Modifier.height(4.dp))
         Text(
-            text = if (applyingRouting) "正在应用配置并重启 VPN…" else "切换模式时，已连接的 VPN 会自动重建一次。",
+            text = when {
+                loadingApps -> "正在读取应用和已保存的选择…"
+                selectingAutomatically -> "正在自动选择已安装的应用…"
+                applyingRouting -> "正在应用分流配置…"
+                else -> "修改选择后自动保存，已连接时会重新应用一次。"
+            },
             style = MaterialTheme.typography.labelMedium,
             color = if (applyingRouting) CyanPrimary else TextSecondary
         )
@@ -144,6 +153,24 @@ fun AppRoutingScreen(
                 }
             }
         } else {
+            if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onAutoSelect,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanPrimary),
+                    border = BorderStroke(1.dp, CardBorder)
+                ) {
+                    Text(if (selectingAutomatically) "正在选择…" else "自动选择")
+                }
+                Text(
+                    "一键勾选已安装的常用海外应用及谷歌服务，保留手动添加和取消。新装应用后可再点一次；浏览器按需手动勾选。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "已选择 ${selectedPackages.size} 个应用 · 已选应用自动置顶",
@@ -200,7 +227,7 @@ fun AppRoutingScreen(
                             }
                             Switch(
                                 checked = checked,
-                                enabled = !applyingRouting,
+                                enabled = !busy,
                                 onCheckedChange = { enabled -> onAppSelectionChanged(app.packageName, enabled) },
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = DarkBackground,

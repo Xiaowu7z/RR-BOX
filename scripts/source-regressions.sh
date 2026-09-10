@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Narrow source guards complement real unit tests and Lint; they are not runtime tests.
 set -euo pipefail
-grep -q 'versionCode = 102' app/build.gradle.kts
-grep -q 'versionName = "1.0.2"' app/build.gradle.kts
+grep -q 'versionCode = 103' app/build.gradle.kts
+grep -q 'versionName = "1.0.3"' app/build.gradle.kts
 grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
 grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
 grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt

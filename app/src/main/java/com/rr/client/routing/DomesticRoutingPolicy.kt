@@ -68,6 +68,7 @@ object DomesticRoutingPolicy {
                 "roovza.launches.appsflyersdk.com", "roovza.skadsdk.appsflyersdk.com"
             )
         ),
+        ChatGptRoutingPolicy.domainRule,
         DomainRule(
             id = "international-services",
             destination = Destination.PROXY,
@@ -81,8 +82,7 @@ object DomesticRoutingPolicy {
                 "ytimg.com", "ggpht.com", "telegram.org", "telegram.me", "telegram.dog",
                 "telegram-cdn.org", "cdn-telegram.org", "t.me", "telegra.ph", "telesco.pe",
                 "x.com", "twitter.com", "t.co", "twimg.com", "tweetdeck.com",
-                "chat.com", "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com",
-                "sora.com", "coze.com", "marscode.com", "trae.ai",
+                "chat.com", "sora.com", "coze.com", "marscode.com", "trae.ai",
                 // International social / messaging / developer services.
                 "facebook.com", "facebook.net", "fb.com", "fb.me", "fb.watch", "fbcdn.net",
                 "fbsbx.com", "instagram.com", "cdninstagram.com", "ig.me", "igcdn.com",

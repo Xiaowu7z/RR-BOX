@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "ruleVersion": 2026090803,
-  "publishedAt": "2026-09-08T14:47:47Z",
-  "description": "分流规则：保留国内直连及海外代理，明确 DeepSeek API 直连。JARVIS 应用包名直连需升级 RRBOX 1.0.2。",
+  "ruleVersion": 2026091101,
+  "publishedAt": "2026-09-11T00:00:00Z",
+  "description": "分流规则：补全 ChatGPT 官方登录、验证、资源和 WebSocket 域名，统一代理及加密 DNS；增加 ChatGPT 应用公网代理保护，保留国内直连、JARVIS 及 X/微信恢复策略。",
   "domainRules": [
     {
       "id": "tiktok-international",
@@ -56,6 +56,43 @@
       ]
     },
     {
+      "id": "chatgpt-services",
+      "destination": "PROXY",
+      "suffixes": [
+        "chatgpt.com",
+        "openai.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "oaistatsig.com",
+        "ct.sendgrid.net",
+        "intercom.io",
+        "intercomcdn.com"
+      ],
+      "domains": [
+        "android.chat.openai.com",
+        "auth0.openai.com",
+        "cdn.openaimerge.com",
+        "cdn.workos.com",
+        "challenges.cloudflare.com",
+        "chat.openai.com",
+        "desktop.chat.openai.com",
+        "forwarder.workos.com",
+        "humb.apple.com",
+        "images.workoscdn.com",
+        "ios.chat.openai.com",
+        "js.intercomcdn.com",
+        "js.stripe.com",
+        "o207216.ingest.sentry.io",
+        "o33249.ingest.sentry.io",
+        "rum.browser-intake-datadoghq.com",
+        "setup.auth.openai.com",
+        "setup.workos.com",
+        "tcr9i.chat.openai.com",
+        "workos.imgix.net",
+        "ws.chatgpt.com"
+      ]
+    },
+    {
       "id": "international-services",
       "destination": "PROXY",
       "suffixes": [
@@ -97,10 +134,6 @@
         "twimg.com",
         "tweetdeck.com",
         "chat.com",
-        "chatgpt.com",
-        "openai.com",
-        "oaistatic.com",
-        "oaiusercontent.com",
         "sora.com",
         "coze.com",
         "marscode.com",
@@ -477,6 +510,9 @@
     ],
     [
       "sg.bigo.live"
+    ],
+    [
+      "com.openai.chatgpt"
     ]
   ],
   "directIpExceptions": [

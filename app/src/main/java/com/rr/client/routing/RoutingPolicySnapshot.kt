@@ -51,7 +51,7 @@ class RoutingPolicySnapshot private constructor(
     companion object {
         const val SCHEMA_VERSION = 1
         const val MAX_BYTES = 1024 * 1024
-        const val BUNDLED_RULE_VERSION = 2026090802L
+        const val BUNDLED_RULE_VERSION = 2026091101L
         private const val MAX_LIST_ITEMS = 4096
         private const val MAX_TOTAL_ITEMS = 16000
         private val rootKeys = setOf("schemaVersion", "ruleVersion", "publishedAt", "description",
@@ -69,13 +69,16 @@ class RoutingPolicySnapshot private constructor(
          */
         private val fallback by lazy {
             RoutingPolicySnapshot(
-                SCHEMA_VERSION, BUNDLED_RULE_VERSION, "2026-09-08T08:30:00Z",
-                "分流规则：保留国内直连及海外代理，新增 X 已观察主机的旧地址恢复范围。地址恢复需要支持此功能的 RRBOX。",
+                SCHEMA_VERSION, BUNDLED_RULE_VERSION, "2026-09-11T00:00:00Z",
+                "分流规则：补全 ChatGPT 官方登录、验证、资源和 WebSocket 域名，统一代理及加密 DNS；增加 ChatGPT 应用公网代理保护，保留国内直连、JARVIS 及 X/微信恢复策略。",
                 DomesticRoutingPolicy.domainRules.toMutableList().apply {
                     add(indexOfFirst { it.destination == DomesticRoutingPolicy.Destination.DIRECT },
                         XDestinationRecoveryPolicy.bundledRule())
+                    add(indexOfFirst { it.destination == DomesticRoutingPolicy.Destination.DIRECT },
+                        DomesticRoutingPolicy.DomainRule("deepseek-api", DomesticRoutingPolicy.Destination.DIRECT,
+                            emptyList(), listOf("api.deepseek.com")))
                 },
-                listOf(TikTokAppPolicy.proxyPackages, BigoAppPolicy.proxyPackages),
+                listOf(TikTokAppPolicy.proxyPackages, BigoAppPolicy.proxyPackages, listOf(ChatGptRoutingPolicy.PACKAGE_NAME)),
                 DomesticRoutingPolicy.observedMainlandIpv4Exceptions
             )
         }

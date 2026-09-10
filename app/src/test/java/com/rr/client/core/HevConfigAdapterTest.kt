@@ -1,5 +1,6 @@
 package com.rr.client.core
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonParser
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
@@ -7,6 +8,7 @@ import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.vpn.HevTunnelConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -113,5 +115,26 @@ class HevConfigAdapterTest {
         val runtime = HevConfigAdapter.adapt(stable(PerAppPolicyResolver.MODE_ALL))
         assertTrue(runtime.perAppPolicy.allowedPackages.isEmpty())
         assertTrue(runtime.perAppPolicy.disallowedPackages.isEmpty())
+    }
+
+    @Test
+    fun explicitEmptyOrSelfOnlyAllowListNeverBecomesAllApplications() {
+        val unusableLists = listOf(
+            emptyList(),
+            listOf("", " "),
+            listOf("com.rr.client"),
+            listOf(" ", " com.rr.client ")
+        )
+        unusableLists.forEach { packages ->
+            val source = JsonParser.parseString(stable(PerAppPolicyResolver.MODE_ALL)).asJsonObject
+            source.getAsJsonArray("inbounds")[0].asJsonObject.add(
+                "include_package", JsonArray().apply { packages.forEach(::add) }
+            )
+
+            val error = assertThrows(IllegalArgumentException::class.java) {
+                HevConfigAdapter.adapt(source.toString())
+            }
+            assertEquals("HEV 仅选中代理模式至少需要选择 1 个其他应用", error.message)
+        }
     }
 }

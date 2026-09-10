@@ -11,8 +11,8 @@ aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
 "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
 "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
 grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-grep -q "versionCode='102'" dist/PACKAGE-REPORT.txt
-grep -q "versionName='1.0.2'" dist/PACKAGE-REPORT.txt
+grep -q "versionCode='103'" dist/PACKAGE-REPORT.txt
+grep -q "versionName='1.0.3'" dist/PACKAGE-REPORT.txt
 grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
 grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
@@ -38,12 +38,12 @@ cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
 cp build-reports/ROOT-TCP-REPORT.json dist/ROOT-TCP-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
-# RRBOX 1.0.2 Build Report
+# RRBOX 1.0.3 Build Report
 
 - Source commit: $(git rev-parse HEAD)
 - Package: com.rr.client
-- Version code: 102
-- Version name: 1.0.2
+- Version code: 103
+- Version name: 1.0.3
 - ABI: arm64-v8a
 - APK: ${OUTPUT_APK_NAME}
 - APK size: ${apk_size} bytes

@@ -66,6 +66,11 @@
       "url": "https://play.google.com/store/apps/details?id=sg.bigo.live",
       "reviewed": "2026-09-08",
       "note": "Official BIGO LIVE Android package identity. Separate exact service endpoints are attributed from application-owned route observations, not verified ownership of their parent domains."
+    },
+    {
+      "url": "https://help.openai.com/zh-hans-cn/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps",
+      "reviewed": "2026-09-11",
+      "note": "Documented ChatGPT authentication, verification, file, telemetry and WebSocket dependencies. Shared CDN/service providers retain exact-host scope; no blanket Cloudflare/CDN bypass or certificate inspection."
     }
   ],
   "note": "Domain suffix coverage probes, including representative/synthetic subdomains. These are not captured application sessions or a complete endpoint inventory.",
@@ -326,6 +331,41 @@
         "conf-lv.piojm.tech",
         "support0.dfaklj.tech"
       ]
+    },
+    {
+      "name": "chatgpt-official-network-dependencies",
+      "outbound": "proxy",
+      "domains": [
+        "android.chat.openai.com",
+        "api.intercom.io",
+        "api.openai.com",
+        "auth0.openai.com",
+        "cdn.oaistatic.com",
+        "cdn.openaimerge.com",
+        "cdn.workos.com",
+        "challenges.cloudflare.com",
+        "chat.openai.com",
+        "chatgpt.com",
+        "desktop.chat.openai.com",
+        "feature.oaistatsig.com",
+        "files.oaiusercontent.com",
+        "forwarder.workos.com",
+        "humb.apple.com",
+        "images.workoscdn.com",
+        "ios.chat.openai.com",
+        "js.intercomcdn.com",
+        "js.stripe.com",
+        "links.ct.sendgrid.net",
+        "o207216.ingest.sentry.io",
+        "o33249.ingest.sentry.io",
+        "rum.browser-intake-datadoghq.com",
+        "setup.auth.openai.com",
+        "setup.workos.com",
+        "tcr9i.chat.openai.com",
+        "widget.intercomcdn.com",
+        "workos.imgix.net",
+        "ws.chatgpt.com"
+      ]
     }
   ],
   "observed_mainland_ipv4_exceptions": [
@@ -361,5 +401,39 @@
     "dfaklj.tech",
     "other.dfaklj.tech",
     "sub.support0.dfaklj.tech"
+  ],
+  "chatgpt_priority_hosts": [
+    "android.chat.openai.com",
+    "ws.chatgpt.com",
+    "auth0.openai.com",
+    "setup.auth.openai.com",
+    "files.oaiusercontent.com",
+    "feature.oaistatsig.com",
+    "challenges.cloudflare.com",
+    "cdn.openaimerge.com",
+    "cdn.workos.com",
+    "forwarder.workos.com",
+    "images.workoscdn.com",
+    "humb.apple.com",
+    "js.stripe.com",
+    "o207216.ingest.sentry.io",
+    "rum.browser-intake-datadoghq.com",
+    "workos.imgix.net"
+  ],
+  "chatgpt_boundary_hosts": [
+    "chatgpt.com.evil.invalid",
+    "evilopenai.com",
+    "cdn.workos.com.evil.invalid",
+    "sub.challenges.cloudflare.com",
+    "customer.cloudflare.com",
+    "customer.workos.com",
+    "customer.workoscdn.com",
+    "customer.apple.com",
+    "customer.stripe.com",
+    "o12345.ingest.sentry.io",
+    "other.imgix.net",
+    "customer.sendgrid.net",
+    "customer.amazonaws.com",
+    "customer.cloudfront.net"
   ]
 }
