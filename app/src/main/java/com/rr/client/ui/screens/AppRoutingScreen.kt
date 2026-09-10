@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -23,7 +25,9 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.routing.PerAppPolicyResolver
@@ -56,7 +61,20 @@ fun AppRoutingScreen(
     onAppSelectionChanged: (String, Boolean) -> Unit
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var showDetails by rememberSaveable { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    LaunchedEffect(showDetails) {
+        if (showDetails) listState.animateScrollToItem(0)
+    }
     val busy = applyingRouting || loadingApps || selectingAutomatically
+    val showAppList = perAppMode != PerAppPolicyResolver.MODE_ALL
+    val statusText = when {
+        loadingApps -> "正在读取应用…"
+        selectingAutomatically -> "正在自动选择…"
+        applyingRouting -> "正在应用配置…"
+        showAppList -> "已选 ${selectedPackages.size} 个应用"
+        else -> "所有应用"
+    }
 
     val sortedApps = remember(apps, selectedPackages) {
         apps.sortedWith(
@@ -75,15 +93,27 @@ fun AppRoutingScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBackground)
-            .padding(16.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        Text(
-            text = "应用接管范围",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary
-        )
-        Spacer(modifier = Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "应用接管范围",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            TextButton(
+                onClick = { showDetails = !showDetails },
+                colors = ButtonDefaults.textButtonColors(contentColor = CyanPrimary)
+            ) {
+                Text(if (showDetails) "收起说明" else "使用说明")
+            }
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -99,6 +129,7 @@ fun AppRoutingScreen(
                     onClick = { onModeChanged(mode) },
                     enabled = !busy,
                     modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                     shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.outlinedButtonColors(
                         containerColor = if (selected) CyanPrimary.copy(alpha = 0.2f) else DarkSurface,
@@ -111,90 +142,35 @@ fun AppRoutingScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
-        Text(
-            text = when (perAppMode) {
-                PerAppPolicyResolver.MODE_ALLOW_LIST -> if (smartRouting) {
-                    "勾选应用按智能分流规则联网；未选应用的业务连接直接联网。这个名单与“选中绕过”独立保存。"
-                } else {
-                    "智能分流已关闭：勾选应用的互联网连接走代理，未选应用直接联网。选中的浏览器访问国内网站也会走代理。"
-                }
-                PerAppPolicyResolver.MODE_DISALLOW_LIST -> "这里勾选的应用完全绕过 RRBOX。这个名单与“仅选中代理”完全独立。"
-                else -> "所有应用使用 RRBOX 分流。开启智能分流后，国内服务直连，海外服务走当前代理节点。"
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = TextSecondary
-        )
-
-        // Fixed-height status row: text changes, layout does not jump.
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = when {
-                loadingApps -> "正在读取应用和已保存的选择…"
-                selectingAutomatically -> "正在自动选择已安装的应用…"
-                applyingRouting -> "正在应用分流配置…"
-                else -> "修改选择后自动保存，已连接时会重新应用一次。"
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = if (applyingRouting) CyanPrimary else TextSecondary
-        )
-
-        if (perAppMode == PerAppPolicyResolver.MODE_ALL) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                border = BorderStroke(1.dp, CardBorder)
+        if (showAppList) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("所有应用已纳入分流", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "接管范围决定哪些应用使用 RRBOX，设置中的智能分流决定连接走直连还是代理。切换到其他范围时会恢复各自保存的名单。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                }
-            }
-        } else {
-            if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = onAutoSelect,
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanPrimary),
-                    border = BorderStroke(1.dp, CardBorder)
-                ) {
-                    Text(if (selectingAutomatically) "正在选择…" else "自动选择")
-                }
                 Text(
-                    "一键勾选已安装的常用海外应用、Chrome / Edge 和谷歌后台推送服务，保留手动添加和取消。新装应用后可再点一次。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary
+                    text = statusText,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = CyanPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                if (apps.any { it.packageName == "com.google.android.gms" }) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        if ("com.google.android.gms" in selectedPackages) {
-                            "谷歌后台推送：已选中 Google Play 服务；直连可用时也可取消。"
-                        } else {
-                            "谷歌后台推送：未选中 Google Play 服务；直连可用时无需勾选，可按需手动开启。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if ("com.google.android.gms" in selectedPackages) CyanPrimary else TextSecondary
-                    )
+                if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST) {
+                    OutlinedButton(
+                        onClick = onAutoSelect,
+                        enabled = !busy,
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = CyanPrimary),
+                        border = BorderStroke(1.dp, CardBorder)
+                    ) {
+                        Text(if (selectingAutomatically) "正在选择…" else "自动选择")
+                    }
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "已选择 ${selectedPackages.size} 个应用 · 已选应用自动置顶",
-                style = MaterialTheme.typography.labelMedium,
-                color = CyanPrimary
-            )
-            Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = searchQuery,
@@ -210,11 +186,73 @@ fun AppRoutingScreen(
                     unfocusedBorderColor = CardBorder
                 )
             )
+            Spacer(modifier = Modifier.height(8.dp))
+        } else if (busy) {
+            Text(
+                text = statusText,
+                modifier = Modifier.padding(vertical = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = CyanPrimary
+            )
+        }
 
-            Spacer(modifier = Modifier.height(12.dp))
+        // Only the compact controls stay fixed. Expanded help scrolls with the apps.
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(bottom = 8.dp)
+        ) {
+            if (showDetails) {
+                item(key = "routing_help", contentType = "help") {
+                    AppRoutingDetails(
+                        perAppMode = perAppMode,
+                        smartRouting = smartRouting,
+                        hasGooglePlayServices = apps.any { it.packageName == "com.google.android.gms" },
+                        googlePlayServicesSelected = "com.google.android.gms" in selectedPackages
+                    )
+                }
+            }
 
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(filteredApps, key = { it.packageName }) { app ->
+            if (!showAppList) {
+                item(key = "all_apps", contentType = "status") {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                        border = BorderStroke(1.dp, CardBorder)
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text("所有应用已纳入接管", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                if (smartRouting) "智能分流已开启，连接按规则使用直连或代理。"
+                                else "智能分流已关闭，应用的互联网连接走代理。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                }
+            } else if (filteredApps.isEmpty()) {
+                item(key = "empty_apps", contentType = "status") {
+                    Text(
+                        text = when {
+                            loadingApps -> "正在读取应用列表…"
+                            searchQuery.isNotBlank() -> "没有找到匹配的应用"
+                            else -> "暂无可显示的应用"
+                        },
+                        modifier = Modifier.padding(vertical = 20.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                }
+            } else {
+                items(filteredApps, key = { it.packageName }, contentType = { "app" }) { app ->
                     val checked = app.packageName in selectedPackages
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -224,22 +262,26 @@ fun AppRoutingScreen(
                     ) {
                         Row(
                             modifier = Modifier
-                                .padding(12.dp)
-                                .fillMaxWidth(),
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = app.appName,
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimary
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     text = app.packageName,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary
+                                    color = TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 if (app.packageName == "com.google.android.gms") {
                                     Text(
@@ -260,6 +302,65 @@ fun AppRoutingScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppRoutingDetails(
+    perAppMode: String,
+    smartRouting: Boolean,
+    hasGooglePlayServices: Boolean,
+    googlePlayServicesSelected: Boolean
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = BorderStroke(1.dp, CardBorder)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = when (perAppMode) {
+                    PerAppPolicyResolver.MODE_ALLOW_LIST -> if (smartRouting) {
+                        "勾选应用按智能分流规则联网；未选应用的业务连接直接联网。这个名单与“选中绕过”独立保存。"
+                    } else {
+                        "智能分流已关闭：勾选应用的互联网连接走代理，未选应用直接联网。选中的浏览器访问国内网站也会走代理。"
+                    }
+                    PerAppPolicyResolver.MODE_DISALLOW_LIST ->
+                        "这里勾选的应用完全绕过 RRBOX。这个名单与“仅选中应用”独立保存。"
+                    else ->
+                        "接管范围决定哪些应用使用 RRBOX，设置中的智能分流决定连接走直连还是代理。切换范围会恢复各自保存的名单。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Text(
+                "修改选择后自动保存，已连接时会重新应用一次。已选应用自动置顶。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            if (perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST) {
+                Text(
+                    "自动选择会勾选已安装的常用海外应用、Chrome / Edge 和谷歌后台推送服务，保留手动添加和取消。新装应用后可再点一次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                if (hasGooglePlayServices) {
+                    Text(
+                        text = if (googlePlayServicesSelected) {
+                            "谷歌后台推送：已选中 Google Play 服务；直连可用时也可取消。"
+                        } else {
+                            "谷歌后台推送：未选中 Google Play 服务；直连可用时无需勾选，可按需手动开启。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (googlePlayServicesSelected) CyanPrimary else TextSecondary
+                    )
                 }
             }
         }

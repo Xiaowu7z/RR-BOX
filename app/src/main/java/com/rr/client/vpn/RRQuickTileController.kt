@@ -159,7 +159,10 @@ object RRQuickTileController {
         )
     }
 
-    private fun startRuntime(context: Context, runtime: VpnRuntimeState, cached: Boolean) {
+    private suspend fun startRuntime(context: Context, runtime: VpnRuntimeState, cached: Boolean) {
+        check(com.rr.client.storage.ProfileNodeStore.containsConnectableNode(
+            RRApplication.instance.database, runtime.nodeId
+        )) { "节点已删除或不可用，请在 RRBOX 中重新选择节点" }
         RRLogStore.record("APP", "快捷按钮请求连接；配置=${if (cached) "已核对当前规则的缓存" else "重新生成"}")
         ContextCompat.startForegroundService(
             context,

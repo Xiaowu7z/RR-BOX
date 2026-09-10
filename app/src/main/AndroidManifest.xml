@@ -71,6 +71,21 @@
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- SystemUI resolves this activity for a long press on the RRBOX tile. -->
+        <activity
+            android:name=".vpn.RRQuickTilePreferencesActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".vpn.RRVpnService"
             android:exported="false"

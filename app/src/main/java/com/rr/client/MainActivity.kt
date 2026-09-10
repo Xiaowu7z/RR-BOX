@@ -48,6 +48,8 @@ import kotlinx.coroutines.CancellationException
 import com.rr.client.subscription.ImportLimits
 import com.rr.client.subscription.SubscriptionNodeReconciler
 import com.rr.client.storage.LocalProfileStore
+import com.rr.client.storage.ProfileNodeStore
+import com.rr.client.vpn.RRQuickTilePreferencesActivity
 import com.rr.client.core.NodeIdentity
 import com.rr.client.core.LocalNodeDeletionPolicy
 import com.rr.client.core.NodeLatencyState
@@ -103,11 +105,16 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
     private val backgroundOptimizationExempt = MutableStateFlow(false)
     private val appUnlocked = MutableStateFlow(false)
+    private val dashboardRequested = MutableStateFlow(false)
     private var pinEnabledCached = false
     private var suppressNextBackgroundLock = false
     private var routingRestartJob: Job? = null
     private var routingRestartGeneration = 0L
     private var clearingApplicationData = false
+    // These jobs use lifecycleScope and must keep their exclusion state across
+    // the PIN screen removing and recreating MainApp's composition.
+    private var refreshingIds by mutableStateOf<Set<String>>(emptySet())
+    private var removingNodeProfileIds by mutableStateOf<Set<String>>(emptySet())
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -142,6 +149,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        dashboardRequested.value = savedInstanceState?.getBoolean("rrbox.open_dashboard_pending")
+            ?: (intent.action == RRQuickTilePreferencesActivity.ACTION_OPEN_DASHBOARD)
         com.rr.client.sharing.ShareDocumentExporter.install(this)
         updateBackgroundProtectionState()
 
@@ -156,6 +165,19 @@ class MainActivity : ComponentActivity() {
                 SecurityGate()
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == RRQuickTilePreferencesActivity.ACTION_OPEN_DASHBOARD) {
+            dashboardRequested.value = true
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("rrbox.open_dashboard_pending", dashboardRequested.value)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
@@ -222,6 +244,7 @@ class MainActivity : ComponentActivity() {
     private fun MainApp() {
         val routingUiScope = rememberCoroutineScope()
         var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+        val goHome by dashboardRequested.collectAsState()
         val isVpnRunning by RRVpnService.isRunning.collectAsState()
         val isVpnStarting by RRVpnService.isStarting.collectAsState()
         val activeRuntimeNodeId by RRVpnService.activeRuntimeNodeId.collectAsState()
@@ -248,7 +271,6 @@ class MainActivity : ComponentActivity() {
         var proxySelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
         var autoProxyExcludedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
         var bypassSelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
-        var refreshingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
         var addingProfile by remember { mutableStateOf(false) }
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
         var routingSelectionReady by remember { mutableStateOf(false) }
@@ -259,6 +281,15 @@ class MainActivity : ComponentActivity() {
         var updatingRuleSets by remember { mutableStateOf(false) }
         var checkingAppUpdate by remember { mutableStateOf(false) }
         var showPinSetup by remember { mutableStateOf(false) }
+
+        LaunchedEffect(goHome) {
+            if (goHome) {
+                editingNode = null
+                showPinSetup = false
+                selectedTab = 0
+                dashboardRequested.value = false
+            }
+        }
 
         val baseNodes = remember(subProfiles) { subProfiles.flatMap { it.nodes } }
         val allNodes = remember(baseNodes, nodeOverrides) {
@@ -279,7 +310,7 @@ class MainActivity : ComponentActivity() {
                         isLocal = true
                     )
                 )
-                subscriptionProfiles.forEach { profile ->
+                subscriptionProfiles.filter { it.nodes.isNotEmpty() }.forEach { profile ->
                     add(
                         NodeGroupUi(
                             id = profile.id,
@@ -316,7 +347,7 @@ class MainActivity : ComponentActivity() {
             val resolved = if (nodesNow.any { it.id == current }) current else nodesNow.firstOrNull()?.id
             if (resolved != current) {
                 selectedNodeId = resolved
-                if (resolved != null) lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
+                lifecycleScope.launch { prefs.setSelectedNodeId(resolved) }
             }
             latencyStates = latencyStates.filterKeys { id -> nodesNow.any { it.id == id } }
         }
@@ -342,7 +373,7 @@ class MainActivity : ComponentActivity() {
                 .filterNot(TrafficInfoNode::isInfoNode)
             val resolved = if (nodesNow.any { it.id == storedId }) storedId else nodesNow.firstOrNull()?.id
             selectedNodeId = resolved
-            if (resolved != null) prefs.setSelectedNodeId(resolved)
+            prefs.setSelectedNodeId(resolved)
 
             val appMgr = AppManager(this@MainActivity)
             apps = withContext(Dispatchers.IO) {
@@ -427,24 +458,62 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        fun deleteLocalNode(node: ProxyNode) {
-            if (!node.profileId.equals(SubProfile.LOCAL_PROFILE_ID)) return
-            val vpnBusy = isVpnRunning || isVpnStarting
-            if (!LocalNodeDeletionPolicy.canDelete(node.id, activeRuntimeNodeId, vpnBusy)) {
-                toast(
-                    if (node.id == activeRuntimeNodeId) {
-                        "当前节点正在使用，请先断开或切换连接后再删除"
-                    } else {
-                        "正在确认当前运行节点，请稍后重试"
-                    }
-                )
+        fun removeProfileNodes(profileId: String, nodeIds: Set<String>?) {
+            if (profileId in refreshingIds || profileId in removingNodeProfileIds) {
+                toast("此分组正在更新或删除，请稍后重试")
                 return
             }
+            val profile = subProfiles.firstOrNull { it.id == profileId } ?: return
+            fun canRemove(ids: Set<String>): Boolean {
+                val busy = RRVpnService.isRunning.value || RRVpnService.isStarting.value
+                val active = RRVpnService.activeRuntimeNodeId.value
+                return ids.all { LocalNodeDeletionPolicy.canDelete(it, active, busy) }
+            }
+            val candidates = profile.nodes.filter { nodeIds == null || it.id in nodeIds }
+                .mapTo(hashSetOf()) { it.id }
+            if (!canRemove(candidates)) {
+                toast("包含正在使用的节点，请先断开或切换连接后再删除")
+                return
+            }
+            removingNodeProfileIds = removingNodeProfileIds + profileId
             lifecycleScope.launch {
-                prefs.clearNodeOverride(node.id)
-                persistLocalNodes({ latest -> latest.filterNot { it.id == node.id } }, "已删除本地节点「${node.tag}」")
+                try {
+                    val removed = withContext(Dispatchers.IO) {
+                        ProfileNodeStore.remove(db, profileId, nodeIds, ::canRemove)
+                    }
+                    if (removed.isEmpty()) {
+                        toast("节点已被移除")
+                        return@launch
+                    }
+                    // The committed profile is authoritative; stale overrides cannot
+                    // bring deleted nodes back into the list or the quick tile.
+                    try {
+                        prefs.clearNodeOverrides(removed)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        com.rr.client.lab.RRLogStore.record("APP", "节点已删除，旧编辑缓存清理未完成")
+                    }
+                    toast(when {
+                        profile.isLocal -> "已删除 ${removed.size} 个本地节点"
+                        nodeIds == null -> "已删除节点分组，订阅保留，更新后可恢复"
+                        else -> "已删除节点，更新订阅后可恢复"
+                    })
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: IllegalStateException) {
+                    toast(error.message ?: "节点删除未完成，请重试")
+                } catch (_: Exception) {
+                    toast("节点删除失败，请重试")
+                } finally {
+                    removingNodeProfileIds = removingNodeProfileIds - profileId
+                }
             }
         }
+
+        fun deleteNode(node: ProxyNode) = removeProfileNodes(node.profileId, setOf(node.id))
+
+        fun deleteNodeGroup(profileId: String) = removeProfileNodes(profileId, null)
 
 
         fun renameNode(node: ProxyNode, requestedName: String) {
@@ -621,6 +690,10 @@ class MainActivity : ComponentActivity() {
 
         fun refreshProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
+            if (profileId in removingNodeProfileIds) {
+                toast("节点正在删除，请稍后更新订阅")
+                return
+            }
             if (profileId in refreshingIds) return
             refreshingIds = refreshingIds + profileId
             lifecycleScope.launch {
@@ -662,6 +735,10 @@ class MainActivity : ComponentActivity() {
 
         fun deleteProfile(profileId: String) {
             val existing = subProfiles.find { it.id == profileId && !it.isLocal } ?: return
+            if (profileId in removingNodeProfileIds) {
+                toast("节点正在删除，请稍后重试")
+                return
+            }
             if (profileId in refreshingIds) {
                 toast("订阅正在更新，请完成后再删除")
                 return
@@ -796,7 +873,8 @@ class MainActivity : ComponentActivity() {
                                 toast("已恢复订阅中的原始节点参数")
                             }
                         },
-                        onDeleteLocalNode = ::deleteLocalNode,
+                        onDeleteNode = ::deleteNode,
+                        onDeleteGroup = ::deleteNodeGroup,
                         onImportText = ::importClipboardContent,
                         onImportClipboard = ::importClipboardContent,
                         onCreateManualNode = { protocol ->
@@ -1229,10 +1307,25 @@ class MainActivity : ComponentActivity() {
             RRVpnService.activeRuntimeEngine.value == PreferencesManager.TUN_ENGINE_ROOT ||
             RRVpnService.hasRootDataPlane()
 
-    private fun startVpnServiceInternal() {
+    private suspend fun startVpnServiceInternal() {
         val config = pendingConfigJson ?: return
         val tag = pendingNodeTag ?: "Node"
         val id = pendingNodeId ?: ""
+
+        val available = try {
+            ProfileNodeStore.containsConnectableNode(RRApplication.instance.database, id)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
+        }
+        // A later user start may have replaced the pending permission request.
+        if (pendingNodeId != id || pendingConfigJson != config) return
+        if (!available) {
+            clearPendingVpn()
+            Toast.makeText(this, "节点已删除或不可用，请重新选择节点", Toast.LENGTH_LONG).show()
+            return
+        }
 
         val serviceIntent = vpnIntent(null, config, tag, id)
         runCatching { ContextCompat.startForegroundService(this, serviceIntent) }

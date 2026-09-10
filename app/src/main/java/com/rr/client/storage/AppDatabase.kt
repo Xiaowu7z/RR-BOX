@@ -17,6 +17,10 @@ interface ProfileDao {
     @Query("UPDATE profiles SET name = :name WHERE id = :id")
     suspend fun renameProfile(id: String, name: String): Int
 
+    // Node-list cleanup keeps the subscription and its last refresh metadata intact.
+    @Query("UPDATE profiles SET nodesJson = :nodesJson WHERE id = :id")
+    suspend fun updateProfileNodes(id: String, nodesJson: String): Int
+
     // A refresh updates network content only. A simultaneous user rename must
     // survive, and a deleted profile must not be recreated from an old snapshot.
     @Query("""UPDATE profiles SET nodesJson = :nodesJson, lastUpdated = :lastUpdated,

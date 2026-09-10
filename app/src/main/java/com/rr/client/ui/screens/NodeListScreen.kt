@@ -20,14 +20,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
@@ -114,7 +117,8 @@ fun NodeListScreen(
     onRenameNode: (ProxyNode, String) -> Unit,
     onEditNode: (ProxyNode) -> Unit,
     onResetNodeEdit: (ProxyNode) -> Unit,
-    onDeleteLocalNode: (ProxyNode) -> Unit,
+    onDeleteNode: (ProxyNode) -> Unit,
+    onDeleteGroup: (String) -> Unit,
     onImportText: (String) -> Unit,
     onImportClipboard: (String) -> Unit,
     onCreateManualNode: (ProtocolType) -> Unit,
@@ -129,6 +133,7 @@ fun NodeListScreen(
     var showManualProtocols by remember { mutableStateOf(false) }
     var sharePayload by remember { mutableStateOf<SharePayload?>(null) }
     var renameGroup by remember { mutableStateOf<NodeGroupUi?>(null) }
+    var deleteGroup by remember { mutableStateOf<NodeGroupUi?>(null) }
 
     fun showShare(result: SharePayloadResult) {
         when (result) {
@@ -142,6 +147,23 @@ fun NodeListScreen(
             renameGroup = null
             onRenameProfile(group.id, name)
         }
+    }
+
+    deleteGroup?.let { group ->
+        AlertDialog(
+            onDismissRequest = { deleteGroup = null },
+            title = { Text("删除分组节点？") },
+            text = { Text("删除「${group.name}」在本机加载的全部节点。订阅保留，更新订阅可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteGroup = null
+                    onDeleteGroup(group.id)
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteGroup = null }) { Text("取消") }
+            }
+        )
     }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -233,7 +255,8 @@ fun NodeListScreen(
                             expanded = expanded[group.id] == true,
                             onToggle = { expanded[group.id] = !(expanded[group.id] ?: false) },
                             onRename = { renameGroup = group },
-                            onShare = { showShare(SharePayloadBuilder.subscription(group.name, group.subscriptionUrl)) }
+                            onShare = { showShare(SharePayloadBuilder.subscription(group.name, group.subscriptionUrl)) },
+                            onDelete = { deleteGroup = group }
                         )
                     }
                     if (expanded[group.id] == true) {
@@ -249,7 +272,7 @@ fun NodeListScreen(
                                 onRenameNode = { name -> onRenameNode(node, name) },
                                 onEditNode = { onEditNode(node) },
                                 onResetNodeEdit = { onResetNodeEdit(node) },
-                                onDeleteLocalNode = { onDeleteLocalNode(node) },
+                                onDeleteNode = { onDeleteNode(node) },
                                 onShareNode = {
                                     scope.launch {
                                         showShare(withContext(Dispatchers.Default) { SharePayloadBuilder.node(node) })
@@ -325,7 +348,8 @@ private fun GroupHeader(
     expanded: Boolean,
     onToggle: () -> Unit,
     onRename: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onDelete: () -> Unit
 ) {
     val accent = if (group.isLocal) CyanSecondary else CyanPrimary
     var menuExpanded by remember(group.id) { mutableStateOf(false) }
@@ -371,6 +395,11 @@ private fun GroupHeader(
                             leadingIcon = { Icon(Icons.Default.Share, null) },
                             onClick = { menuExpanded = false; onShare() }
                         )
+                        DropdownMenuItem(
+                            text = { Text("删除分组", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                            onClick = { menuExpanded = false; onDelete() }
+                        )
                     }
                 }
             }
@@ -401,15 +430,91 @@ private fun NodeCard(
     onRenameNode: (String) -> Unit,
     onEditNode: () -> Unit,
     onResetNodeEdit: () -> Unit,
-    onDeleteLocalNode: () -> Unit,
+    onDeleteNode: () -> Unit,
     onShareNode: () -> Unit
 ) {
     var menuExpanded by remember(node.id) { mutableStateOf(false) }
     var showRenameDialog by remember(node.id) { mutableStateOf(false) }
+    var showDeleteDialog by remember(node.id) { mutableStateOf(false) }
+    var showTrafficDetails by remember(node.id) { mutableStateOf(false) }
     var renameInput by remember(node.id) { mutableStateOf(node.tag) }
     val trafficInfo = remember(node) { TrafficInfoNode.parse(node) }
     val selected = isSelected && trafficInfo == null
     val clipboard = LocalClipboardManager.current
+
+    val actions: @Composable () -> Unit = {
+        Box {
+            IconButton(onClick = { menuExpanded = true }) {
+                Icon(
+                    Icons.Default.MoreVert,
+                    contentDescription = if (trafficInfo == null) "节点操作" else "流量信息操作",
+                    tint = TextSecondary
+                )
+            }
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                if (trafficInfo == null) {
+                    DropdownMenuItem(
+                        text = { Text("分享节点") },
+                        leadingIcon = { Icon(Icons.Default.Share, null) },
+                        onClick = { menuExpanded = false; onShareNode() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("测试 Ping") },
+                        leadingIcon = { Icon(Icons.Default.Speed, null) },
+                        onClick = { menuExpanded = false; onPingNode() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = {
+                            menuExpanded = false
+                            renameInput = node.tag
+                            showRenameDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("编辑节点") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = { menuExpanded = false; onEditNode() }
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("查看完整信息") },
+                        leadingIcon = { Icon(Icons.Default.Info, null) },
+                        onClick = { menuExpanded = false; showTrafficDetails = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("复制流量信息") },
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                        onClick = {
+                            menuExpanded = false
+                            clipboard.setText(AnnotatedString(trafficInfo.originalText))
+                        }
+                    )
+                }
+                if (!isLocal && isEdited) {
+                    DropdownMenuItem(
+                        text = { Text("恢复订阅值") },
+                        leadingIcon = { Icon(Icons.Default.Refresh, null) },
+                        onClick = { menuExpanded = false; onResetNodeEdit() }
+                    )
+                }
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (trafficInfo == null) "删除节点" else "删除流量信息",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        menuExpanded = false
+                        if (isLocal) onDeleteNode() else showDeleteDialog = true
+                    }
+                )
+            }
+        }
+    }
 
     Card(
         modifier = Modifier
@@ -419,15 +524,15 @@ private fun NodeCard(
         colors = CardDefaults.cardColors(containerColor = if (selected) DarkSurfaceVariant else DarkSurface),
         border = BorderStroke(1.dp, if (selected) CyanPrimary else CardBorder)
     ) {
-        Row(
-            modifier = Modifier
-                .padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 6.dp)
-                .fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (trafficInfo != null) {
-                TrafficInfoContent(trafficInfo, Modifier.weight(1f))
-            } else {
+        if (trafficInfo != null) {
+            TrafficInfoContent(info = trafficInfo, actions = actions)
+        } else {
+            Row(
+                modifier = Modifier
+                    .padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 6.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = node.tag,
@@ -459,65 +564,57 @@ private fun NodeCard(
                     Spacer(Modifier.height(6.dp))
                     LatencyBadge(latencyState)
                 }
-            }
-
-            Box {
-                IconButton(onClick = { menuExpanded = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = if (trafficInfo == null) "节点操作" else "流量信息操作", tint = TextSecondary)
-                }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    if (trafficInfo == null) {
-                        DropdownMenuItem(
-                            text = { Text("分享节点") },
-                            leadingIcon = { Icon(Icons.Default.Share, null) },
-                            onClick = { menuExpanded = false; onShareNode() }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("测试 Ping") },
-                            leadingIcon = { Icon(Icons.Default.Speed, null) },
-                            onClick = { menuExpanded = false; onPingNode() }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("重命名") },
-                            leadingIcon = { Icon(Icons.Default.Edit, null) },
-                            onClick = {
-                                menuExpanded = false
-                                renameInput = node.tag
-                                showRenameDialog = true
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("编辑节点") },
-                            leadingIcon = { Icon(Icons.Default.Edit, null) },
-                            onClick = { menuExpanded = false; onEditNode() }
-                        )
-                    } else {
-                        DropdownMenuItem(
-                            text = { Text("复制流量信息") },
-                            leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
-                            onClick = {
-                                menuExpanded = false
-                                clipboard.setText(AnnotatedString(trafficInfo.originalText))
-                            }
-                        )
-                    }
-                    if (!isLocal && isEdited) {
-                        DropdownMenuItem(
-                            text = { Text("恢复订阅值") },
-                            leadingIcon = { Icon(Icons.Default.Refresh, null) },
-                            onClick = { menuExpanded = false; onResetNodeEdit() }
-                        )
-                    }
-                    if (isLocal) {
-                        DropdownMenuItem(
-                            text = { Text("删除节点") },
-                            leadingIcon = { Icon(Icons.Default.Delete, null) },
-                            onClick = { menuExpanded = false; onDeleteLocalNode() }
-                        )
-                    }
-                }
+                actions()
             }
         }
+    }
+
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text(if (trafficInfo == null) "删除节点？" else "删除流量信息？") },
+            text = {
+                Text(
+                    if (trafficInfo == null) {
+                        "仅删除本机节点「${node.tag}」。订阅保留，更新订阅可恢复。"
+                    } else {
+                        "仅删除本机的流量信息卡片。订阅保留，更新订阅可恢复。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteDialog = false
+                    onDeleteNode()
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showTrafficDetails && trafficInfo != null) {
+        AlertDialog(
+            onDismissRequest = { showTrafficDetails = false },
+            title = { Text("完整流量信息") },
+            text = {
+                SelectionContainer {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        // The provider's exact source also preserves unknown or conflicting fields.
+                        Text(trafficInfo.originalText, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTrafficDetails = false }) { Text("关闭") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(trafficInfo.originalText))
+                }) { Text("复制") }
+            }
+        )
     }
 
     if (showRenameDialog) {
@@ -553,30 +650,76 @@ private fun NodeCard(
 }
 
 @Composable
-private fun TrafficInfoContent(info: TrafficInfoDisplay, modifier: Modifier = Modifier) {
-    SelectionContainer(modifier = modifier) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun TrafficInfoContent(info: TrafficInfoDisplay, actions: @Composable () -> Unit) {
+    val metrics = listOfNotNull(
+        info.remainingText?.let { "剩余" to it },
+        info.usedText?.let { "已用" to it },
+        info.totalText?.let { "总量" to it }
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 14.dp, end = 6.dp, bottom = 14.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 text = "流量概览",
+                modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.labelLarge,
                 color = CyanPrimary
             )
-            info.remainingText?.let { remaining ->
+            actions()
+        }
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (metrics.isEmpty() && info.expiryText == null) {
                 Text(
-                    text = "剩余 $remaining",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                    text = info.detailText.ifBlank { info.originalText },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextPrimary,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            } else {
+                metrics.chunked(2).forEach { fields ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        fields.forEach { (label, value) ->
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary
+                                )
+                                Text(
+                                    text = value,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                )
+                            }
+                        }
+                        if (fields.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+            info.expiryText?.let { expiry ->
+                Text(
+                    text = "到期 · $expiry",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
                 )
             }
-            // Keep every provider field, even when its format is not recognized.
-            // No line cap, ellipsis, inferred allowance or sample values.
-            Text(
-                text = info.detailText.ifBlank { info.originalText }
-                    .replace(Regex("\\s*[|｜]\\s*"), "\n"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary
-            )
         }
     }
 }

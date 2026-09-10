@@ -104,8 +104,10 @@ class PreferencesManager(private val context: Context) {
         decodeNodeOverrides(preferences[NODE_OVERRIDES_JSON])
     }
 
-    suspend fun setSelectedNodeId(id: String) {
-        context.dataStore.edit { it[SELECTED_NODE_ID] = id }
+    suspend fun setSelectedNodeId(id: String?) {
+        context.dataStore.edit {
+            if (id == null) it.remove(SELECTED_NODE_ID) else it[SELECTED_NODE_ID] = id
+        }
     }
 
     suspend fun setSmartRouting(enabled: Boolean) {
@@ -242,9 +244,14 @@ class PreferencesManager(private val context: Context) {
     }
 
     suspend fun clearNodeOverride(nodeId: String) {
+        clearNodeOverrides(setOf(nodeId))
+    }
+
+    suspend fun clearNodeOverrides(nodeIds: Set<String>) {
+        if (nodeIds.isEmpty()) return
         context.dataStore.edit { preferences ->
             val current = decodeNodeOverrides(preferences[NODE_OVERRIDES_JSON]).toMutableMap()
-            current.remove(nodeId)
+            nodeIds.forEach(current::remove)
             if (current.isEmpty()) {
                 preferences.remove(NODE_OVERRIDES_JSON)
             } else {
