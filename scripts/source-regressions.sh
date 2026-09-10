@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Narrow source guards complement real unit tests and Lint; they are not runtime tests.
 set -euo pipefail
-grep -q 'versionCode = 103' app/build.gradle.kts
-grep -q 'versionName = "1.0.3"' app/build.gradle.kts
+grep -q 'versionCode = 104' app/build.gradle.kts
+grep -q 'versionName = "1.0.4"' app/build.gradle.kts
 grep -q 'START_NOT_STICKY' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
 grep -q 'Ignoring duplicate equivalent VPN start request' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
 grep -q 'HevConfigAdapter.adapt' app/src/main/java/com/rr/client/vpn/RRVpnService.kt
+# Selected Google Play services must not opt out of the VPN for FCM connections.
+if grep -Eq '\.allowBypass[[:space:]]*\(' app/src/main/java/com/rr/client/core/BoxServiceWrapper.kt app/src/main/java/com/rr/client/vpn/HevVpnEngine.kt; then exit 1; fi
 grep -q 'MTU = 8500' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
 grep -q 'pipeline: true' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt
 grep -q 'tcp-fastopen: true' app/src/main/java/com/rr/client/vpn/HevTunnelConfig.kt

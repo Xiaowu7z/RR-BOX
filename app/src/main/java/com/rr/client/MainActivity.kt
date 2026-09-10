@@ -810,6 +810,7 @@ class MainActivity : ComponentActivity() {
                         AppRoutingScreen(
                             apps = apps,
                             perAppMode = perAppMode,
+                            smartRouting = smartRouting,
                             selectedPackages = activePackages,
                             applyingRouting = applyingRouting,
                             loadingApps = !routingSelectionReady,
@@ -833,8 +834,9 @@ class MainActivity : ComponentActivity() {
                                             AppManager(this@MainActivity).getInstalledApps(includeSystem = true, visiblePackages = visible) to policy.proxyPackageGroups
                                         }
                                         val previous = proxySelectedPackages
+                                        val installedPackages = installedApps.map { it.packageName }.toSet()
                                         val updated = AutoProxySelectionPolicy.select(
-                                            installedPackages = installedApps.map { it.packageName }.toSet(),
+                                            installedPackages = installedPackages,
                                             currentSelection = previous,
                                             excludedPackages = autoProxyExcludedPackages,
                                             extraPackageGroups = groups
@@ -847,11 +849,14 @@ class MainActivity : ComponentActivity() {
                                             scheduleRoutingRestart(PerAppPolicyResolver.MODE_ALLOW_LIST, updated, smartRouting)
                                         }
                                         val added = (updated - previous).size
-                                        toast(when {
-                                            updated.isEmpty() -> "没有可自动选择的应用，请手动勾选需要代理的应用"
-                                            added == 0 -> "名单已更新，保留你的手动选择，共 ${updated.size} 个应用"
-                                            else -> "自动新增 $added 个应用，共选择 ${updated.size} 个，可继续手动调整"
-                                        })
+                                        val skipped = AutoProxySelectionPolicy.recommendedPackages(groups)
+                                            .count { it in installedPackages && it in autoProxyExcludedPackages }
+                                        val result = when {
+                                            updated.isEmpty() -> "未选中应用，可手动勾选"
+                                            added == 0 -> "名单已更新，共选 ${updated.size} 项"
+                                            else -> "新增 $added 项，共选 ${updated.size} 项"
+                                        }
+                                        toast(result + if (skipped > 0) "；保留 $skipped 项手动取消" else "")
                                     } catch (error: Exception) {
                                         if (error is CancellationException) throw error
                                         toast("自动选择失败，已保留原名单：${error.message ?: error.javaClass.simpleName}")

@@ -42,7 +42,7 @@
 #define MAX_LINE 16384
 #define MAX_UIDS 256
 #define MAX_BUSINESS_RANGES 64
-#define MAX_RANGES (MAX_UIDS + MAX_DNS * 2 + 2)
+#define MAX_RANGES (MAX_UIDS + MAX_DNS * 4 + 2)
 #define MAX_DNS 16
 #define MAX_ROUTES 48
 #define COMMAND_OUTPUT 65536
@@ -57,6 +57,7 @@ struct uid_range {
     uint32_t first, last;
     int family; /* zero: both families; otherwise an explicit host destination. */
     char destination[INET6_ADDRSTRLEN + 8];
+    int dns_protocol; /* 6/17: device resolver TCP/UDP port 53 only; zero: business/peer. */
     bool internal_peer; /* system-stack TCP return path, not application traffic. */
     bool added4, added6;
 };
@@ -620,6 +621,11 @@ static int change_rule(struct uid_range *range, int family, bool remove)
                       "pref", RULE_PRIORITY, "to", range->destination, "lookup", current.table, NULL);
     char uid_range[32];
     snprintf(uid_range, sizeof(uid_range), "%u-%u", range->first, range->last);
+    if (range->dns_protocol)
+        return run_ip(remove, NULL, 0, family == 4 ? "-4" : "-6", "rule", remove ? "del" : "add",
+                      "pref", RULE_PRIORITY, "iif", "lo", "to", range->destination,
+                      "uidrange", uid_range, "ipproto", range->dns_protocol == 6 ? "tcp" : "udp",
+                      "dport", "53", "lookup", current.table, NULL);
     if (*range->destination)
         return run_ip(remove, NULL, 0, family == 4 ? "-4" : "-6", "rule", remove ? "del" : "add",
                       "pref", RULE_PRIORITY, "iif", "lo", "to", range->destination,
@@ -661,6 +667,19 @@ static bool verify_rules(int family, bool expect_present)
                 (uid_field[9 + consumed] && !isspace((unsigned char)uid_field[9 + consumed]))) goto done;
         }
         char actual_destination[INET6_ADDRSTRLEN + 8] = "";
+        int dns_protocol = 0;
+        char *protocol_field = strstr(line, " ipproto ");
+        char *port_field = strstr(line, " dport ");
+        if (protocol_field || port_field) {
+            char protocol[16], port[16];
+            if (!protocol_field || !port_field ||
+                sscanf(protocol_field + 9, "%15s", protocol) != 1 ||
+                sscanf(port_field + 7, "%15s", port) != 1 ||
+                (strcmp(port, "53") != 0 && strcmp(port, "53-53") != 0)) goto done;
+            if (strcmp(protocol, "tcp") == 0 || strcmp(protocol, "6") == 0) dns_protocol = 6;
+            else if (strcmp(protocol, "udp") == 0 || strcmp(protocol, "17") == 0) dns_protocol = 17;
+            else goto done;
+        }
         char *to = strstr(line, " to ");
         if (to && sscanf(to + 4, "%53s", actual_destination) != 1) goto done;
         char *suffix = strchr(actual_destination, '/');
@@ -679,6 +698,7 @@ static bool verify_rules(int family, bool expect_present)
             suffix = strchr(expected_destination, '/');
             if (suffix) *suffix = '\0';
             if (!seen[i] && range->internal_peer == internal_peer &&
+                range->dns_protocol == dns_protocol &&
                 (internal_peer || (range->first == first && range->last == last)) &&
                 strcmp(expected_destination, actual_destination) == 0) {
                 seen[i] = true; matched = true; break;
@@ -736,17 +756,22 @@ static bool activate(void)
         snprintf(prefix, sizeof(prefix), "%s/%d", current.dns[i], v6 ? 128 : 32);
         if (!plan_route(v6 ? 6 : 4, prefix, false)) return false;
         /* Android's shared resolver cannot reliably retain the requesting app's
-         * socket UID. Device resolver endpoints therefore have explicit scope
-         * independent of app selection; the core UID is always exempt. */
+         * socket UID. Only TCP/UDP DNS has shared scope; a resolver can also be
+         * the LAN router or a public HTTPS endpoint. Capturing its entire IP
+         * would proxy unselected apps' business traffic with smart routing off.
+         * Never fall back to an unbounded host rule on unsupported kernels/ip. */
         {
             uint32_t starts[] = { 0, (uint32_t)current.app_uid + 1 };
             uint32_t ends[] = { (uint32_t)current.app_uid - 1, INT_MAX };
             for (size_t j = 0; j < 2; ++j) {
                 if (starts[j] > ends[j]) continue;
-                if (current.range_count >= MAX_RANGES) return false;
-                struct uid_range *range = &current.ranges[current.range_count++];
-                *range = (struct uid_range){ .first = starts[j], .last = ends[j], .family = v6 ? 6 : 4 };
-                snprintf(range->destination, sizeof(range->destination), "%s", prefix);
+                for (int protocol = 6; protocol <= 17; protocol += 11) {
+                    if (current.range_count >= MAX_RANGES) return false;
+                    struct uid_range *range = &current.ranges[current.range_count++];
+                    *range = (struct uid_range){ .first = starts[j], .last = ends[j],
+                        .family = v6 ? 6 : 4, .dns_protocol = protocol };
+                    snprintf(range->destination, sizeof(range->destination), "%s", prefix);
+                }
             }
         }
     }
@@ -771,12 +796,14 @@ static bool activate(void)
     for (size_t i = 0; i < current.range_count; ++i) {
         if (current.ranges[i].family != 6) {
             current.ranges[i].added4 = true;
-            failure_stage = current.ranges[i].internal_peer ? "install_ipv4_system_peer_rule" : "install_ipv4_uid_rule";
+            failure_stage = current.ranges[i].internal_peer ? "install_ipv4_system_peer_rule" :
+                current.ranges[i].dns_protocol ? "install_ipv4_dns_port_rule" : "install_ipv4_uid_rule";
             if (change_rule(&current.ranges[i], 4, false) != 0) return false;
         }
         if (current.ranges[i].family != 4) {
             current.ranges[i].added6 = true;
-            failure_stage = current.ranges[i].internal_peer ? "install_ipv6_system_peer_rule" : "install_ipv6_uid_rule";
+            failure_stage = current.ranges[i].internal_peer ? "install_ipv6_system_peer_rule" :
+                current.ranges[i].dns_protocol ? "install_ipv6_dns_port_rule" : "install_ipv6_uid_rule";
             if (change_rule(&current.ranges[i], 6, false) != 0) return false;
         }
     }

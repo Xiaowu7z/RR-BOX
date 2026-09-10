@@ -11,11 +11,13 @@ import os
 from pathlib import Path
 import select
 import shutil
+import shlex
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -119,21 +121,27 @@ def client(sock_name, events, replies, scenario):
             assert answer.startswith("ERROR "), answer
             passed("malformed_policy_rejected")
         else:
-            request(control, f"CONFIG include 0,{APP_UID},{TEST_UID} - 192.168.50.1", "CONFIGURED")
+            request(control, f"CONFIG include 0,{APP_UID},{TEST_UID} - 192.168.50.1,1.1.1.1,2001:db8::53", "CONFIGURED")
             assert rules() == before
             passed("configuration_does_not_activate_routes")
             if scenario == "activation_killed":
                 control.sendall(b"ACTIVATE\n")
                 parent_action("kill_during_activation")
                 passed("controller_killed_after_first_policy_mutation")
+            elif scenario == "dns_ports_unsupported":
+                answer = request(control, "ACTIVATE")
+                assert answer.startswith("ERROR activation_failed "), answer
+                assert "stage=install_ipv4_dns_port_rule" in answer and "unsupported selector" in answer, answer
+                passed("unsupported_dns_port_rule_fails_explicitly_without_whole_ip_fallback")
             else:
                 request(control, "ACTIVATE", "ACTIVE")
                 passed("dual_stack_activation_acknowledged")
                 request(control, "HEARTBEAT", "OK")
 
             if scenario == "normal":
-                def route(family, address, uid):
-                    return command(family, "route", "get", address, "uid", str(uid), check=False)
+                def route(family, address, uid, protocol=None, port=None):
+                    selectors = ["ipproto", protocol, "dport", str(port)] if protocol else []
+                    return command(family, "route", "get", address, "uid", str(uid), *selectors, check=False)
 
                 assert f"dev {tun_name}" in route("-4", "8.8.8.8", TEST_UID).stdout
                 passed("selected_uid_ipv4_enters_tun")
@@ -149,10 +157,29 @@ def client(sock_name, events, replies, scenario):
                 passed("private_destination_bypasses_tun")
                 assert f"dev {tun_name}" in route("-4", "192.168.50.1", TEST_UID).stdout
                 passed("explicit_private_dns_destination_enters_tun")
-                assert f"dev {tun_name}" in route("-4", "192.168.50.1", TEST_UID + 1).stdout
-                passed("shared_system_dns_capture_independent_of_selected_apps")
-                assert "dev rrtest0" in route("-4", "192.168.50.1", APP_UID).stdout
-                passed("core_dns_upstream_bypasses_tun_without_resolver_loop")
+                for family, address in (("-4", "192.168.50.1"), ("-4", "1.1.1.1"), ("-6", "2001:db8::53")):
+                    for protocol in ("tcp", "udp"):
+                        assert f"dev {tun_name}" in route(family, address, TEST_UID + 1, protocol, 53).stdout
+                        assert f"dev {tun_name}" in route(family, address, TEST_UID, protocol, 53).stdout
+                        core_route = route(family, address, APP_UID, protocol, 53)
+                        assert f"dev {tun_name}" not in core_route.stdout
+                        passed(f"shared_{family}_{address}_{protocol}_dns53_without_core_loop")
+                        for port in (80, 443, 853, 5228):
+                            direct = route(family, address, TEST_UID + 1, protocol, port)
+                            assert f"dev {tun_name}" not in direct.stdout, direct.stdout
+                            assert "dev rrtest0" in direct.stdout if family == "-4" else direct.returncode != 0
+                        passed(f"unselected_{family}_{address}_{protocol}_non_dns_business_bypasses_tun")
+                for protocol in ("tcp", "udp"):
+                    for port in (443, 5228, 5229, 5230):
+                        assert f"dev {tun_name}" in route("-4", "8.8.8.8", TEST_UID, protocol, port).stdout
+                        marked = command("-4", "route", "get", "8.8.8.8", "mark", "0x10065",
+                                         "uid", str(TEST_UID), "ipproto", protocol, "dport", str(port)).stdout
+                        assert f"dev {tun_name}" in marked, marked
+                        unselected = command("-4", "route", "get", "8.8.8.8", "mark", "0x10065",
+                                             "uid", str(TEST_UID + 1), "ipproto", protocol, "dport", str(port)).stdout
+                        assert "dev rrtest0" in unselected, unselected
+                    passed(f"selected_app_{protocol}_https_and_push_ports_enter_tun")
+                    passed(f"selected_app_{protocol}_physical_fwmark_cannot_bypass_uid_capture")
 
                 for protocol, kind in ((6, socket.SOCK_STREAM), (17, socket.SOCK_DGRAM)):
                     with socket.socket(socket.AF_INET, kind) as owner_socket:
@@ -189,7 +216,7 @@ def client(sock_name, events, replies, scenario):
                 passed("helper_sigkill_requested")
             elif scenario == "client_lost":
                 passed("app_control_socket_disconnected")
-            elif scenario == "activation_killed":
+            elif scenario in ("activation_killed", "dns_ports_unsupported"):
                 pass
             else:
                 raise AssertionError(scenario)
@@ -311,6 +338,9 @@ def main():
     command("addr", "add", "192.0.2.2/24", "dev", "rrtest0")
     command("link", "set", "rrtest0", "up")
     command("-4", "route", "add", "default", "via", "192.0.2.1", "dev", "rrtest0")
+    # Explicitly bound physical-network sockets carry an Android-like mark.
+    # UID capture at 9000 must precede this ordinary physical-network lookup.
+    command("-4", "rule", "add", "pref", "13000", "fwmark", "0x10065", "lookup", "main")
     # Unrelated policy state must survive every rollback.
     command("-4", "rule", "add", "pref", "8998", "uidrange", "50000-50000", "lookup", "49999")
     baseline = rules()
@@ -320,6 +350,29 @@ def main():
         report["scenarios"].append(run_scenario(str(Path(args.helper).resolve()), scenario))
         assert rules() == baseline, "unrelated rule changed or own rules leaked"
         assert interfaces() == baseline_interfaces, "interface leaked"
+    # Exercise a real partial activation/guardian rollback when an older ip/kernel
+    # rejects DNS port selectors. The injected failure lives in this temporary ip
+    # executable, never in the production helper or Android device configuration.
+    with tempfile.TemporaryDirectory(prefix="rrbox-root-dns-failure-") as temporary:
+        work = Path(temporary)
+        shim = work / "ip"
+        shim.write_text("#!/bin/sh\n" +
+                        'if [ "$2" = rule ] && [ "$3" = add ]; then\n' +
+                        '  for argument in "$@"; do\n' +
+                        '    if [ "$argument" = dport ]; then\n' +
+                        '      echo "unsupported selector dport" >&2\n      exit 2\n    fi\n  done\nfi\n' +
+                        f'exec {shlex.quote(IP)} "$@"\n')
+        shim.chmod(0o755)
+        failed_helper = work / "root-engine"
+        source = Path(__file__).resolve().parent.parent / "native" / "root_engine.c"
+        compiler = shutil.which("gcc")
+        assert compiler, "gcc is required to verify unsupported DNS-rule rollback"
+        subprocess.run([compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2",
+                        f'-DRRBOX_IP_PATH="{shim}"', str(source), "-o", str(failed_helper)], check=True)
+        report["scenarios"].append(run_scenario(str(failed_helper), "dns_ports_unsupported"))
+        assert rules() == baseline, "unsupported DNS selector left own rules or changed unrelated policy"
+        assert interfaces() == baseline_interfaces, "unsupported DNS selector leaked TUN interface"
     expired = subprocess.run([str(Path(args.helper).resolve()), "--socket", "rrbox-root-" + uuid.uuid4().hex,
                               "--uid", str(APP_UID), "--pid", str(os.getpid()), "--start", start_ticks(os.getpid()),
                               "--deadline", str(boot_seconds() - 1)], capture_output=True, timeout=5)

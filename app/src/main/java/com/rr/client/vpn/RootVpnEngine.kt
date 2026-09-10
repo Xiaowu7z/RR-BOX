@@ -166,8 +166,13 @@ class RootVpnEngine(context: Context, private val onUnexpectedExit: (String) -> 
             }
             Log.i(TAG, "Root TUN 已接管流量：${current.interfaceName}")
         } catch (error: Exception) {
-            failSession(current, "Root 激活失败：${error.message.orEmpty()}")
-            throw error
+            val failure = if (error !is CancellationException &&
+                Regex("stage=install_ipv[46]_dns_port_rule(?:\\s|$)").containsMatchIn(error.message.orEmpty())) {
+                IOException("Root DNS 端口规则安装失败，系统可能不支持按端口分流；" +
+                    "请使用稳定或 HEV 模式。${error.message.orEmpty()}", error)
+            } else error
+            failSession(current, "Root 激活失败：${failure.message.orEmpty()}")
+            throw failure
         }
     }
 

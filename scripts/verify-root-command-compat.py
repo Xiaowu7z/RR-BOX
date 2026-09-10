@@ -32,6 +32,11 @@ if "-N" in args:
 if len(args) < 3 or args[0] not in ("-4", "-6"):
     sys.exit(97)
 family = args[0]
+if scenario.startswith("dns_port_") and args[1:3] in (["rule", "add"], ["rule", "del"]):
+    if scenario == "dns_port_unsupported":
+        print('Error: argument "ipproto" is wrong: unsupported selector', file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
 global_rules = args[1:] == ["rule", "show"]
 filtered_rules = len(args) == 5 and args[1:4] == ["rule", "show", "table"]
 filtered_routes = len(args) == 5 and args[1:4] == ["route", "show", "table"]
@@ -115,7 +120,25 @@ if scenario == "verify_wrong_dns":
 prefix = "/32" if family == "-4" else "/128"
 if scenario == "verify_wide_dns":
     prefix = "/24" if family == "-4" else "/64"
-print(f"9000:\tfrom all to {destination}{prefix} iif lo uidrange 10003-10003 lookup {lookup}")
+for protocol in ("tcp", "udp"):
+    if scenario == "verify_missing_dns_udp" and protocol == "udp":
+        continue
+    selector = f" ipproto {protocol} dport 53"
+    if scenario == "verify_dns_numeric":
+        selector = f" ipproto {6 if protocol == 'tcp' else 17} dport 53-53"
+    elif scenario == "verify_dns_wide_port":
+        selector = f" ipproto {protocol} dport 1-65535"
+    elif scenario == "verify_dns_wrong_port":
+        selector = f" ipproto {protocol} dport 443"
+    elif scenario == "verify_dns_no_port":
+        selector = f" ipproto {protocol}"
+    elif scenario == "verify_dns_no_protocol":
+        selector = " dport 53"
+    elif scenario == "verify_dns_whole_ip":
+        selector = ""
+    elif scenario == "verify_dns_wrong_protocol":
+        selector = " ipproto icmp dport 53"
+    print(f"9000:\tfrom all to {destination}{prefix} iif lo uidrange 10003-10003{selector} lookup {lookup}")
 '''
 
 HARNESS = r'''
@@ -153,16 +176,29 @@ int main(int argc, char **argv)
     if (!app_alive()) return 94;
     snprintf(current.socket_name, sizeof(current.socket_name), "rrbox-root-0123456789abcdef");
     snprintf(current.table, sizeof(current.table), "42000");
-    current.range_count = 5;
+    current.range_count = 7;
     current.ranges[0] = (struct uid_range){ .first = 10002, .last = 10002 };
-    current.ranges[1] = (struct uid_range){ .first = 10003, .last = 10003, .family = 4 };
-    current.ranges[2] = (struct uid_range){ .first = 10003, .last = 10003, .family = 6 };
+    current.ranges[1] = (struct uid_range){ .first = 10003, .last = 10003, .family = 4, .dns_protocol = 6 };
+    current.ranges[2] = (struct uid_range){ .first = 10003, .last = 10003, .family = 6, .dns_protocol = 6 };
     snprintf(current.ranges[1].destination, sizeof(current.ranges[1].destination), "192.168.50.1/32");
     snprintf(current.ranges[2].destination, sizeof(current.ranges[2].destination), "2001:db8::53/128");
     current.ranges[3] = (struct uid_range){ .family = 4, .internal_peer = true };
     current.ranges[4] = (struct uid_range){ .family = 6, .internal_peer = true };
     snprintf(current.ranges[3].destination, sizeof(current.ranges[3].destination), "%s", SYSTEM_PEER_IPV4);
     snprintf(current.ranges[4].destination, sizeof(current.ranges[4].destination), "%s", SYSTEM_PEER_IPV6);
+    current.ranges[5] = current.ranges[1]; current.ranges[5].dns_protocol = 17;
+    current.ranges[6] = current.ranges[2]; current.ranges[6].dns_protocol = 17;
+    if (strcmp(argv[1], "dns_rule") == 0) {
+        int family = atoi(argv[2]);
+        size_t selected = family == 4 ? 1 : 2;
+        if (strcmp(argv[3], "udp") == 0) selected += 4;
+        int added = change_rule(&current.ranges[selected], family, false);
+        char diagnostic[sizeof(command_failure)];
+        memcpy(diagnostic, command_failure, sizeof(diagnostic));
+        int removed = change_rule(&current.ranges[selected], family, true);
+        printf("added=%d removed=%d diagnostic=%s\n", added, removed, diagnostic);
+        return 0;
+    }
     bool result = strcmp(argv[1], "reserve") == 0 ? reserve_table() :
         verify_rules(atoi(argv[2]), strcmp(argv[3], "present") == 0);
     printf("%s %s\n", result ? "true" : "false", current.table);
@@ -234,16 +270,37 @@ def main():
         for scenario in ("foreign_priority", "global_query_error", "filtered_query_error", "route_query_error"):
             check(scenario, action="reserve", expected=False)
         for family in (4, 6):
-            for scenario in ("verify_numeric", "verify_alias", "verify_peer_bare"):
+            for scenario in ("verify_numeric", "verify_alias", "verify_peer_bare", "verify_dns_numeric"):
                 check(scenario, family=family)
             for scenario in ("verify_wrong_uid", "verify_wrong_iif", "verify_wrong_dns",
                              "verify_missing", "verify_missing_dns", "verify_duplicate", "verify_query_error",
                              "verify_wrong_peer", "verify_wide_peer", "verify_missing_peer", "verify_duplicate_peer",
-                             "verify_peer_uid", "verify_peer_iif", "verify_peer_oif", "verify_peer_mark", "verify_wide_dns"):
+                             "verify_peer_uid", "verify_peer_iif", "verify_peer_oif", "verify_peer_mark", "verify_wide_dns",
+                             "verify_missing_dns_udp", "verify_dns_wide_port", "verify_dns_wrong_port",
+                             "verify_dns_no_port", "verify_dns_no_protocol", "verify_dns_whole_ip", "verify_dns_wrong_protocol"):
                 check(scenario, family=family, expected=False)
             check("verify_alias", family=family, present=False, expected=False)
             check("verify_clean", family=family, present=False)
             check("verify_query_error", family=family, present=False, expected=False)
+            for protocol in ("tcp", "udp"):
+                for scenario in ("dns_port_supported", "dns_port_unsupported"):
+                    state = work / f"{scenario}-{family}-{protocol}"
+                    state.mkdir()
+                    env = dict(os.environ, RRBOX_COMPAT_STATE=str(state), RRBOX_COMPAT_SCENARIO=scenario)
+                    result = subprocess.run([str(binary), "dns_rule", str(family), protocol],
+                                            env=env, capture_output=True, text=True, check=True, timeout=20)
+                    commands = [json.loads(line) for line in (state / "commands.jsonl").read_text().splitlines()]
+                    assert len(commands) == 2, (scenario, commands)
+                    assert commands[0][2] == "add" and commands[1][2] == "del", commands
+                    assert commands[0][:2] + commands[0][3:] == commands[1][:2] + commands[1][3:], commands
+                    for command in commands:
+                        assert command[command.index("ipproto") + 1] == protocol, command
+                        assert command[command.index("dport") + 1] == "53", command
+                    if scenario == "dns_port_supported":
+                        assert "added=0 removed=0" in result.stdout, result.stdout
+                    else:
+                        assert "added=2 removed=2" in result.stdout and "unsupported selector" in result.stdout, result.stdout
+                    checks.append(f"{scenario}_ipv{family}_{protocol}_exact_rollback_no_widening")
     report = {"checks": len(checks), "passed": checks, "network_mutations": False,
               "fixture": "Android-style ip without -N, numeric and aliased table output"}
     reports = ROOT / "build-reports"

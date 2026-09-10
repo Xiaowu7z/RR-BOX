@@ -46,6 +46,7 @@ import com.rr.client.ui.theme.TextSecondary
 fun AppRoutingScreen(
     apps: List<AppRouteConfig>,
     perAppMode: String,
+    smartRouting: Boolean,
     selectedPackages: Set<String>,
     applyingRouting: Boolean,
     loadingApps: Boolean,
@@ -113,7 +114,11 @@ fun AppRoutingScreen(
         Spacer(modifier = Modifier.height(10.dp))
         Text(
             text = when (perAppMode) {
-                PerAppPolicyResolver.MODE_ALLOW_LIST -> "只有勾选的应用使用 RRBOX 分流；其他应用直接联网。这个名单与“选中绕过”独立保存。"
+                PerAppPolicyResolver.MODE_ALLOW_LIST -> if (smartRouting) {
+                    "勾选应用按智能分流规则联网；未选应用的业务连接直接联网。这个名单与“选中绕过”独立保存。"
+                } else {
+                    "智能分流已关闭：勾选应用的互联网连接走代理，未选应用直接联网。选中的浏览器访问国内网站也会走代理。"
+                }
                 PerAppPolicyResolver.MODE_DISALLOW_LIST -> "这里勾选的应用完全绕过 RRBOX。这个名单与“仅选中代理”完全独立。"
                 else -> "所有应用使用 RRBOX 分流。开启智能分流后，国内服务直连，海外服务走当前代理节点。"
             },
@@ -166,10 +171,22 @@ fun AppRoutingScreen(
                     Text(if (selectingAutomatically) "正在选择…" else "自动选择")
                 }
                 Text(
-                    "一键勾选已安装的常用海外应用及谷歌服务，保留手动添加和取消。新装应用后可再点一次；浏览器按需手动勾选。",
+                    "一键勾选已安装的常用海外应用、Chrome / Edge 和谷歌后台推送服务，保留手动添加和取消。新装应用后可再点一次。",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
+                if (apps.any { it.packageName == "com.google.android.gms" }) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if ("com.google.android.gms" in selectedPackages) {
+                            "谷歌后台推送：已选中 Google Play 服务；直连可用时也可取消。"
+                        } else {
+                            "谷歌后台推送：未选中 Google Play 服务；直连可用时无需勾选，可按需手动开启。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if ("com.google.android.gms" in selectedPackages) CyanPrimary else TextSecondary
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -224,6 +241,13 @@ fun AppRoutingScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = TextSecondary
                                 )
+                                if (app.packageName == "com.google.android.gms") {
+                                    Text(
+                                        text = "谷歌后台推送（FCM）",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CyanPrimary
+                                    )
+                                }
                             }
                             Switch(
                                 checked = checked,

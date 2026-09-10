@@ -19,13 +19,14 @@
 
 RRBOX 为用户自己的节点和订阅提供 Android VPN / 代理连接，不提供线路、账户或服务器。以 **数据面正确性、移动网络稳定性、可测量性能** 为优先级，不替用户自动挑选地区或擅自切换业务节点。
 
-当前正式版本 **1.0.3（103）**，仅发布 **arm64-v8a**，最低 Android 8.0。默认使用 System TUN，不需要 Root；HEV native 数据面与需要授权的 Root 高级模式均为可选项。
+当前正式版本 **1.0.4（104）**，仅发布 **arm64-v8a**，最低 Android 8.0。默认使用 System TUN，不需要 Root；HEV native 数据面与需要授权的 Root 高级模式均为可选项。
 
-## 1.0.3 正式版
+## 1.0.4 正式版
 
-本版在 1.0.2 基础上加入应用自动选择和 ChatGPT 分流优化，保留 Root 完整接管与 TCP 回程修复、分流规则在线更新、X 旧目的地址恢复及微信 IPv6 直连恢复，同时保留石墨蓝界面、日志导出、节点分享和分组改名。
+本版在 1.0.3 基础上补齐应用自动选择预设，并检查关闭智能分流后的应用接管边界，保留 Root 完整接管与 TCP 回程修复、分流规则在线更新、X 旧目的地址恢复及微信 IPv6 直连恢复，同时保留石墨蓝界面、日志导出、节点分享和分组改名。
 
-- **自动选择应用**：“仅选中应用”内一键匹配已安装的常用海外应用及谷歌服务，保留手动勾选与取消，批量保存后重新应用一次；预装应用可见，浏览器按需手动选择。未选应用业务直接联网。
+- **自动选择应用**：“仅选中应用”内一键匹配已安装的常用海外应用及谷歌服务，保留手动勾选与取消，批量保存后重新应用一次；包含无启动图标的 Google Play 服务（FCM 后台推送）、Google 服务框架、Play 商店及 Chrome / Edge；补齐常用 Telegram 分支、Grok 和 Google 云应用。界面显示谷歌推送组件是否已选。未选应用业务直接联网。
+- **关闭智能分流的选中模式**：System / HEV / Root 均将选中应用的互联网连接交给代理，浏览器国内网页也不会再自动直连；选中名单与智能分流开关各自保存。Root 的跨应用 DNS 接管仅匹配物理 DNS 地址的 TCP / UDP 53 端口，避免误接管未选应用访问同一服务器的其他业务。Android 共享 UID 的应用可能联动，系统共享 DNS 不承诺逐应用归属。
 - **ChatGPT 分流优化**：依据 OpenAI 官方网络说明补充登录、验证码、上传和配置服务的精确域名；System / HEV / Root 共用代理 DNS 与路由策略，ChatGPT 包身份可用时增加公网代理保护。保持 HTTPS 透传与证书校验。
 - **JARVIS 助手直连**：智能分流开启时，明确指定的包名 `app.jarvis.assistant` 优先直连；`api.deepseek.com` 的连接和 DNS 使用直连策略。System / Root 需能识别应用身份，HEV 依靠域名规则。应用访问其他服务也按该包名直连，不自动切换代理。
 - **Root 接管与恢复**：按 UID 接管 IPv4 / IPv6，保留应用分流、自身出口防循环和断开清理；修复 System stack 内部 TCP 回包路径，并将物理路由变化纳入切网判断。
@@ -70,11 +71,11 @@ HEV:    Android TUN → HEV native/lwIP → loopback SOCKS5 → sing-box outboun
 
 ## 安装
 
-打开 [最新正式 Release](https://github.com/Xiaowu7z/RR-BOX/releases/latest)，选择 `RRBOX-1.0.3-arm64-v8a.apk`。使用默认 System 或 HEV 模式时，首次连接授权系统 VPN；选择 Root 模式时需另行授予 Root 权限。通知、相机和后台电池优化权限按对应功能需要设置。
+打开 [最新正式 Release](https://github.com/Xiaowu7z/RR-BOX/releases/latest)，选择 `RRBOX-1.0.4-arm64-v8a.apk`。使用默认 System 或 HEV 模式时，首次连接授权系统 VPN；选择 Root 模式时需另行授予 Root 权限。通知、相机和后台电池优化权限按对应功能需要设置。
 
 <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.rr.client%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FXiaowu7z%2FRR-BOX%22%2C%22author%22%3A%22Xiaowu7z%22%2C%22name%22%3A%22RRBOX%22%2C%22preferredApkIndex%22%3A0%2C%22additionalSettings%22%3A%22%7B%5C%22includePrereleases%5C%22%3Afalse%2C%5C%22fallbackToOlderReleases%5C%22%3Atrue%2C%5C%22apkFilterRegEx%5C%22%3A%5C%22RRBOX-%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B-arm64-v8a%5C%5C%5C%5C.apk%24%5C%22%2C%5C%22autoApkFilterByArch%5C%22%3Atrue%7D%22%2C%22overrideSource%22%3A%22GitHub%22%2C%22allowIdChange%22%3Afalse%7D"><img alt="Add to Obtainium" src="https://img.shields.io/badge/Add_to_Obtainium-6750A3?style=for-the-badge"></a>
 
-**从 1.0.0 / 1.0.1 / 1.0.2 升级到 1.0.3，请直接覆盖安装，无需卸载。** 包名与正式签名保持一致，覆盖安装保留本地节点、订阅和设置。版本号提升为 1.0.3 / 103，App 内“检查更新”可识别这次升级，Obtainium 也可跟踪正式 Release。安装后重新连接 RRBOX；“立即更新分流规则”只更新规则数据，不能替代本次 APK 升级。
+**从 1.0.0 / 1.0.1 / 1.0.2 / 1.0.3 升级到 1.0.4，请直接覆盖安装，无需卸载。** 包名与正式签名保持一致，覆盖安装保留本地节点、订阅和设置。版本号提升为 1.0.4 / 104，App 内“检查更新”可识别这次升级，Obtainium 也可跟踪正式 Release。安装后重新连接 RRBOX；“立即更新分流规则”只更新规则数据，不能替代本次 APK 升级。
 
 Release 同时提供 `BUILD-REPORT.md`、源码提交和 `SHA256SUMS.txt`，用于核对安装包来源与具体构建。
 

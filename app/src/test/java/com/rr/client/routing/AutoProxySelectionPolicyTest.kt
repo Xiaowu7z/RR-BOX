@@ -78,7 +78,7 @@ class AutoProxySelectionPolicyTest {
             "com.google.android.apps.bard"
         )
         val otherSystemApps = setOf(
-            "com.android.providers.downloads", "com.android.chrome", "com.android.settings",
+            "com.android.providers.downloads", "com.android.systemui", "com.android.settings",
             "com.google.android.webview", "com.google.android.inputmethod.latin",
             "com.google.android.gms.clone"
         )
@@ -87,6 +87,98 @@ class AutoProxySelectionPolicyTest {
             googleServices,
             AutoProxySelectionPolicy.select(
                 googleServices + otherSystemApps, emptySet(), emptySet()
+            )
+        )
+    }
+
+    @Test
+    fun selectsGoogleBackgroundPushAndAccountServicesWithTheForegroundApp() {
+        val installed = setOf(
+            "com.openai.chatgpt", "com.google.android.gms", "com.google.android.gsf",
+            "com.google.android.gsf.login", "com.android.vending"
+        )
+
+        assertEquals(installed, AutoProxySelectionPolicy.select(installed, emptySet(), emptySet()))
+        assertEquals(
+            installed - "com.google.android.gms",
+            AutoProxySelectionPolicy.select(
+                installed, installed, setOf("com.google.android.gms")
+            )
+        )
+    }
+
+    @Test
+    fun selectsKnownTelegramClientsGrokAndBrowsersByTheirExactIdentities() {
+        val expected = setOf(
+            "com.radolyn.ayugram", "com.iMe.android", "xyz.nextalone.nagram",
+            "ai.x.grok", "com.android.chrome", "com.microsoft.emmx"
+        )
+        val lookalikes = setOf(
+            "com.radolyn.ayugram.clone", "com.ime.android", "com.IME.android",
+            "xyz.nextalone.Nagram", "ai.x.grok.clone", "com.android.Chrome",
+            "com.microsoft.emmx.clone"
+        )
+
+        assertEquals(
+            expected,
+            AutoProxySelectionPolicy.select(expected + lookalikes, emptySet(), emptySet())
+        )
+    }
+
+    @Test
+    fun selectsGoogleCloudAppsWithoutBroadlySelectingGooglePackages() {
+        val expected = setOf(
+            "com.google.android.apps.docs.editors.docs",
+            "com.google.android.apps.docs.editors.sheets",
+            "com.google.android.apps.docs.editors.slides",
+            "com.google.android.apps.tasks", "com.google.android.keep",
+            "com.google.android.calendar", "com.google.android.contacts",
+            "com.google.android.apps.googleassistant", "com.google.android.play.games",
+            "com.google.android.apps.authenticator2"
+        )
+        val notRecommended = setOf(
+            "com.google.android.unreviewed", "com.google.android.apps.unreviewed",
+            "com.google.android.calculator", "com.google.android.deskclock",
+            "com.google.android.apps.nbu.files", "com.google.android.safetycore",
+            "com.google.android.apps.tasks.clone"
+        )
+
+        assertEquals(
+            expected,
+            AutoProxySelectionPolicy.select(expected + notRecommended, emptySet(), emptySet())
+        )
+    }
+
+    @Test
+    fun selectsKnownInternationalStoresAndAppUpdateClients() {
+        val expected = setOf(
+            "com.vkontakte.android", "com.valvesoftware.android.steam.community",
+            "org.fdroid.fdroid", "dev.imranr.obtainium", "dev.imranr.obtainium.fdroid"
+        )
+
+        assertEquals(
+            expected,
+            AutoProxySelectionPolicy.select(
+                expected + "dev.imranr.obtainium.clone", emptySet(), emptySet()
+            )
+        )
+    }
+
+    @Test
+    fun homeAndWalletStayManualButInstalledUserChoicesArePreserved() {
+        val manualApps = setOf(
+            "com.google.android.apps.chromecast.app", "com.google.android.apps.walletnfcrel"
+        )
+
+        assertTrue(AutoProxySelectionPolicy.select(manualApps, emptySet(), emptySet()).isEmpty())
+        assertEquals(
+            manualApps,
+            AutoProxySelectionPolicy.select(manualApps, manualApps, emptySet())
+        )
+        assertEquals(
+            setOf("com.google.android.apps.chromecast.app"),
+            AutoProxySelectionPolicy.select(
+                manualApps, manualApps, setOf("com.google.android.apps.walletnfcrel")
             )
         )
     }
