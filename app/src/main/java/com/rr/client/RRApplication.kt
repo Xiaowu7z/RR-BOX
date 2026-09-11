@@ -23,6 +23,7 @@ class RRApplication : Application() {
 
         // Start asynchronous local log storage before observers emit their first entries.
         RRLogStore.initialize(this)
+        com.rr.client.lab.ProcessExitDiagnostics.schedule(this)
 
         initializeLibbox()
 

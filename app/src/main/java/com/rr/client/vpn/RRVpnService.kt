@@ -537,6 +537,7 @@ class RRVpnService : VpnService() {
                         val prefs = RRApplication.instance.preferencesManager
                         resolvedEngine = ruleActivation?.engine ?: prefs.tunEngine.first()
                         requestedEngine = resolvedEngine
+                        com.rr.client.lab.ProcessExitDiagnostics.mark(this@RRVpnService, resolvedEngine, "STARTING", generation)
                         completePendingCleanup()
 
                         if (refreshFromPreferences && ruleActivation == null) {
@@ -648,6 +649,7 @@ class RRVpnService : VpnService() {
                 resetTrafficState()
                 _isStarting.value = false
                 _isRunning.value = true
+                com.rr.client.lab.ProcessExitDiagnostics.mark(this@RRVpnService, resolvedEngine, "RUNNING", generation)
                 RRLogStore.record("CORE", "转发启动完成；引擎=$resolvedEngine；运行代次=$generation；" +
                     "核心及引擎已就绪，不代表各业务请求成功")
                 _activeRuntimeNodeId.value = activeNodeId.takeIf(String::isNotBlank)
@@ -695,6 +697,7 @@ class RRVpnService : VpnService() {
                         "sing-box 内核未能启动"
                     }
                 _lastError.value = reason
+                com.rr.client.lab.ProcessExitDiagnostics.mark(this@RRVpnService, resolvedEngine, "FAILED", generation)
                 RRLogStore.record("CORE", "转发启动失败；引擎=$resolvedEngine；运行代次=$generation；$reason")
                 if (ruleActivation != null) {
                     ChinaRuleSetManager.noteActivationFailure(this@RRVpnService, ruleActivation.candidateGeneration, reason, ruleActivation.operation)
@@ -1083,6 +1086,9 @@ class RRVpnService : VpnService() {
                 return@launch
             }
             activeConfigJson = null
+            if (_lastError.value == null) {
+                com.rr.client.lab.ProcessExitDiagnostics.mark(this@RRVpnService, activeEngine, "STOPPED", generation)
+            }
             RRLogStore.record("CORE", "转发停止完成；引擎=$activeEngine；运行代次=$generation")
             activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
             requestedEngine = PreferencesManager.TUN_ENGINE_SYSTEM

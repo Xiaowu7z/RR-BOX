@@ -1,8 +1,10 @@
 --- a/src/hev-jni.c
 +++ b/src/hev-jni.c
-@@ -23,0 +24 @@
+@@ -23,0 +24,2 @@
 +#include "rr-app-routing.h"
-@@ -51,0 +53,30 @@
++#include "rr-jni-owner-dispatch.h"
+@@ -51 +53,10 @@
+-static pthread_key_t current_jni_env;
 +static jclass route_class;
 +static jmethodID route_method;
 +static void native_set_app_routing(JNIEnv *env, jobject thiz, jboolean enabled) {
@@ -11,36 +13,36 @@
 +}
 +int64_t rr_jni_resolve_route(int protocol, const char *source, int source_port,
 +                             const char *destination, int destination_port) {
-+    JNIEnv *env = pthread_getspecific(current_jni_env);
-+    jstring src, dst;
-+    jlong token = -1;
-+    if (!env) {
-+        if ((*java_vm)->AttachCurrentThread(java_vm, &env, NULL) != JNI_OK) return -1;
-+        pthread_setspecific(current_jni_env, env);
-+    }
-+    src = (*env)->NewStringUTF(env, source);
-+    if (!src) goto fail;
-+    dst = (*env)->NewStringUTF(env, destination);
-+    if (!dst) { (*env)->DeleteLocalRef(env, src); goto fail; }
-+    token = (*env)->CallStaticLongMethod(env, route_class, route_method,
-+                                        protocol, src, source_port, dst, destination_port);
-+    (*env)->DeleteLocalRef(env, src);
-+    (*env)->DeleteLocalRef(env, dst);
-+fail:
-+    if ((*env)->ExceptionCheck(env)) {
-+        (*env)->ExceptionClear(env);
-+        return -1;
-+    }
-+    return token;
++    return rr_jni_owner_resolve(protocol, source, source_port, destination, destination_port);
 +}
-@@ -59,0 +91 @@
+@@ -59,0 +71 @@
 +    { "TProxySetAppRouting", "(Z)V", (void *)native_set_app_routing },
-@@ -87,0 +120,5 @@
+@@ -67,5 +78,0 @@
+-static void
+-detach_current_thread (void *env)
+-{
+-    (*java_vm)->DetachCurrentThread (java_vm);
+-}
+@@ -87,0 +95,5 @@
 +    route_method = (*env)->GetStaticMethodID(env, klass, "resolveRoute",
 +        "(ILjava/lang/String;ILjava/lang/String;I)J");
 +    if (!route_method) { (*env)->DeleteLocalRef(env, klass); return JNI_ERR; }
 +    route_class = (*env)->NewGlobalRef(env, klass);
 +    if (!route_class) { (*env)->DeleteLocalRef(env, klass); return JNI_ERR; }
+@@ -94 +105,0 @@
+-    pthread_key_create (&current_jni_env, detach_current_thread);
+@@ -105,0 +117 @@
++    rr_jni_owner_stop();
+@@ -149,0 +162,5 @@
++    if (rr_app_route_enabled() && !rr_jni_owner_start(java_vm, route_class, route_method)) {
++        free(tdata->path);
++        free(tdata);
++        goto exit;
++    }
+@@ -152,0 +170 @@
++        rr_jni_owner_stop();
+@@ -172,0 +191 @@
++    rr_jni_owner_stop();
 --- a/src/hev-socks5-session-udp.c
 +++ b/src/hev-socks5-session-udp.c
 @@ -30,0 +31 @@
@@ -169,6 +171,208 @@
 +#ifdef ANDROID
 +int64_t rr_jni_resolve_route(int protocol, const char *source, int source_port,
 +                             const char *destination, int destination_port);
++#endif
++#endif
+--- /dev/null
++++ b/src/rr-jni-owner-dispatch.c
+@@ -0,0 +1,185 @@
++/* HEV runs on alternate task stacks. ART/JVM must only be entered from a real
++ * pthread stack, including AttachCurrentThread itself. One daemon dispatches
++ * owner lookups; the HEV callback never enters JNI and never waits indefinitely.
++ * The dispatcher lives for the loaded library's process lifetime. A blocked
++ * Android Binder call cannot prevent HEV stop/restart or accumulate threads. */
++#ifdef ANDROID
++#include "rr-jni-owner-dispatch.h"
++#include <errno.h>
++#include <pthread.h>
++#include <string.h>
++#include <time.h>
++
++#define RR_OWNER_WAIT_MS 500
++#define RR_OWNER_START_WAIT_MS 2000
++typedef struct {
++    int protocol, source_port, destination_port;
++    char source[48], destination[48];
++    uint64_t sequence, epoch;
++} RROwnerRequest;
++
++static pthread_mutex_t owner_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t owner_changed;
++static pthread_once_t owner_once = PTHREAD_ONCE_INIT;
++static int condition_ready, thread_started, ready, failed, active, busy, pending;
++static JavaVM *owner_vm;
++static jclass owner_class;
++static jmethodID owner_method;
++static uint64_t epoch, sequence, completed_sequence;
++static int64_t completed_token;
++static RROwnerRequest request;
++
++static void initialize_condition(void) {
++    pthread_condattr_t attr;
++    if (pthread_condattr_init(&attr)) return;
++    if (!pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) &&
++        !pthread_cond_init(&owner_changed, &attr)) condition_ready = 1;
++    pthread_condattr_destroy(&attr);
++}
++
++static struct timespec deadline_after(int milliseconds) {
++    struct timespec deadline;
++    clock_gettime(CLOCK_MONOTONIC, &deadline);
++    deadline.tv_nsec += (long)milliseconds * 1000000;
++    deadline.tv_sec += deadline.tv_nsec / 1000000000;
++    deadline.tv_nsec %= 1000000000;
++    return deadline;
++}
++
++static int64_t invoke_owner(JNIEnv *env, const RROwnerRequest *current) {
++    jstring source = NULL, destination = NULL;
++    jlong token = -1;
++    source = (*env)->NewStringUTF(env, current->source);
++    if (!source) goto done;
++    destination = (*env)->NewStringUTF(env, current->destination);
++    if (!destination) goto done;
++    token = (*env)->CallStaticLongMethod(env, owner_class, owner_method,
++        current->protocol, source, current->source_port,
++        destination, current->destination_port);
++done:
++    /* Java exceptions (including OOM) reject this flow, never poison the next
++     * invocation. Delete only references created on this dispatcher thread. */
++    if ((*env)->ExceptionCheck(env)) {
++        (*env)->ExceptionClear(env);
++        token = -1;
++    }
++    if (source) (*env)->DeleteLocalRef(env, source);
++    if (destination) (*env)->DeleteLocalRef(env, destination);
++    return token > 0 && (token & 65535) ? token : -1;
++}
++
++static void *owner_thread(void *unused) {
++    JNIEnv *env = NULL;
++    JavaVMAttachArgs args = {JNI_VERSION_1_4, "rr-hev-owner", NULL};
++    /* The C JNI interface uses different pointer spellings in Android/OpenJDK.
++     * The output is a JNIEnv* in both implementations. */
++    jint status = (*owner_vm)->AttachCurrentThreadAsDaemon(owner_vm, (void *)&env, &args);
++    (void)unused;
++    pthread_mutex_lock(&owner_mutex);
++    ready = status == JNI_OK;
++    failed = !ready;
++    pthread_cond_broadcast(&owner_changed);
++    if (!ready) {
++        pthread_mutex_unlock(&owner_mutex);
++        return NULL;
++    }
++    for (;;) {
++        RROwnerRequest current;
++        int64_t token;
++        while (!pending) pthread_cond_wait(&owner_changed, &owner_mutex);
++        current = request;
++        pending = 0;
++        /* A request cancelled before execution must not query a later router. */
++        if (!active || current.epoch != epoch) {
++            busy = 0;
++            pthread_cond_broadcast(&owner_changed);
++            continue;
++        }
++        pthread_mutex_unlock(&owner_mutex);
++        token = invoke_owner(env, &current);
++        pthread_mutex_lock(&owner_mutex);
++        completed_token = token;
++        completed_sequence = current.sequence;
++        busy = 0;
++        pthread_cond_broadcast(&owner_changed);
++    }
++    /* Intentionally process-lifetime: daemon attachment does not keep the VM
++     * alive, and the one outstanding callback has no HEV stack/PCB pointers. */
++    return NULL;
++}
++
++int rr_jni_owner_start(JavaVM *vm, jclass klass, jmethodID method) {
++    struct timespec deadline = deadline_after(RR_OWNER_START_WAIT_MS);
++    int result = 0;
++    pthread_once(&owner_once, initialize_condition);
++    if (!condition_ready) return 0;
++    pthread_mutex_lock(&owner_mutex);
++    if (!thread_started && !failed) {
++        pthread_t thread;
++        pthread_attr_t attr;
++        owner_vm = vm;
++        owner_class = klass;
++        owner_method = method;
++        if (pthread_attr_init(&attr)) {
++            failed = 1;
++        } else {
++            /* A normal pthread stack, never a HEV task stack. Detach at creation
++             * so even an attachment failure does not leak a joinable thread. */
++            if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) ||
++                pthread_create(&thread, &attr, owner_thread, NULL)) failed = 1;
++            else thread_started = 1;
++            pthread_attr_destroy(&attr);
++        }
++    }
++    while (!ready && !failed) {
++        if (pthread_cond_timedwait(&owner_changed, &owner_mutex, &deadline)) break;
++    }
++    if (ready && !failed) {
++        ++epoch;
++        active = 1;
++        result = 1;
++    }
++    pthread_mutex_unlock(&owner_mutex);
++    return result;
++}
++
++void rr_jni_owner_stop(void) {
++    pthread_once(&owner_once, initialize_condition);
++    if (!condition_ready) return;
++    pthread_mutex_lock(&owner_mutex);
++    active = 0;
++    ++epoch;
++    /* Unblock a waiting HEV task without waiting for an Android Binder call. */
++    pthread_cond_broadcast(&owner_changed);
++    pthread_mutex_unlock(&owner_mutex);
++}
++
++int64_t rr_jni_owner_resolve(int protocol, const char *source, int source_port,
++                            const char *destination, int destination_port) {
++    struct timespec deadline = deadline_after(RR_OWNER_WAIT_MS);
++    uint64_t expected_sequence, expected_epoch;
++    int64_t token = -1;
++    if (!source || !destination || strlen(source) >= sizeof(request.source) ||
++        strlen(destination) >= sizeof(request.destination)) return -1;
++    pthread_once(&owner_once, initialize_condition);
++    if (!condition_ready) return -1;
++    pthread_mutex_lock(&owner_mutex);
++    if (!active || !ready || failed || busy) goto done;
++    expected_sequence = ++sequence;
++    expected_epoch = epoch;
++    request = (RROwnerRequest){.protocol = protocol, .source_port = source_port,
++        .destination_port = destination_port, .sequence = expected_sequence, .epoch = expected_epoch};
++    strcpy(request.source, source);
++    strcpy(request.destination, destination);
++    busy = pending = 1;
++    pthread_cond_broadcast(&owner_changed);
++    while (active && epoch == expected_epoch && completed_sequence != expected_sequence) {
++        if (pthread_cond_timedwait(&owner_changed, &owner_mutex, &deadline)) break;
++    }
++    if (active && epoch == expected_epoch && completed_sequence == expected_sequence)
++        token = completed_token;
++done:
++    pthread_mutex_unlock(&owner_mutex);
++    return token;
++}
++#endif
+--- /dev/null
++++ b/src/rr-jni-owner-dispatch.h
+@@ -0,0 +1,11 @@
++#ifndef RR_JNI_OWNER_DISPATCH_H
++#define RR_JNI_OWNER_DISPATCH_H
++#ifdef ANDROID
++#include <jni.h>
++#include <stdint.h>
++int rr_jni_owner_start(JavaVM *vm, jclass klass, jmethodID method);
++void rr_jni_owner_stop(void);
++int64_t rr_jni_owner_resolve(int protocol, const char *source, int source_port,
++                            const char *destination, int destination_port);
 +#endif
 +#endif
 --- a/third-part/lwip/src/core/udp.c

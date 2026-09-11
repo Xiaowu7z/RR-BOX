@@ -11,8 +11,8 @@ aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
 "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
 "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
 grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-grep -q "versionCode='106'" dist/PACKAGE-REPORT.txt
-grep -q "versionName='1.0.6'" dist/PACKAGE-REPORT.txt
+grep -q "versionCode='107'" dist/PACKAGE-REPORT.txt
+grep -q "versionName='1.0.7'" dist/PACKAGE-REPORT.txt
 grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
 grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
@@ -33,6 +33,7 @@ cp build-reports/SOURCE-AUDIT.json dist/SOURCE-AUDIT.json
 cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
 cp build-reports/APP-NODE-ROUTING-REPORT.json dist/APP-NODE-ROUTING-REPORT.json
 cp build-reports/HEV-APP-ROUTING-REPORT.json dist/HEV-APP-ROUTING-REPORT.json
+cp build-reports/HEV-JNI-OWNER-REPORT.json dist/HEV-JNI-OWNER-REPORT.json
 cp build-reports/DESTINATION-RECOVERY-REPORT.json dist/DESTINATION-RECOVERY-REPORT.json
 cp build-reports/WECHAT-IPV6-REPORT.json dist/WECHAT-IPV6-REPORT.json
 cp build-reports/HEV-DNS-REPORT.json dist/HEV-DNS-REPORT.json
@@ -40,12 +41,12 @@ cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
 cp build-reports/ROOT-TCP-REPORT.json dist/ROOT-TCP-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
-# RRBOX 1.0.6 Build Report
+# RRBOX 1.0.7 Build Report
 
 - Source commit: $(git rev-parse HEAD)
 - Package: com.rr.client
-- Version code: 106
-- Version name: 1.0.6
+- Version code: 107
+- Version name: 1.0.7
 - ABI: arm64-v8a
 - APK: ${OUTPUT_APK_NAME}
 - APK size: ${apk_size} bytes
@@ -53,7 +54,9 @@ cat > dist/BUILD-REPORT.md <<EOF
 - Signing certificate SHA-256: ${certificate_sha256}
 - System engine: sing-box system TUN stable baseline
 - HEV engine: native/lwIP + unified real DNS + SOCKS5 pipeline + best-effort client TFO
+- HEV owner lookup: dedicated JNI pthread; real JVM with HEV coroutine owner, timeout and restart verification
 - Root engine: native nonpersistent TUN handed to System stack, UID policy routing, exact TCP peer return routes, explicit DNS and dual-stack routes, supervised rollback
+- Root DNS rules: exact netlink attributes and readback; Android legacy ip parser compatibility
 - Root verification: isolated Linux TUN/FD/routing/cleanup plus real System stack TCP/UDP with Android-style policy routing; Android real-device acceptance still required
 - Root lab: optional isolated capability probe and export
 - Network continuity: event-driven physical path tracking + validated runtime recovery

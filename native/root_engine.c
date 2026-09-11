@@ -614,6 +614,8 @@ static int change_route(struct route_entry *route, bool remove)
                   "table", current.table, NULL);
 }
 
+#include "root_engine_rules.h"
+
 static int change_rule(struct uid_range *range, int family, bool remove)
 {
     if (range->internal_peer)
@@ -621,11 +623,7 @@ static int change_rule(struct uid_range *range, int family, bool remove)
                       "pref", RULE_PRIORITY, "to", range->destination, "lookup", current.table, NULL);
     char uid_range[32];
     snprintf(uid_range, sizeof(uid_range), "%u-%u", range->first, range->last);
-    if (range->dns_protocol)
-        return run_ip(remove, NULL, 0, family == 4 ? "-4" : "-6", "rule", remove ? "del" : "add",
-                      "pref", RULE_PRIORITY, "iif", "lo", "to", range->destination,
-                      "uidrange", uid_range, "ipproto", range->dns_protocol == 6 ? "tcp" : "udp",
-                      "dport", "53", "lookup", current.table, NULL);
+    if (range->dns_protocol) return rr_change_dns_rule(range, family, remove);
     if (*range->destination)
         return run_ip(remove, NULL, 0, family == 4 ? "-4" : "-6", "rule", remove ? "del" : "add",
                       "pref", RULE_PRIORITY, "iif", "lo", "to", range->destination,
@@ -636,81 +634,9 @@ static int change_rule(struct uid_range *range, int family, bool remove)
 
 static bool verify_rules(int family, bool expect_present)
 {
-    char *rules = malloc(COMMAND_OUTPUT);
-    if (!rules) return false;
-    bool answer = false;
-    if (run_ip(!expect_present, rules, COMMAND_OUTPUT, family == 4 ? "-4" : "-6",
-               "rule", "show", "table", current.table, NULL) != 0) goto done;
-    size_t found = 0, expected = 0;
-    bool seen[MAX_RANGES] = { false };
-    for (size_t i = 0; i < current.range_count; ++i)
-        if (current.ranges[i].family == 0 || current.ranges[i].family == family) ++expected;
-    char *save = NULL;
-    for (char *line = strtok_r(rules, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-        char *end;
-        unsigned long priority = strtoul(line, &end, 10);
-        if (end == line || *end != ':' || priority != 9000) continue;
-        if (!expect_present) goto done;
-        char *uid_field = strstr(line, "uidrange ");
-        bool internal_peer = uid_field == NULL;
-        unsigned first = 0, last = 0;
-        if (internal_peer) {
-            /* Peer reachability must also serve kernel reverse-path lookups;
-             * an iif/UID/mark restriction would silently re-break TCP. */
-            if (strstr(line, "from all ") == NULL || strstr(line, " iif ") ||
-                strstr(line, " oif ") || strstr(line, " fwmark ") || strstr(line, " ipproto ") ||
-                strstr(line, " sport ") || strstr(line, " dport ")) goto done;
-        } else {
-            if (strstr(line, "iif lo") == NULL) goto done;
-            int consumed = 0;
-            if (sscanf(uid_field + 9, "%u-%u%n", &first, &last, &consumed) != 2 ||
-                (uid_field[9 + consumed] && !isspace((unsigned char)uid_field[9 + consumed]))) goto done;
-        }
-        char actual_destination[INET6_ADDRSTRLEN + 8] = "";
-        int dns_protocol = 0;
-        char *protocol_field = strstr(line, " ipproto ");
-        char *port_field = strstr(line, " dport ");
-        if (protocol_field || port_field) {
-            char protocol[16], port[16];
-            if (!protocol_field || !port_field ||
-                sscanf(protocol_field + 9, "%15s", protocol) != 1 ||
-                sscanf(port_field + 7, "%15s", port) != 1 ||
-                (strcmp(port, "53") != 0 && strcmp(port, "53-53") != 0)) goto done;
-            if (strcmp(protocol, "tcp") == 0 || strcmp(protocol, "6") == 0) dns_protocol = 6;
-            else if (strcmp(protocol, "udp") == 0 || strcmp(protocol, "17") == 0) dns_protocol = 17;
-            else goto done;
-        }
-        char *to = strstr(line, " to ");
-        if (to && sscanf(to + 4, "%53s", actual_destination) != 1) goto done;
-        char *suffix = strchr(actual_destination, '/');
-        if (suffix) {
-            char *prefix_end;
-            unsigned long bits = strtoul(suffix + 1, &prefix_end, 10);
-            if (prefix_end == suffix + 1 || *prefix_end || bits != (family == 4 ? 32U : 128U)) goto done;
-            *suffix = '\0';
-        }
-        bool matched = false;
-        for (size_t i = 0; i < current.range_count; ++i) {
-            struct uid_range *range = &current.ranges[i];
-            if (range->family != 0 && range->family != family) continue;
-            char expected_destination[INET6_ADDRSTRLEN + 8];
-            snprintf(expected_destination, sizeof(expected_destination), "%s", range->destination);
-            suffix = strchr(expected_destination, '/');
-            if (suffix) *suffix = '\0';
-            if (!seen[i] && range->internal_peer == internal_peer &&
-                range->dns_protocol == dns_protocol &&
-                (internal_peer || (range->first == first && range->last == last)) &&
-                strcmp(expected_destination, actual_destination) == 0) {
-                seen[i] = true; matched = true; break;
-            }
-        }
-        if (!matched) goto done;
-        ++found;
-    }
-    answer = expect_present ? found == expected : found == 0;
-done:
-    free(rules);
-    return answer;
+    /* Old Android ip also omits modern selectors when printing rules. Read the
+     * kernel attributes directly so missing/widened DNS scope cannot pass. */
+    return rr_verify_rule_snapshot(family, expect_present);
 }
 
 static bool start_guardian(void);
@@ -759,7 +685,7 @@ static bool activate(void)
          * socket UID. Only TCP/UDP DNS has shared scope; a resolver can also be
          * the LAN router or a public HTTPS endpoint. Capturing its entire IP
          * would proxy unselected apps' business traffic with smart routing off.
-         * Never fall back to an unbounded host rule on unsupported kernels/ip. */
+         * Never fall back to an unbounded host rule on unsupported kernels. */
         {
             uint32_t starts[] = { 0, (uint32_t)current.app_uid + 1 };
             uint32_t ends[] = { (uint32_t)current.app_uid - 1, INT_MAX };
