@@ -15,6 +15,7 @@ import android.os.SystemClock
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import com.rr.client.core.HevConfigAdapter
+import com.rr.client.lab.AppRoutingDiagnostics
 import java.net.InetSocketAddress
 
 /** Queries the original Android socket before HEV replaces its owner with the RRBOX UID. */
@@ -22,7 +23,8 @@ import java.net.InetSocketAddress
 class HevConnectionOwnerRouter(
     private val vpnService: VpnService,
     plan: HevAppRoutingPlan,
-    private val onLog: (String) -> Unit
+    private val onLog: (String) -> Unit,
+    private val routingDiagnostics: AppRoutingDiagnostics.RuntimeSnapshot? = null
 ) {
     private val connectivity = vpnService.getSystemService(ConnectivityManager::class.java)
     private val packagePorts = plan.packagePorts.toMap()
@@ -63,12 +65,15 @@ class HevConnectionOwnerRouter(
         handler.removeCallbacks(retryRefresh)
         try {
             val ports = mutableMapOf<Int, Int>()
+            val mappedPackages = mutableMapOf<Int, MutableList<String>>()
             packagePorts.forEach { (packageName, port) ->
                 val uid = try {
                     vpnService.packageManager.getApplicationInfo(packageName, 0).uid
                 } catch (_: PackageManager.NameNotFoundException) {
+                    policyLog("HEV 应用身份映射缺失；应用=$packageName；原因=未安装或当前用户不可见")
                     return@forEach
                 }
+                mappedPackages.getOrPut(uid) { mutableListOf() }.add(packageName)
                 val previous = ports.put(uid, port)
                 if (previous != null && previous != port) {
                     val message = "共享 UID 的应用设置了不同节点，请将这些应用设为同一条线路：$packageName"
@@ -76,7 +81,8 @@ class HevConnectionOwnerRouter(
                     // A package installed while connected can introduce a new conflict.
                     // Block just this shared UID while other applications keep working.
                     ports[uid] = -1
-                    onLog("HEV 应用线路：$message")
+                    policyLog("HEV 应用线路阻断；原因=$message")
+                    runCatching { onLog("HEV 应用线路：$message") }
                 }
             }
             ports.toMap().forEach { (uid, port) ->
@@ -86,18 +92,26 @@ class HevConnectionOwnerRouter(
                     val message = "同一 UID 的应用必须一起设置相同节点，请检查：${siblings.joinToString()}"
                     if (failOnConflict) error(message)
                     ports[uid] = -1
-                    onLog("HEV 应用线路：$message")
+                    policyLog("HEV 应用线路阻断；原因=$message")
+                    runCatching { onLog("HEV 应用线路：$message") }
                 }
             }
             val knownAppUids = vpnService.packageManager.getInstalledApplications(0)
                 .mapTo(mutableSetOf()) { it.uid }
             generation = (generation % 65535) + 1
             snapshot = OwnerSnapshot(ports.toMap(), knownAppUids, generation)
+            // Package-manager state is checked only while refreshing, never for each packet.
+            mappedPackages.forEach { (uid, names) ->
+                names.sorted().chunked(12).forEach { group ->
+                    policyLog("HEV 应用身份映射；身份代次=$generation；UID=$uid；应用=${group.joinToString(",")}；" +
+                        "入口端口=${ports[uid]}；结果=${if ((ports[uid] ?: -1) > 0) "可用" else "共享身份冲突，已阻断"}")
+                }
+            }
         } catch (error: Exception) {
             if (failOnConflict) throw error
             // Transient package-manager failures recover automatically; never publish an
             // empty fallback map, which would send bound apps through the main outlet.
-            rejectUnknown()
+            rejectUnknown("应用身份映射刷新失败")
             handler.postDelayed(retryRefresh, 1_000L)
         }
     }
@@ -110,9 +124,9 @@ class HevConnectionOwnerRouter(
         destinationAddress: String,
         destinationPort: Int
     ): Long {
-        val current = snapshot ?: return rejectUnknown()
-        if (protocol != 6 && protocol != 17) return rejectUnknown()
-        if (sourcePort !in 1..65535 || destinationPort !in 1..65535) return rejectUnknown()
+        val current = snapshot ?: return rejectUnknown("应用身份映射更新中或已关闭")
+        if (protocol != 6 && protocol != 17) return rejectUnknown("不支持的连接协议")
+        if (sourcePort !in 1..65535 || destinationPort !in 1..65535) return rejectUnknown("连接端口无效")
         // parseNumericAddress never performs DNS on the single native worker.
         val uid = try {
             connectivity.getConnectionOwnerUid(
@@ -121,14 +135,15 @@ class HevConnectionOwnerRouter(
                 InetSocketAddress(InetAddresses.parseNumericAddress(destinationAddress), destinationPort)
             )
         } catch (_: Exception) {
-            return rejectUnknown()
+            return rejectUnknown("系统连接所属 UID 查询异常")
         }
-        if (uid < 0 || snapshot !== current) return rejectUnknown()
+        if (uid < 0) return rejectUnknown("系统未返回有效的连接所属 UID")
+        if (snapshot !== current) return rejectUnknown("查询期间应用身份映射已变化")
         // Shared netd DNS is handled before application rules in every engine. Isolated
         // or otherwise unidentifiable UIDs must not send business traffic via the main node.
-        if (uid !in current.knownAppUids && destinationPort != 53) return rejectUnknown()
+        if (uid !in current.knownAppUids && destinationPort != 53) return rejectUnknown("UID 未对应已安装应用，且不是共享 DNS")
         val port = current.uidPorts[uid] ?: HevConfigAdapter.SOCKS_PORT
-        if (port < 1) return rejectUnknown()
+        if (port < 1) return rejectUnknown("共享 UID 的节点配置冲突")
         return HevOwnerRoute.pack(uid, port, current.generation)
     }
 
@@ -143,13 +158,18 @@ class HevConnectionOwnerRouter(
         }
     }
 
-    private fun rejectUnknown(): Long {
+    private fun rejectUnknown(reason: String): Long {
         val now = SystemClock.elapsedRealtime()
         if (now - lastUnknownLogAt >= 30_000L) {
             lastUnknownLogAt = now
-            onLog("HEV 应用线路：暂时无法确认连接所属应用，已阻止该连接；不会切换到主节点")
+            policyLog("HEV 连接归属拒绝；原因=$reason；结果=已阻止连接；同类拒绝日志限频 30 秒，非完整连接计数")
+            runCatching { onLog("HEV 应用线路：暂时无法确认连接所属应用，已阻止该连接；不会切换到主节点") }
         }
         return -1L
+    }
+
+    private fun policyLog(message: String) {
+        runCatching { AppRoutingDiagnostics.record(message + "；" + (routingDiagnostics?.context ?: "引擎=HEV；运行关联未知")) }
     }
 
     private data class OwnerSnapshot(

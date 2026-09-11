@@ -9,6 +9,7 @@ import com.rr.client.lab.ConnectionRouteLog
 import com.rr.client.lab.ConnectionRouteRecord
 import com.rr.client.lab.ConnectionRouteMessage
 import com.rr.client.lab.RRLogStore
+import com.rr.client.lab.AppRoutingDiagnostics
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.VpnService
@@ -98,7 +99,8 @@ class BoxServiceWrapper(
         return false
     }
 
-    fun startService(configJson: String, vpn: VpnService, root: RootVpnEngine? = null): Boolean {
+    fun startService(configJson: String, vpn: VpnService, root: RootVpnEngine? = null,
+        routingDiagnostics: AppRoutingDiagnostics.RuntimeSnapshot? = null): Boolean {
         if (isRunning && commandServer != null) {
             recordLog("sing-box service already running, skipping restart")
             return true
@@ -127,8 +129,11 @@ class BoxServiceWrapper(
             isStopping = false
             collectConnectionLogs = ConnectionRouteLog.enabledForConfig(configJson)
             RRLogStore.setConnectionLoggingActive(false)
-            if (collectConnectionLogs) RRLogStore.record("SESSION",
-                connectionLogs.sessionStartedMessage(configJson, root != null, HevConfigAdapter.SOCKS_TAG))
+            runCatching {
+                routingDiagnostics?.loadedMessages()?.forEach(AppRoutingDiagnostics::record)
+                if (collectConnectionLogs) RRLogStore.record("SESSION",
+                    connectionLogs.sessionStartedMessage(configJson, root != null, HevConfigAdapter.SOCKS_TAG, routingDiagnostics))
+            }
 
             runCatching {
                 val clientOptions = CommandClientOptions().apply {
@@ -642,7 +647,8 @@ class BoxServiceWrapper(
             event.type != Libbox.ConnectionEventClosed.toInt()) return null
         val connection = event.connection
         val route = connection?.let {
-            val hev = it.inbound == HevConfigAdapter.SOCKS_TAG
+            val hev = it.inbound == HevConfigAdapter.SOCKS_TAG ||
+                it.inbound.orEmpty().matches(Regex("hev-app-in-[0-9]+"))
             val process = it.processInfo.takeUnless { hev }
             val packages = ArrayList<String>()
             process?.packageNames()?.let { names ->
@@ -658,7 +664,8 @@ class BoxServiceWrapper(
                 outbound = it.outbound.orEmpty(),
                 outboundType = it.outboundType.orEmpty(),
                 rule = it.rule.orEmpty(),
-                hev = hev
+                hev = hev,
+                inbound = it.inbound.orEmpty()
             )
         }
         return connectionLogs.format(ConnectionLogObservation(

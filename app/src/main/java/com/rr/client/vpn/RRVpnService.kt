@@ -14,6 +14,7 @@ import com.rr.client.core.BoxServiceWrapper
 import com.rr.client.core.HevConfigAdapter
 import com.rr.client.core.WeChatRecoveryRuntimePolicy
 import com.rr.client.lab.RRLogStore
+import com.rr.client.lab.AppRoutingDiagnostics
 import com.rr.client.routing.AppNodeRouting
 import com.rr.client.routing.AppNodeBindingRevision
 import com.rr.client.routing.ChinaRuleSetManager
@@ -63,6 +64,7 @@ class RRVpnService : VpnService() {
     private var activeConfigJson: String? = null
     private var activeNodeTag = "Default"
     private var activeNodeId = ""
+    @Volatile private var diagnosticRuntime: AppRoutingDiagnostics.RuntimeSnapshot? = null
     private var activeEngine = PreferencesManager.TUN_ENGINE_SYSTEM
     @Volatile private var requestedEngine = PreferencesManager.TUN_ENGINE_SYSTEM
 
@@ -507,6 +509,7 @@ class RRVpnService : VpnService() {
             AppNodeRouting.requiredNodeIds(stableConfigJson, activeNodeId)
         }.getOrElse { error ->
             _lastError.value = "应用节点运行配置无效：${error.message.orEmpty()}"
+            AppRoutingDiagnostics.record("运行配置拒绝；主节点=${AppRoutingDiagnostics.nodeKey(mainNodeId)}；原因=${_lastError.value}")
             VpnConnectionIntentStore.setDesiredRunning(this, false)
             stopVpn(persistTraffic = true)
             return
@@ -537,6 +540,8 @@ class RRVpnService : VpnService() {
                         val prefs = RRApplication.instance.preferencesManager
                         resolvedEngine = ruleActivation?.engine ?: prefs.tunEngine.first()
                         requestedEngine = resolvedEngine
+                        AppRoutingDiagnostics.record("引擎启动请求；引擎=$resolvedEngine；运行代次=$generation；" +
+                            "主节点=${AppRoutingDiagnostics.nodeKey(mainNodeId)}；重新启动=$restarting；重建配置=$refreshFromPreferences")
                         com.rr.client.lab.ProcessExitDiagnostics.mark(this@RRVpnService, resolvedEngine, "STARTING", generation)
                         completePendingCleanup()
 
@@ -565,14 +570,14 @@ class RRVpnService : VpnService() {
                         _activeRuntimeEngine.value = resolvedEngine
 
                         if (ruleActivation == null) {
-                            startDataPlane(activatedConfig, resolvedEngine, hevBenchmarkSelfTraffic)
+                            startDataPlane(activatedConfig, resolvedEngine, hevBenchmarkSelfTraffic, generation, mainNodeId)
                         } else {
                             fun current(): Boolean = !stopping && generation == requestGeneration &&
                                 activeNodeId == ruleActivation.nodeId &&
                                 VpnConnectionIntentStore.isDesiredRunning(this@RRVpnService)
                             when (val result = RuleUpdateActivationRunner.activate(
                                 isCurrent = ::current,
-                                startCandidate = { startDataPlane(stableConfigJson, resolvedEngine, false) },
+                                startCandidate = { startDataPlane(stableConfigJson, resolvedEngine, false, generation, mainNodeId) },
                                 commitCandidate = {
                                     // Stop/switch arrives on Main too: commit and canonical publication
                                     // are one non-suspending operation after the last identity check.
@@ -594,7 +599,7 @@ class RRVpnService : VpnService() {
                                 },
                                 stopCandidate = { stopDataPlane() },
                                 restorePrevious = {
-                                    startDataPlane(ruleActivation.previousConfig, resolvedEngine, false)
+                                    startDataPlane(ruleActivation.previousConfig, resolvedEngine, false, generation, mainNodeId)
                                 }
                             )) {
                                 RuleUpdateActivationRunner.Result.Activated -> Unit
@@ -617,6 +622,7 @@ class RRVpnService : VpnService() {
                         }
                         true
                     } catch (cancelled: CancellationException) {
+                        AppRoutingDiagnostics.record("引擎启动取消；引擎=$resolvedEngine；运行代次=$generation；原因=请求已被替换或停止")
                         withContext(NonCancellable) {
                             runCatching { stopDataPlane() }
                             if (ruleActivation != null && !ruleUpdateCommitted.get()) {
@@ -645,6 +651,8 @@ class RRVpnService : VpnService() {
             if (started && (ruleUpdateCommitted.get() || isDataPlaneHealthy(resolvedEngine))) {
                 activeConfigJson = activatedConfig
                 activeEngine = resolvedEngine
+                diagnosticRuntime?.let { AppRoutingDiagnostics.record(it.event("引擎启动完成",
+                    if (ruleUpdateRestored) "新规则失败，已恢复原配置；仅确认引擎就绪" else "核心与引擎就绪，尚未确认各应用业务成功")) }
                 sessionPersisted = false
                 resetTrafficState()
                 _isStarting.value = false
@@ -697,6 +705,9 @@ class RRVpnService : VpnService() {
                         "sing-box 内核未能启动"
                     }
                 _lastError.value = reason
+                AppRoutingDiagnostics.snapshot(resolvedEngine, generation, mainNodeId, activatedConfig)?.let {
+                    AppRoutingDiagnostics.record(it.event("引擎启动失败", reason))
+                } ?: AppRoutingDiagnostics.record("引擎启动失败；引擎=$resolvedEngine；运行代次=$generation；原因=$reason")
                 com.rr.client.lab.ProcessExitDiagnostics.mark(this@RRVpnService, resolvedEngine, "FAILED", generation)
                 RRLogStore.record("CORE", "转发启动失败；引擎=$resolvedEngine；运行代次=$generation；$reason")
                 if (ruleActivation != null) {
@@ -754,7 +765,10 @@ class RRVpnService : VpnService() {
     }
 
     /** Must be called under coreMutex after the previous data plane has been fully stopped. */
-    private suspend fun startDataPlane(config: String, engine: String, hevBenchmarkSelfTraffic: Boolean) {
+    private suspend fun startDataPlane(config: String, engine: String, hevBenchmarkSelfTraffic: Boolean,
+        generation: Long, mainNodeId: String) {
+        diagnosticRuntime = AppRoutingDiagnostics.snapshot(engine, generation, mainNodeId, config)
+        diagnosticRuntime?.let { AppRoutingDiagnostics.record(it.event("运行配置准备")) }
         check(ProfileNodeStore.containsConnectableNodes(
             RRApplication.instance.database, AppNodeRouting.requiredNodeIds(config, activeNodeId)
         )) { "运行节点已删除或不可用，请重新连接以更新应用指定节点规则" }
@@ -776,7 +790,8 @@ class RRVpnService : VpnService() {
                 val root = rootEngine ?: error("Root 引擎不可用")
                 val runtimeConfig = root.prepare(runtimeSource)
                 Libbox.checkConfig(runtimeConfig)
-                check(boxCore?.startService(runtimeConfig, this@RRVpnService, root) == true) {
+                diagnosticRuntime = AppRoutingDiagnostics.snapshot(engine, generation, mainNodeId, config, runtimeConfig)
+                check(boxCore?.startService(runtimeConfig, this@RRVpnService, root, diagnosticRuntime) == true) {
                     boxCore?.lastError ?: "Root sing-box 内核未能启动"
                 }
                 // Capture is installed only after libbox owns the TUN fd.
@@ -786,18 +801,22 @@ class RRVpnService : VpnService() {
             PreferencesManager.TUN_ENGINE_HEV -> {
                 val runtime = HevConfigAdapter.adapt(runtimeSource)
                 Libbox.checkConfig(runtime.configJson)
-                check(boxCore?.startService(runtime.configJson, this@RRVpnService) == true) {
+                diagnosticRuntime = AppRoutingDiagnostics.snapshot(engine, generation, mainNodeId, config,
+                    runtime.configJson, runtime.appRouting.packagePorts)
+                check(boxCore?.startService(runtime.configJson, this@RRVpnService, routingDiagnostics = diagnosticRuntime) == true) {
                     boxCore?.lastError ?: "HEV sing-box 内核未能启动"
                 }
                 check(hevEngine?.start(
                     policy = runtime.perAppPolicy,
                     includeSelfForBenchmark = hevBenchmarkSelfTraffic,
-                    appRouting = runtime.appRouting
+                    appRouting = runtime.appRouting,
+                    routingDiagnostics = diagnosticRuntime
                 ) == true) { hevEngine?.lastError ?: "HEV 极速引擎未能启动" }
                 check(boxCore?.isCoreRunning() == true && hevEngine?.isRunning == true) { "HEV 数据面未完成激活" }
             }
             else -> {
-                check(boxCore?.startService(runtimeSource, this@RRVpnService) == true) {
+                diagnosticRuntime = AppRoutingDiagnostics.snapshot(engine, generation, mainNodeId, config, runtimeSource)
+                check(boxCore?.startService(runtimeSource, this@RRVpnService, routingDiagnostics = diagnosticRuntime) == true) {
                     boxCore?.lastError ?: "sing-box 内核未能启动"
                 }
                 check(boxCore?.isCoreRunning() == true) { "sing-box 数据面未完成激活" }
@@ -851,6 +870,8 @@ class RRVpnService : VpnService() {
     }
 
     private suspend fun stopDataPlane() {
+        val stoppingRuntime = diagnosticRuntime
+        stoppingRuntime?.let { AppRoutingDiagnostics.record(it.event("数据面停止及清理请求")) }
         // Close the core's TUN descriptor even if the helper cannot confirm rollback.
         // A failed rollback still propagates and blocks a replacement data plane or app wipe.
         val rootFailure = runCatching { rootEngine?.stop() }.exceptionOrNull()
@@ -861,9 +882,12 @@ class RRVpnService : VpnService() {
         }
         if (rootFailure != null) {
             cleanupFailure = rootFailure.message ?: "Root 路由清理未确认"
+            stoppingRuntime?.let { AppRoutingDiagnostics.record(it.event("数据面清理失败", cleanupFailure.orEmpty())) }
             throw rootFailure
         }
         if (pendingCleanupServices.none { it !== this }) cleanupFailure = null
+        stoppingRuntime?.let { AppRoutingDiagnostics.record(it.event("数据面停止及清理完成")) }
+        diagnosticRuntime = null
     }
 
     private fun isDataPlaneHealthyInternal(): Boolean = isDataPlaneHealthy(activeEngine)
@@ -936,6 +960,7 @@ class RRVpnService : VpnService() {
     private fun handleUnexpectedDataPlaneExit(reason: String, expectedEngine: String) {
         serviceScope.launch {
             if (requestedEngine != expectedEngine || stopping || _isStarting.value) return@launch
+            diagnosticRuntime?.let { AppRoutingDiagnostics.record(it.event("数据面意外退出", reason)) }
             val generation = advanceRuntimeGeneration()
             startJob?.cancel()
             startJob = null

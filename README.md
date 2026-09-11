@@ -19,11 +19,11 @@
 
 RRBOX 为用户自己的节点和订阅提供 Android VPN / 代理连接，不提供线路、账户或服务器。以 **数据面正确性、移动网络稳定性、可测量性能** 为优先级，不替用户自动挑选地区或擅自切换业务节点。
 
-当前正式版本 **1.0.7（107）**，仅发布 **arm64-v8a**，最低 Android 8.0。默认使用 System TUN，不需要 Root；HEV native 数据面与需要授权的 Root 高级模式均为可选项。
+当前正式版本 **1.0.8（108）**，仅发布 **arm64-v8a**，最低 Android 8.0。默认使用 System TUN，不需要 Root；HEV native 数据面与需要授权的 Root 高级模式均为可选项。
 
-## 1.0.7 正式版
+## 1.0.8 正式版
 
-本版修复 1.0.6 的 HEV 原生应用归属查询线程问题，以及 Android 旧版 ip 命令导致的 Root DNS 规则安装失败。应用指定节点继续保留默认主节点，为已接管应用额外指定其他节点，多个出口同时工作。该设置独立于智能分流，适用于“洛杉矶为主节点，Telegram 单独走香港”等场景。原有节点删除、紧凑布局、规则在线更新及网络恢复功能继续保留。
+本版修复 TikTok 与插件等共享 Android UID 的应用无法逐个指定节点的问题，改为明确展示相关应用并一起保存设置。日志补充配置修改、保存失败、模式切换和实际运行映射，方便核对多出口行为。继续保留 1.0.7 的 HEV 线程与 Root 启动兼容修复。应用指定节点继续保留默认主节点，为已接管应用额外指定其他节点，多个出口同时工作。该设置独立于智能分流，适用于“洛杉矶为主节点，Telegram 单独走香港”等场景。原有节点删除、紧凑布局、规则在线更新及网络恢复功能继续保留。
 
 - **应用指定节点**：在「分流 → 指定节点」添加应用与节点的绑定，支持搜索、编辑、开关和删除。仅影响被接管的应用，关闭智能分流仍生效；未指定应用按原有设置使用主节点。辅助节点失效只暂停对应应用，关闭规则后跟随主节点。
 - **三个引擎的应用出口**：System / Root 按原始连接所属应用选择出口；HEV 在 SOCKS 转换前识别原始连接，按会话选择专用入站。HEV 的此项功能需要 Android 10 或以上，启用后增加应用身份查询开销；没有绑定时保留原 HEV 路径。共享 UID 的应用须统一出口，无法确认应用身份时阻止该业务连接。
@@ -77,11 +77,11 @@ HEV:    Android TUN → HEV native/lwIP → loopback SOCKS5 → sing-box outboun
 
 ## 安装
 
-打开 [最新正式 Release](https://github.com/Xiaowu7z/RR-BOX/releases/latest)，选择 `RRBOX-1.0.7-arm64-v8a.apk`。使用默认 System 或 HEV 模式时，首次连接授权系统 VPN；选择 Root 模式时需另行授予 Root 权限。通知、相机和后台电池优化权限按对应功能需要设置。
+打开 [最新正式 Release](https://github.com/Xiaowu7z/RR-BOX/releases/latest)，选择 `RRBOX-1.0.8-arm64-v8a.apk`。使用默认 System 或 HEV 模式时，首次连接授权系统 VPN；选择 Root 模式时需另行授予 Root 权限。通知、相机和后台电池优化权限按对应功能需要设置。
 
 <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.rr.client%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FXiaowu7z%2FRR-BOX%22%2C%22author%22%3A%22Xiaowu7z%22%2C%22name%22%3A%22RRBOX%22%2C%22preferredApkIndex%22%3A0%2C%22additionalSettings%22%3A%22%7B%5C%22includePrereleases%5C%22%3Afalse%2C%5C%22fallbackToOlderReleases%5C%22%3Atrue%2C%5C%22apkFilterRegEx%5C%22%3A%5C%22RRBOX-%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B%5C%5C%5C%5C.%5B0-9%5D%2B-arm64-v8a%5C%5C%5C%5C.apk%24%5C%22%2C%5C%22autoApkFilterByArch%5C%22%3Atrue%7D%22%2C%22overrideSource%22%3A%22GitHub%22%2C%22allowIdChange%22%3Afalse%7D"><img alt="Add to Obtainium" src="https://img.shields.io/badge/Add_to_Obtainium-6750A3?style=for-the-badge"></a>
 
-**从 1.0.0–1.0.6 升级到 1.0.7，请直接覆盖安装，无需卸载。** 包名与正式签名保持一致，覆盖安装保留本地节点、订阅和设置。版本号提升为 1.0.7 / 107，App 内“检查更新”可识别这次升级，Obtainium 也可跟踪正式 Release。安装后重新连接 RRBOX；“立即更新分流规则”只更新规则数据，不能替代本次 APK 升级。
+**从 1.0.0–1.0.7 升级到 1.0.8，请直接覆盖安装，无需卸载。** 包名与正式签名保持一致，覆盖安装保留本地节点、订阅和设置。版本号提升为 1.0.8 / 108，App 内“检查更新”可识别这次升级，Obtainium 也可跟踪正式 Release。安装后重新连接 RRBOX；“立即更新分流规则”只更新规则数据，不能替代本次 APK 升级。
 
 Release 同时提供 `BUILD-REPORT.md`、源码提交和 `SHA256SUMS.txt`，用于核对安装包来源与具体构建。
 

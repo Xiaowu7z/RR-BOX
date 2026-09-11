@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.rr.client.core.HevConfigAdapter
+import com.rr.client.lab.AppRoutingDiagnostics
 import com.rr.client.routing.ResolvedPerAppPolicy
 import java.io.File
 
@@ -43,7 +44,8 @@ class HevVpnEngine(
     fun start(
         policy: ResolvedPerAppPolicy,
         includeSelfForBenchmark: Boolean = false,
-        appRouting: HevAppRoutingPlan = HevAppRoutingPlan()
+        appRouting: HevAppRoutingPlan = HevAppRoutingPlan(),
+        routingDiagnostics: AppRoutingDiagnostics.RuntimeSnapshot? = null
     ): Boolean {
         stop()
         lastError = null
@@ -65,7 +67,7 @@ class HevVpnEngine(
                 "HEV 应用线路缺少本地连接认证，请重新生成配置"
             }
             ownerRouter = if (appRouting.enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                HevConnectionOwnerRouter(vpnService, appRouting, onLog)
+                HevConnectionOwnerRouter(vpnService, appRouting, onLog, routingDiagnostics)
             } else null
             val builder = vpnService.Builder()
                 .setSession(if (includeSelfForBenchmark) "RRBOX · HEV · A/B" else "RRBOX · HEV")

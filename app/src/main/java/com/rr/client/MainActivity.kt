@@ -45,6 +45,10 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
 import com.rr.client.core.AppNodeRuntimeValidation
+import com.rr.client.lab.AppNodeEditLog
+import com.rr.client.lab.AppRoutingDiagnostics
+import com.rr.client.routing.AppNodeBindingEditPlanner
+import com.rr.client.routing.AppNodeBindingEditPlan
 import kotlinx.coroutines.CancellationException
 import com.rr.client.subscription.ImportLimits
 import com.rr.client.subscription.SubscriptionNodeReconciler
@@ -351,11 +355,15 @@ class MainActivity : ComponentActivity() {
                 if (error is CancellationException) throw error
                 appNodeBindingsLoaded = false
                 appNodeBindingsLoadError = "已保存的应用指定节点规则无法读取，请重置此模块后重新添加。"
+                if (attempt == 0L) AppRoutingDiagnostics.record(
+                    "应用指定节点设置读取失败；异常=${error.javaClass.simpleName}；原因=${error.message.orEmpty().take(1000)}")
                 if (attempt == 0L) Toast.makeText(this@MainActivity,
                     "应用指定节点设置读取失败，连接前需要恢复有效设置", Toast.LENGTH_LONG).show()
                 delay(1_000L)
                 true
             }.collect { saved ->
+                if (appNodeBindingsLoadError != null) AppRoutingDiagnostics.record(
+                    "应用指定节点设置读取恢复；规则数=${saved.size}")
                 appNodeBindings = saved
                 appNodeBindingsLoaded = true
                 appNodeBindingsLoadError = null
@@ -934,17 +942,22 @@ class MainActivity : ComponentActivity() {
                             loadError = appNodeBindingsLoadError,
                             onResetInvalidBindings = {
                                 if (!savingAppNodeBindings && appNodeBindingsLoadError != null) {
+                                    val operationId = AppNodeEditLog.begin("RESET", "全部失效规则", perAppMode,
+                                        RRVpnService.activeRuntimeEngine.value ?: "未连接")
                                     savingAppNodeBindings = true
                                     lifecycleScope.launch {
                                         try {
-                                            persistAndApplyAppNodeBindings(emptyList())
+                                            val applyResult = persistAndApplyAppNodeBindings(emptyList(), operationId = operationId)
                                             appNodeBindings = emptyList()
                                             appNodeBindingsLoadError = null
                                             appNodeBindingsLoaded = true
-                                            toast("应用指定节点规则已重置，可重新添加")
+                                            toast(if (applyResult.restartError != null)
+                                                "规则已重置，但重新应用连接失败，请手动重连" else "应用指定节点规则已重置，可重新添加")
                                         } catch (error: CancellationException) {
+                                            AppNodeEditLog.event(operationId, "界面任务取消", "已提交结果以保存和运行记录为准")
                                             throw error
-                                        } catch (_: Exception) {
+                                        } catch (error: Exception) {
+                                            AppNodeEditLog.failure(operationId, "重置失败", error)
                                             toast("重置失败，请重试")
                                         } finally {
                                             savingAppNodeBindings = false
@@ -952,25 +965,62 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             },
-                            onBindingsChange = onBindingsChange@{ updated ->
-                                if (savingAppNodeBindings || !appNodeBindingsLoaded) return@onBindingsChange
+                            onEditPreparationFailure = { packageName, operation, nodeId, enabled, error ->
+                                val operationId = AppNodeEditLog.begin(operation.name, packageName, perAppMode,
+                                    RRVpnService.activeRuntimeEngine.value ?: "未连接")
+                                AppNodeEditLog.selectedTarget(operationId, nodeId, enabled, latestAllNodes)
+                                AppNodeEditLog.failure(operationId, "读取应用身份失败", error)
+                            },
+                            onBindingsChange = onBindingsChange@{ requestedEdit ->
+                                val operationId = AppNodeEditLog.begin(requestedEdit.operation.name,
+                                    requestedEdit.packageName, perAppMode,
+                                    RRVpnService.activeRuntimeEngine.value ?: "未连接")
+                                AppNodeEditLog.requested(operationId, requestedEdit, latestAllNodes)
+                                if (savingAppNodeBindings || !appNodeBindingsLoaded) {
+                                    AppNodeEditLog.event(operationId, "未执行", "其他保存尚未完成或设置尚未加载")
+                                    return@onBindingsChange
+                                }
                                 savingAppNodeBindings = true
                                 lifecycleScope.launch {
+                                    var failureStage = "校验失败"
                                     try {
-                                        withContext(Dispatchers.IO) {
+                                        val plan = withContext(Dispatchers.IO) {
+                                            val currentGroup = AppNodeRuntimeValidation.resolveEditingGroup(
+                                                this@MainActivity, requestedEdit.packageName
+                                            )
+                                            val prepared = AppNodeBindingEditPlanner.plan(
+                                                requestedEdit, currentGroup, appNodeBindings, perAppMode,
+                                                proxySelectedPackages, bypassSelectedPackages
+                                            )
+                                            val selected = when (prepared.expectedMode) {
+                                                PerAppPolicyResolver.MODE_ALLOW_LIST -> prepared.proxyPackages
+                                                PerAppPolicyResolver.MODE_DISALLOW_LIST -> prepared.bypassPackages
+                                                else -> emptySet()
+                                            }
                                             AppNodeRuntimeValidation.validateSharedUidTargets(
-                                                this@MainActivity, updated, perAppMode, packagesFor(perAppMode),
+                                                this@MainActivity, prepared.bindings, prepared.expectedMode, selected,
                                                 RRVpnService.activeRuntimeNodeId.value ?: selectedNodeId
                                             )
+                                            prepared
                                         }
+                                        AppNodeEditLog.planned(operationId, plan, latestAllNodes)
                                         // Commit the complete set before one runtime update.
-                                        persistAndApplyAppNodeBindings(updated)
-                                        appNodeBindings = updated
-                                        toast(if (RRVpnService.isRunning.value || RRVpnService.isStarting.value)
-                                            "应用指定节点已保存，正在重新应用连接" else "应用指定节点已保存")
+                                        failureStage = "保存失败"
+                                        val applyResult = persistAndApplyAppNodeBindings(plan.bindings, plan, operationId)
+                                        appNodeBindings = plan.bindings
+                                        proxySelectedPackages = plan.proxyPackages
+                                        bypassSelectedPackages = plan.bypassPackages
+                                        autoProxyExcludedPackages = autoProxyExcludedPackages - plan.proxyAutoInclusions
+                                        toast(when {
+                                            applyResult.restartError != null -> "规则已保存，但重新应用连接失败，请手动重连"
+                                            applyResult.restartRequested -> "应用指定节点已保存，正在重新应用连接"
+                                            else -> "应用指定节点已保存"
+                                        })
                                     } catch (error: CancellationException) {
+                                        AppNodeEditLog.event(operationId, "界面任务取消", "已提交结果以保存和运行记录为准")
                                         throw error
                                     } catch (error: Exception) {
+                                        AppNodeEditLog.failure(operationId, failureStage, error)
                                         toast("应用指定节点保存失败：${error.message ?: "请重试"}")
                                     } finally {
                                         savingAppNodeBindings = false
@@ -1263,10 +1313,23 @@ class MainActivity : ComponentActivity() {
 
     private data class PreparedUiRuntime(val configJson: String, val bindingRevision: Long)
 
+    private data class AppNodeBindingApplyResult(
+        val restartRequested: Boolean,
+        val restartError: Exception? = null
+    )
+
     /** A committed binding change must survive Activity rotation before service dispatch. */
-    private suspend fun persistAndApplyAppNodeBindings(bindings: List<AppNodeBinding>) =
+    private suspend fun persistAndApplyAppNodeBindings(
+        bindings: List<AppNodeBinding>,
+        editPlan: AppNodeBindingEditPlan? = null,
+        operationId: String
+    ): AppNodeBindingApplyResult =
         withContext(NonCancellable + Dispatchers.Main.immediate) {
-            RRApplication.instance.preferencesManager.setAppNodeBindings(bindings)
+            val preferences = RRApplication.instance.preferencesManager
+            if (editPlan != null) preferences.applyAppNodeBindingEdit(editPlan)
+            else preferences.setAppNodeBindings(bindings)
+            AppNodeEditLog.event(operationId, "保存成功", "规则数=${bindings.size}；" +
+                "绑定修订=${AppNodeBindingRevision.current()}；配置已写入，运行结果另行记录")
             val mainNodeId = RRVpnService.activeRuntimeNodeId.value
             if ((RRVpnService.isRunning.value || RRVpnService.isStarting.value) &&
                 !mainNodeId.isNullOrBlank() &&
@@ -1274,15 +1337,29 @@ class MainActivity : ComponentActivity() {
             ) {
                 // No config payload: the Service rebuilds from persisted settings in its
                 // own scope, while generation and node identity protect a newer session.
-                ContextCompat.startForegroundService(this@MainActivity,
-                    Intent(this@MainActivity, RRVpnService::class.java).apply {
-                        action = RRNotificationManager.ACTION_RESTART_VPN
-                        putExtra(RRVpnService.EXTRA_NODE_ID, mainNodeId)
-                        putExtra(RRVpnService.EXTRA_ROUTING_UPDATE_GENERATION,
-                            RRVpnService.currentRuntimeGeneration())
-                        putExtra(RRVpnService.EXTRA_APP_BINDING_REVISION, AppNodeBindingRevision.current())
-                    }
-                )
+                try {
+                    AppNodeEditLog.event(operationId, "请求重新应用", "运行代次=${RRVpnService.currentRuntimeGeneration()}；" +
+                        "保留主节点=${AppRoutingDiagnostics.nodeKey(mainNodeId)}；绑定修订=${AppNodeBindingRevision.current()}")
+                    ContextCompat.startForegroundService(this@MainActivity,
+                        Intent(this@MainActivity, RRVpnService::class.java).apply {
+                            action = RRNotificationManager.ACTION_RESTART_VPN
+                            putExtra(RRVpnService.EXTRA_NODE_ID, mainNodeId)
+                            putExtra(RRVpnService.EXTRA_ROUTING_UPDATE_GENERATION,
+                                RRVpnService.currentRuntimeGeneration())
+                            putExtra(RRVpnService.EXTRA_APP_BINDING_REVISION, AppNodeBindingRevision.current())
+                        }
+                    )
+                    AppNodeEditLog.event(operationId, "重新应用已交给服务", "最终启用结果见对应运行代次日志")
+                    AppNodeBindingApplyResult(restartRequested = true)
+                } catch (error: Exception) {
+                    AppNodeEditLog.failure(operationId, "已保存但重新应用请求失败", error)
+                    // The transaction is committed. Report dispatch failure separately so
+                    // the user can reconnect without accidentally repeating the edit.
+                    AppNodeBindingApplyResult(restartRequested = false, restartError = error)
+                }
+            } else {
+                AppNodeEditLog.event(operationId, "等待下次连接", "当前没有需要重新应用的运行连接")
+                AppNodeBindingApplyResult(restartRequested = false)
             }
         }
 

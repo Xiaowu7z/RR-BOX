@@ -1,7 +1,6 @@
 package com.rr.client.lab
 
 import com.google.gson.JsonParser
-import com.rr.client.security.SecretRedactor
 import java.util.Locale
 import java.security.MessageDigest
 import java.util.UUID
@@ -17,13 +16,16 @@ data class ConnectionRouteRecord(
     val outbound: String,
     val outboundType: String,
     val rule: String,
-    val hev: Boolean
+    val hev: Boolean,
+    val inbound: String = ""
 )
 
 data class ConnectionRouteMessage(val timestamp: Long, val message: String)
 
 /** Captured from the config actually started by libbox, never from the selected UI preference. */
-internal class ConnectionLogRuntime private constructor(val engine: String, val tunStack: String?) {
+internal class ConnectionLogRuntime private constructor(
+    val engine: String, val tunStack: String?, val routing: AppRoutingDiagnostics.RuntimeSnapshot?
+) {
     val summary: String get() = "核心引擎：$engine" + (tunStack?.let { "；TUN 栈：$it" } ?: "")
     val entrance: String get() = when (engine) {
         "ROOT", "SYSTEM" -> "$engine / TUN（${tunStack ?: "未提供"} 栈）"
@@ -32,7 +34,8 @@ internal class ConnectionLogRuntime private constructor(val engine: String, val 
     }
 
     companion object {
-        fun fromConfig(configJson: String, rootAttached: Boolean, hevSocksTag: String): ConnectionLogRuntime {
+        fun fromConfig(configJson: String, rootAttached: Boolean, hevSocksTag: String,
+            routing: AppRoutingDiagnostics.RuntimeSnapshot? = null): ConnectionLogRuntime {
             val inbounds = runCatching {
                 JsonParser.parseString(configJson).asJsonObject.getAsJsonArray("inbounds")
                     ?.filter { it.isJsonObject }?.map { it.asJsonObject }.orEmpty()
@@ -49,7 +52,7 @@ internal class ConnectionLogRuntime private constructor(val engine: String, val 
                 }.getOrDefault(false) } -> "HEV"
                 else -> "UNKNOWN"
             }
-            return ConnectionLogRuntime(engine, if (engine in setOf("ROOT", "SYSTEM")) stack ?: "未提供" else null)
+            return ConnectionLogRuntime(engine, if (engine in setOf("ROOT", "SYSTEM")) stack ?: "未提供" else null, routing)
         }
     }
 }
@@ -90,20 +93,29 @@ object ConnectionRouteLog {
             "", "selector", "urltest" -> "出口"
             else -> "代理"
         }
-        return SecretRedactor.redact(buildString {
+        return AppRoutingDiagnostics.safeText(buildString {
             append(record.network.uppercase(Locale.ROOT).ifBlank { "未知协议" })
             append(" · ").append(application)
             append(" → ").append(target)
             append(" → ").append(outbound)
-            append(" (").append(record.outbound.ifBlank { "未知" }.take(160))
+            append(" (").append(AppRoutingDiagnostics.outletKey(record.outbound))
             record.outboundType.takeIf(String::isNotBlank)?.let { append(" / ").append(it.take(40)) }
             append(")")
             append("\n入口：").append(runtime?.entrance ?: if (record.hev) "HEV / SOCKS" else "TUN / 其他")
+            if (record.hev && record.inbound.matches(Regex("hev-app-in-[0-9]+"))) {
+                append("；专用入口=").append(record.inbound)
+                runtime?.routing?.entrancePackages?.get(record.inbound)?.takeIf { it.isNotEmpty() }?.let { names ->
+                    append("\n绑定应用候选：").append(names.take(16).joinToString(", "))
+                    if (names.size > 16) append(" 等 ").append(names.size).append(" 个")
+                    append("（来自当前入口映射；核心未提供原始 UID，未确认实际进程）")
+                }
+            }
+            runtime?.routing?.let { append("\n运行关联：").append(it.context) }
             if (isSharedIpv4Target(destination)) {
                 append("；共享地址目标；可能为旧映射或运营商地址，尚未确认")
             }
             if (record.rule.isNotBlank()) {
-                append("\n命中：").append(record.rule.take(1024))
+                append("\n命中：").append(AppRoutingDiagnostics.safeText(record.rule).take(1024))
                 append("\n规则摘要 ID：").append(diagnosticId(record.rule))
             } else {
                 append("\n命中：核心未提供具体规则（可能使用默认出口）")
@@ -166,8 +178,9 @@ internal class ConnectionLogTracker(private val capacity: Int = 4096) {
         private set
 
     @Synchronized
-    fun sessionStartedMessage(configJson: String, rootAttached: Boolean, hevSocksTag: String): String {
-        val context = ConnectionLogRuntime.fromConfig(configJson, rootAttached, hevSocksTag)
+    fun sessionStartedMessage(configJson: String, rootAttached: Boolean, hevSocksTag: String,
+        routing: AppRoutingDiagnostics.RuntimeSnapshot? = null): String {
+        val context = ConnectionLogRuntime.fromConfig(configJson, rootAttached, hevSocksTag, routing)
         runtime = context
         return "详细采集开始；会话：$sessionId；${context.summary}；sing-box 1.14.0；" +
             "核心已启动，数据面就绪以启动结果为准；目标为核心记录的元数据，未提供最终拨号 IP。"
@@ -229,7 +242,7 @@ internal class ConnectionLogTracker(private val capacity: Int = 4096) {
 internal object CoreDiagnosticLog {
     fun format(level: Int, raw: String, sessionId: String): String? {
         val label = when (level) { 0 -> "PANIC"; 1 -> "FATAL"; 2 -> "ERROR"; 3 -> "WARN"; else -> return null }
-        val safeMessage = SecretRedactor.redact(raw).take(3500).trim()
+        val safeMessage = AppRoutingDiagnostics.safeText(raw).take(3500).trim()
         if (safeMessage.isEmpty()) return null
         return "[$label] $safeMessage\n会话：$sessionId；时间为接收时间，可能含核心缓冲补录；未与连接 ID 强行关联。"
     }

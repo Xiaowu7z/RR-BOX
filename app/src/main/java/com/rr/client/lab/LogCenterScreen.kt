@@ -56,7 +56,10 @@ import java.util.Locale
 
 /** Activity-scoped state keeps document exports alive across tab changes and rotation. */
 class LogCenterViewModel(application: Application, private val saved: SavedStateHandle) : AndroidViewModel(application) {
-    var routesOnly by mutableStateOf(saved.get<Boolean>("logRoutesOnly") ?: true)
+    var selectedChannel by mutableStateOf(
+        saved.get<String>("logChannel")?.takeIf { it in setOf("ALL", "ROUTE", "POLICY") }
+            ?: if (saved.get<Boolean>("logRoutesOnly") != false) "ROUTE" else "ALL"
+    )
         private set
     var search by mutableStateOf(saved.get<String>("logSearch") ?: "")
         private set
@@ -117,12 +120,12 @@ class LogCenterViewModel(application: Application, private val saved: SavedState
 
     fun toggleLiveUpdates() { liveUpdates = !liveUpdates }
 
-    private fun filter() = RRLogFilter(if (routesOnly) ConnectionRouteLog.CHANNEL else null, search.trim())
+    private fun filter() = RRLogFilter(selectedChannel.takeUnless { it == "ALL" }, search.trim())
 
-    fun selectRoutesOnly(value: Boolean) {
-        if (value == routesOnly) return
-        routesOnly = value
-        saved["logRoutesOnly"] = value
+    fun selectChannel(value: String) {
+        if (value !in setOf("ALL", "ROUTE", "POLICY") || value == selectedChannel) return
+        selectedChannel = value
+        saved["logChannel"] = value
         refresh()
     }
 
@@ -310,7 +313,7 @@ internal fun LogCenterScreen(
         Text(
             when {
                 lightweight && connectionLoggingActive -> "轻量模式尚待应用，当前隧道仍在记录连接。请应用设置或重连。"
-                lightweight -> "轻量模式：停止新增连接流向，仅采集警告和错误。已有历史仍可查看、搜索和导出。"
+                lightweight -> "轻量模式：保留配置、模式切换和警告错误，不新增连接流向。已有历史仍可导出。"
                 connectionLoggingActive -> "正在记录经过 RRBOX 的连接与实际出口，离开此页后继续采集。"
                 else -> "连接流向采集未启动。请关闭轻量模式并连接节点。"
             },
@@ -318,13 +321,14 @@ internal fun LogCenterScreen(
             color = TextSecondary
         )
         Text(
-            "查看所有应用需选择「所有应用」接管范围；绕过 VPN 的流量不可见。HEV 可能无法识别原应用。记录已脱敏，不含请求正文。",
+            "仅记录已接管的流量；HEV 的绑定应用候选不等于核心确认的进程身份。记录已脱敏，不含请求正文。",
             style = MaterialTheme.typography.labelSmall,
             color = TextSecondary
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = model.routesOnly, onClick = { model.selectRoutesOnly(true) }, label = { Text("连接流向") })
-            FilterChip(selected = !model.routesOnly, onClick = { model.selectRoutesOnly(false) }, label = { Text("全部日志") })
+        Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = model.selectedChannel == "ROUTE", onClick = { model.selectChannel("ROUTE") }, label = { Text("连接流向") })
+            FilterChip(selected = model.selectedChannel == "POLICY", onClick = { model.selectChannel("POLICY") }, label = { Text("配置与切换") })
+            FilterChip(selected = model.selectedChannel == "ALL", onClick = { model.selectChannel("ALL") }, label = { Text("全部日志") })
             FilterChip(
                 selected = model.liveUpdates && model.pageNumber == 1 && model.search.isBlank(),
                 onClick = model::toggleLiveUpdates,
@@ -337,7 +341,7 @@ internal fun LogCenterScreen(
             onValueChange = model::updateSearch,
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            label = { Text("搜索应用 / 包名 / 域名 / IP / 出口") }
+            label = { Text("搜索应用 / 节点 / 域名 / 错误") }
         )
         Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { copyLogPage(context, model.page.entries) }, enabled = !model.loading && model.page.entries.isNotEmpty()) {
@@ -397,7 +401,11 @@ internal fun LogCenterScreen(
                 Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = DarkSurface, border = BorderStroke(1.dp, CardBorder)) {
                     Column(Modifier.padding(10.dp)) {
                         Text(
-                            "${timeFormat.format(Date(entry.timestamp))} · ${if (entry.channel == ConnectionRouteLog.CHANNEL) "连接流向" else entry.channel}",
+                            "${timeFormat.format(Date(entry.timestamp))} · ${when (entry.channel) {
+                                ConnectionRouteLog.CHANNEL -> "连接流向"
+                                "POLICY" -> "配置与切换"
+                                else -> entry.channel
+                            }}",
                             color = CyanPrimary,
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold

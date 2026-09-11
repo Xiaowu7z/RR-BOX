@@ -11,8 +11,8 @@ aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
 "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
 "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
 grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-grep -q "versionCode='107'" dist/PACKAGE-REPORT.txt
-grep -q "versionName='1.0.7'" dist/PACKAGE-REPORT.txt
+grep -q "versionCode='108'" dist/PACKAGE-REPORT.txt
+grep -q "versionName='1.0.8'" dist/PACKAGE-REPORT.txt
 grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
 grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
@@ -41,12 +41,12 @@ cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
 cp build-reports/ROOT-TCP-REPORT.json dist/ROOT-TCP-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
-# RRBOX 1.0.7 Build Report
+# RRBOX 1.0.8 Build Report
 
 - Source commit: $(git rev-parse HEAD)
 - Package: com.rr.client
-- Version code: 107
-- Version name: 1.0.7
+- Version code: 108
+- Version name: 1.0.8
 - ABI: arm64-v8a
 - APK: ${OUTPUT_APK_NAME}
 - APK size: ${apk_size} bytes
@@ -57,6 +57,8 @@ cat > dist/BUILD-REPORT.md <<EOF
 - HEV owner lookup: dedicated JNI pthread; real JVM with HEV coroutine owner, timeout and restart verification
 - Root engine: native nonpersistent TUN handed to System stack, UID policy routing, exact TCP peer return routes, explicit DNS and dual-stack routes, supervised rollback
 - Root DNS rules: exact netlink attributes and readback; Android legacy ip parser compatibility
+- App binding edits: complete shared-UID group, atomic current-scope commit, independent inactive scope and main node
+- Diagnostics: POLICY edit and engine events; actual configuration snapshot and HEV entrance candidates; lightweight policy retention
 - Root verification: isolated Linux TUN/FD/routing/cleanup plus real System stack TCP/UDP with Android-style policy routing; Android real-device acceptance still required
 - Root lab: optional isolated capability probe and export
 - Network continuity: event-driven physical path tracking + validated runtime recovery

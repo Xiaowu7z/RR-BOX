@@ -1,15 +1,42 @@
 package com.rr.client.core
 
 import android.content.Context
+import android.content.pm.PackageManager
 import com.rr.client.core.model.ProxyNode
-import com.rr.client.lab.RRLogStore
+import com.rr.client.lab.AppRoutingDiagnostics
 import com.rr.client.routing.AppNodeBinding
 import com.rr.client.routing.AppNodeRouting
+import com.rr.client.routing.AppNodeUidGroup
+import com.rr.client.routing.AppNodeUidGroupPolicy
 import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.CancellationException
 
 /** Called on an IO dispatcher before either UI or Quick Settings builds the runtime. */
 object AppNodeRuntimeValidation {
+    /** Resolve every installed sibling, including apps hidden from the launcher/list. */
+    fun resolveEditingGroup(context: Context, packageName: String): AppNodeUidGroup {
+        val pm = context.packageManager
+        val appInfo = try {
+            @Suppress("DEPRECATION")
+            pm.getApplicationInfo(packageName, 0)
+        } catch (_: PackageManager.NameNotFoundException) {
+            return AppNodeUidGroup(null, setOf(packageName))
+        }
+        val packages = pm.getPackagesForUid(appInfo.uid)?.toSet().orEmpty()
+        require(packageName in packages) { "无法完整读取应用共享身份，请重试" }
+        val members = packages.associateWith { member ->
+            @Suppress("DEPRECATION")
+            pm.getApplicationInfo(member, 0).also {
+                require(it.uid == appInfo.uid) { "应用身份正在变化，请稍后重试" }
+            }
+        }
+        val blockedReason = AppNodeUidGroupPolicy.blockedReason(
+            appInfo.uid, packages, android.os.Process.myUid(), context.packageName
+        )
+        return AppNodeUidGroup(appInfo.uid, packages,
+            members.mapValues { (_, info) -> pm.getApplicationLabel(info).toString() }, blockedReason)
+    }
+
     fun filterUsableNodes(
         context: Context,
         selectedNode: ProxyNode,
@@ -37,9 +64,11 @@ object AppNodeRuntimeValidation {
                 ))
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 invalidIds += node.id
-                RRLogStore.record("APP", "应用指定节点配置无效，已暂停对应应用连接：${node.tag}")
+                AppRoutingDiagnostics.record("辅助节点配置检查失败；节点=${node.tag.filterNot(Char::isISOControl).take(120)}；" +
+                    "标识=${AppRoutingDiagnostics.nodeKey(node.id)}；异常=${error.javaClass.simpleName}；" +
+                    "原因=${error.message.orEmpty().take(1000)}；对应应用将阻断，其他出口继续工作")
             }
         }
         return if (invalidIds.isEmpty()) allNodes else allNodes.filterNot { it.id in invalidIds }

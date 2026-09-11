@@ -14,6 +14,7 @@ import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.NodeOverridePatcher
 import com.rr.client.routing.AppNodeBinding
 import com.rr.client.routing.AppNodeBindingRevision
+import com.rr.client.routing.AppNodeBindingEditPlan
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -114,6 +115,30 @@ class PreferencesManager(private val context: Context) {
     suspend fun setAppNodeBindings(bindings: List<AppNodeBinding>) {
         val encoded = AppNodeBindingsCodec.encode(bindings)
         context.dataStore.edit { it[APP_NODE_BINDINGS_JSON] = encoded }
+        AppNodeBindingRevision.changed()
+    }
+
+    /** Compare-and-set the consented binding group and both capture lists together. */
+    suspend fun applyAppNodeBindingEdit(plan: AppNodeBindingEditPlan) {
+        val encoded = AppNodeBindingsCodec.encode(plan.bindings)
+        context.dataStore.edit { preferences ->
+            val proxy = preferences[PROXY_SELECTED_PACKAGES]
+                ?: preferences[PER_APP_SELECTED_PACKAGES] ?: emptySet()
+            val bypass = preferences[BYPASS_SELECTED_PACKAGES]
+                ?: preferences[PER_APP_SELECTED_PACKAGES] ?: emptySet()
+            require(AppNodeBindingsCodec.decode(preferences[APP_NODE_BINDINGS_JSON]) == plan.expectedBindings &&
+                (preferences[PER_APP_PROXY_MODE] ?: "ALL") == plan.expectedMode &&
+                proxy == plan.expectedProxyPackages && bypass == plan.expectedBypassPackages) {
+                "应用或接管设置已变化，请重新操作"
+            }
+            preferences[APP_NODE_BINDINGS_JSON] = encoded
+            preferences[PROXY_SELECTED_PACKAGES] = plan.proxyPackages
+            preferences[BYPASS_SELECTED_PACKAGES] = plan.bypassPackages
+            if (plan.proxyAutoInclusions.isNotEmpty()) {
+                preferences[AUTO_PROXY_EXCLUDED_PACKAGES] =
+                    (preferences[AUTO_PROXY_EXCLUDED_PACKAGES] ?: emptySet()) - plan.proxyAutoInclusions
+            }
+        }
         AppNodeBindingRevision.changed()
     }
 

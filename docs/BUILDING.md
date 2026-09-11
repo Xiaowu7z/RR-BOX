@@ -20,11 +20,11 @@ Release 签名只在 CI 中通过已有 Secrets 注入，不在源码中保存�
 
 ## 发布门槛
 
-只有 `main` 上以 `release: RRBOX 1.0.7` 开头的发布提交能更新 Stable Release；其他分支构建不发布正式 APK。发布前运行单元测试、Lint、原生核心收发回归及 APK 签名与版本校验，发布后核对远端 APK digest 与本地产物 SHA-256，并确认 `v1.0.7` 的 Git tag 指向构建源码。
+只有 `main` 上以 `release: RRBOX 1.0.8` 开头的发布提交能更新 Stable Release；其他分支构建不发布正式 APK。发布前运行单元测试、Lint、原生核心收发回归及 APK 签名与版本校验，发布后核对远端 APK digest 与本地产物 SHA-256，并确认 `v1.0.8` 的 Git tag 指向构建源码。
 
-首次发布创建 `v1.0.7`；重跑时只允许同一 tag 已经指向当前准确提交，否则停止发布。已有 `v1.0.0`、`v1.0.1`、`v1.0.2`、`v1.0.3`、`v1.0.4`、`v1.0.5`、`v1.0.6` 及其他历史 tag 不移动。
+首次发布创建 `v1.0.8`；重跑时只允许同一 tag 已经指向当前准确提交，否则停止发布。已有 `v1.0.0`、`v1.0.1`、`v1.0.2`、`v1.0.3`、`v1.0.4`、`v1.0.5`、`v1.0.6`、`v1.0.7` 及其他历史 tag 不移动。
 
-`RRBOX-1.0.7-arm64-v8a.apk`、`SHA256SUMS.txt`、`BUILD-REPORT.md`、`TEST-REPORT.json`、`SIGNATURE-REPORT.txt` 和 `PACKAGE-REPORT.txt` 随 Release 发布。正式资产还包含源码、核心路由、X 地址恢复、微信 IPv6 回退、HEV DNS / 原生 DNS 及 Root 接管 / TCP 收发报告。CI artifact 另含详细测试和 Lint 报告。原生测试在隔离环境中验证实现边界，不能代替 Android 实机业务验收。
+`RRBOX-1.0.8-arm64-v8a.apk`、`SHA256SUMS.txt`、`BUILD-REPORT.md`、`TEST-REPORT.json`、`SIGNATURE-REPORT.txt` 和 `PACKAGE-REPORT.txt` 随 Release 发布。正式资产还包含源码、核心路由、X 地址恢复、微信 IPv6 回退、HEV DNS / 原生 DNS 及 Root 接管 / TCP 收发报告。CI artifact 另含详细测试和 Lint 报告。原生测试在隔离环境中验证实现边界，不能代替 Android 实机业务验收。
 
 预期正式签名证书 SHA-256：
 
@@ -32,7 +32,7 @@ Release 签名只在 CI 中通过已有 Secrets 注入，不在源码中保存�
 fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16e8cf66e180d816
 ```
 
-本次版本为 **1.0.7 / 107**，高于此前 **1.0.6 / 106**；App 内版本比较可检测本次升级，正式 APK 命名符合 App 与 Obtainium 的资产过滤规则。包名及正式签名保持一致，允许保留数据覆盖安装。构建追溯仍以源码提交、构建报告及 APK 哈希为准。
+本次版本为 **1.0.8 / 108**，高于此前 **1.0.7 / 107**；App 内版本比较可检测本次升级，正式 APK 命名符合 App 与 Obtainium 的资产过滤规则。包名及正式签名保持一致，允许保留数据覆盖安装。构建追溯仍以源码提交、构建报告及 APK 哈希为准。
 
 1.0.4 增加 `ALLOW_LIST + smartRouting=false` 三引擎配置及快捷重连回归，确认谷歌后台推送组件在推荐名单内。当时的 Root 物理 DNS 规则依赖系统 `ip rule` 解析 `ipproto` / `dport`，1.0.7 改为通过 Netlink 设置同样精确的规则；内核拒绝时仍启动失败并回滚，不回退到整地址接管。原生隔离测试检查未选 UID 对同一 DNS 服务器非 53 端口的连接保持直连。
 
@@ -49,3 +49,5 @@ README 与 GitHub 仓库 `description` 是两个独立字段。期望元数据�
 1.0.7 针对手机反馈补充 HEV Java 调用的真实线程边界检查，以及拒绝 `ipproto` / `dport` 命令参数的 Android 兼容环境。Root DNS 规则直接通过 Netlink 编码、回读和清理；原有非 DNS 端口、未选 UID 与保护自身出口的边界必须通过。HEV 的 JVM 测试验证 JNI 调用线程和 HEV 协程栈的分离，不替代 Android ART 与手机网络实测。
 
 Android 11 以上的退出原因补录使用系统 [ApplicationExitInfo](https://developer.android.com/reference/android/app/ApplicationExitInfo)；只保留本应用退出时间、原因、状态码和白名单格式的引擎阶段，不读取 tombstone 内存或网络内容。
+
+1.0.8 增加共享 UID 原子编辑和日志关联验证。测试覆盖整组添加、修改、启停、清理、当前名单隔离、过期编辑拒绝及自动选择排除项；运行日志验证实际配置映射、代次隔离、HEV 多候选身份语义和凭证脱敏。新 `POLICY` 通道在轻量模式仍保存配置与失败事件，逐连接采集开关保持原语义。Android PackageManager 的共享成员查询、操作弹窗及实际业务仍需手机复测。

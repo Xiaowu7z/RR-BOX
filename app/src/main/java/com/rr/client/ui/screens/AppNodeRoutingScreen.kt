@@ -51,10 +51,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -63,9 +65,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.rr.client.core.model.AppRouteConfig
+import com.rr.client.core.AppNodeRuntimeValidation
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.model.friendlyLabel
 import com.rr.client.routing.AppNodeBinding
+import com.rr.client.routing.AppNodeBindingEdit
+import com.rr.client.routing.AppNodeEditOperation
+import com.rr.client.routing.AppNodeUidGroup
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.subscription.TrafficInfoNode
 import com.rr.client.subscription.model.SubProfile
@@ -75,6 +81,10 @@ import com.rr.client.ui.theme.DarkBackground
 import com.rr.client.ui.theme.DarkSurface
 import com.rr.client.ui.theme.TextPrimary
 import com.rr.client.ui.theme.TextSecondary
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** A separate override list: opening or changing it never changes the main selected node. */
 @Composable
@@ -87,15 +97,22 @@ fun AppNodeRoutingScreen(
     selectedPackages: Set<String>,
     isLoading: Boolean = false,
     isApplying: Boolean = false,
-    onBindingsChange: (List<AppNodeBinding>) -> Unit,
+    onBindingsChange: (AppNodeBindingEdit) -> Unit,
     onBack: () -> Unit,
     loadError: String? = null,
-    onResetInvalidBindings: () -> Unit = {}
+    onResetInvalidBindings: () -> Unit = {},
+    onEditPreparationFailure: (String, AppNodeEditOperation, String?, Boolean?, Exception) -> Unit = { _, _, _, _, _ -> }
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var choosingApp by rememberSaveable { mutableStateOf(false) }
     var editingPackage by rememberSaveable { mutableStateOf<String?>(null) }
-    val busy = isLoading || isApplying
+    var resolvingGroup by remember { mutableStateOf(false) }
+    var pendingSharedEdit by remember { mutableStateOf<AppNodeBindingEdit?>(null) }
+    var editError by remember { mutableStateOf<String?>(null) }
+    var groupsByPackage by remember { mutableStateOf<Map<String, AppNodeUidGroup>>(emptyMap()) }
+    val context = LocalContext.current.applicationContext
+    val scope = rememberCoroutineScope()
+    val busy = isLoading || isApplying || resolvingGroup
     val appsByPackage = remember(apps) { apps.associateBy { it.packageName } }
     val selectableNodes = remember(nodes) {
         nodes.filterNot(TrafficInfoNode::isInfoNode).distinctBy { it.id }
@@ -111,12 +128,57 @@ fun AppNodeRoutingScreen(
         val boundPackages = bindings.mapTo(mutableSetOf()) { it.packageName }
         scopedApps.filterNot { it.packageName in boundPackages }
     }
-    val visibleBindings = remember(bindings, searchQuery, appsByPackage, nodesById) {
+    val visibleBindings = remember(bindings, searchQuery, appsByPackage, nodesById, groupsByPackage) {
         bindings.distinctBy { it.packageName }.filter { binding ->
             val app = appsByPackage[binding.packageName]
             val node = nodesById[binding.nodeId]
-            listOf(binding.packageName, app?.appName.orEmpty(), node?.tag.orEmpty(), node?.profileName.orEmpty())
+            listOf(binding.packageName, app?.appName.orEmpty(), node?.tag.orEmpty(), node?.profileName.orEmpty(),
+                groupsByPackage[binding.packageName]?.labels?.get(binding.packageName).orEmpty())
                 .any { it.contains(searchQuery, ignoreCase = true) }
+        }
+    }
+
+    LaunchedEffect(bindings, apps) {
+        groupsByPackage = withContext(Dispatchers.IO) {
+            val resolved = mutableMapOf<String, AppNodeUidGroup>()
+            bindings.forEach { binding ->
+                if (binding.packageName !in resolved) {
+                    try {
+                        val group = AppNodeRuntimeValidation.resolveEditingGroup(context, binding.packageName)
+                        group.packages.forEach { resolved[it] = group }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        // Display hints are optional; every edit resolves identity again.
+                    }
+                }
+            }
+            resolved
+        }
+    }
+
+    fun requestEdit(packageName: String, operation: AppNodeEditOperation, nodeId: String? = null, enabled: Boolean? = null) {
+        if (busy || resolvingGroup) return
+        resolvingGroup = true
+        scope.launch {
+            try {
+                val group = withContext(Dispatchers.IO) {
+                    AppNodeRuntimeValidation.resolveEditingGroup(context, packageName)
+                }
+                if (operation == AppNodeEditOperation.ASSIGN || enabled == true) {
+                    require(group.uid != null) { "应用未安装，无法设置指定节点" }
+                    require(group.blockedReason == null) { group.blockedReason.orEmpty() }
+                }
+                val edit = AppNodeBindingEdit(packageName, operation, nodeId, enabled, group)
+                if (group.packages.size > 1) pendingSharedEdit = edit else onBindingsChange(edit)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                editError = error.message ?: "无法读取应用身份，请重试"
+                onEditPreparationFailure(packageName, operation, nodeId, enabled, error)
+            } finally {
+                resolvingGroup = false
+            }
         }
     }
 
@@ -125,6 +187,7 @@ fun AppNodeRoutingScreen(
         if (loadError != null) {
             choosingApp = false
             editingPackage = null
+            pendingSharedEdit = null
         }
     }
     if (loadError != null) {
@@ -195,6 +258,7 @@ fun AppNodeRoutingScreen(
                     Text(
                         when {
                             isLoading -> "正在读取应用…"
+                            resolvingGroup -> "正在确认应用身份…"
                             isApplying -> "正在应用配置…"
                             else -> "${bindings.size} 条规则 · 修改后自动保存"
                         },
@@ -230,17 +294,26 @@ fun AppNodeRoutingScreen(
                 items(visibleBindings, key = { "binding_${it.packageName}" }, contentType = { "binding" }) { binding ->
                     AppNodeBindingCard(
                         binding = binding,
-                        app = appsByPackage[binding.packageName],
+                        app = appsByPackage[binding.packageName] ?: groupsByPackage[binding.packageName]
+                            ?.takeIf { it.uid != null }?.let { group ->
+                                AppRouteConfig(binding.packageName,
+                                    group.labels[binding.packageName] ?: binding.packageName, "PROXY_NODE")
+                            },
                         node = nodesById[binding.nodeId],
-                        captured = appIsCaptured(binding.packageName, perAppMode, selectedPackages),
+                        captured = groupsByPackage[binding.packageName]?.let { group ->
+                            when (perAppMode) {
+                                PerAppPolicyResolver.MODE_ALLOW_LIST -> group.packages.any { it in selectedPackages }
+                                PerAppPolicyResolver.MODE_DISALLOW_LIST -> group.packages.none { it in selectedPackages }
+                                else -> appIsCaptured(binding.packageName, perAppMode, selectedPackages)
+                            }
+                        } ?: appIsCaptured(binding.packageName, perAppMode, selectedPackages),
                         busy = busy,
+                        sharedGroup = groupsByPackage[binding.packageName],
                         onEnabledChange = { enabled ->
-                            onBindingsChange(bindings.map {
-                                if (it.packageName == binding.packageName) it.copy(enabled = enabled) else it
-                            })
+                            requestEdit(binding.packageName, AppNodeEditOperation.SET_ENABLED, enabled = enabled)
                         },
                         onEdit = { editingPackage = binding.packageName },
-                        onDelete = { onBindingsChange(bindings.filterNot { it.packageName == binding.packageName }) }
+                        onDelete = { requestEdit(binding.packageName, AppNodeEditOperation.DELETE) }
                     )
                 }
             }
@@ -268,16 +341,78 @@ fun AppNodeRoutingScreen(
             busy = busy,
             onDismiss = { editingPackage = null },
             onSelected = { node ->
-                val existing = bindings.firstOrNull { it.packageName == packageName }
-                val replacement = existing?.copy(nodeId = node.id)
-                    ?: AppNodeBinding(packageName = packageName, nodeId = node.id)
-                onBindingsChange(
-                    if (existing == null) bindings + replacement
-                    else bindings.map { if (it.packageName == packageName) replacement else it }
-                )
+                requestEdit(packageName, AppNodeEditOperation.ASSIGN, nodeId = node.id)
                 editingPackage = null
             }
         )
+    }
+    pendingSharedEdit?.let { edit ->
+        val group = edit.confirmedGroup
+        val chosenNodeId = edit.nodeId ?: bindings.firstOrNull { it.packageName == edit.packageName }?.nodeId
+        val chosenNodeName = nodesById[chosenNodeId]?.tag ?: "节点已失效，接管时将阻断连接"
+        val willEnable = when (edit.operation) {
+            AppNodeEditOperation.DELETE -> false
+            AppNodeEditOperation.SET_ENABLED -> edit.enabled == true
+            AppNodeEditOperation.ASSIGN -> bindings.firstOrNull { it.packageName == edit.packageName }?.enabled ?: true
+        }
+        val scopeMessage = when {
+            !willEnable -> "代理接管名单保留。"
+            perAppMode == PerAppPolicyResolver.MODE_ALLOW_LIST ->
+                if (group.packages.any { it in selectedPackages })
+                    "整组加入当前的“仅选中应用”名单；保存的绕过名单保持不变。"
+                else "本组未纳入接管，规则保存后仍不生效；代理接管名单保留。"
+            perAppMode == PerAppPolicyResolver.MODE_DISALLOW_LIST ->
+                if (group.packages.all { it in selectedPackages })
+                    "本组均在绕过名单，规则保存后仍不生效；代理接管名单保留。"
+                else if (group.packages.any { it in selectedPackages })
+                    "本组有应用被绕过，Android 当前会绕过整组。确认后整组移出当前绕过名单并走代理；保存的“仅选中应用”名单保持不变。"
+                else "整组继续被接管，两份应用名单保持不变。"
+            else -> "所有应用模式下整组均被接管，两份应用名单保持不变。"
+        }
+        val action = when (edit.operation) {
+            AppNodeEditOperation.DELETE -> "删除这组规则"
+            AppNodeEditOperation.SET_ENABLED -> if (edit.enabled == true) "启用这组规则" else "关闭这组规则"
+            AppNodeEditOperation.ASSIGN -> "整组使用此节点"
+        }
+        AlertDialog(
+            onDismissRequest = { pendingSharedEdit = null },
+            title = { Text("共享身份的应用需要一起设置") },
+            text = {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        Text("Android 将以下应用视为同一个网络身份，无法分别使用不同节点。")
+                    }
+                    items(group.packages.sorted(), key = { it }) { member ->
+                        Column {
+                            Text(group.labels[member] ?: member, fontWeight = FontWeight.SemiBold)
+                            if (group.labels[member] != member) Text(member, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    item {
+                        Text(when (edit.operation) {
+                            AppNodeEditOperation.DELETE -> "整组删除后恢复默认线路，代理接管名单保留。"
+                            AppNodeEditOperation.SET_ENABLED -> if (edit.enabled == true)
+                                "共同节点：$chosenNodeName\n整组启用；默认主节点保持不变。\n$scopeMessage"
+                                else "整组关闭后恢复默认线路，代理接管名单保留。"
+                            AppNodeEditOperation.ASSIGN ->
+                                "共同节点：$chosenNodeName\n$scopeMessage\n默认主节点保持不变。"
+                        })
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = !busy, onClick = {
+                    pendingSharedEdit = null
+                    onBindingsChange(edit)
+                }) { Text(action) }
+            },
+            dismissButton = { TextButton(onClick = { pendingSharedEdit = null }) { Text("取消") } }
+        )
+    }
+    editError?.let { error ->
+        AlertDialog(onDismissRequest = { editError = null },
+            title = { Text("暂时无法设置") }, text = { Text(error) },
+            confirmButton = { TextButton(onClick = { editError = null }) { Text("知道了") } })
     }
 }
 
@@ -380,6 +515,7 @@ private fun AppNodeBindingCard(
     node: ProxyNode?,
     captured: Boolean,
     busy: Boolean,
+    sharedGroup: AppNodeUidGroup?,
     onEnabledChange: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -485,6 +621,13 @@ private fun AppNodeBindingCard(
                 color = if (missingNode && captured && app != null) MaterialTheme.colorScheme.error else TextSecondary,
                 style = MaterialTheme.typography.labelSmall
             )
+            if (sharedGroup != null && sharedGroup.packages.size > 1) {
+                val peers = (sharedGroup.packages - binding.packageName).sorted()
+                    .joinToString("、") { sharedGroup.labels[it] ?: it }
+                Text("与 $peers 共享身份 · 改节点、启停和删除会同步",
+                    modifier = Modifier.padding(end = 8.dp, top = 4.dp),
+                    color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
@@ -561,7 +704,7 @@ private fun AppBindingNodePicker(
     }
     AppBindingPickerDialog(
         title = "为 $appName 选择节点",
-        subtitle = "只更改这个应用的线路，默认主节点保持不变",
+        subtitle = "默认主节点保持不变；如有共享身份的应用，选择后会提示整组确认",
         query = query,
         placeholder = "搜索节点、分组或协议…",
         onQueryChanged = { query = it },

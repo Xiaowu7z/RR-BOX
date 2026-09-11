@@ -104,6 +104,8 @@ fun SettingsScreen(
                 withContext(NonCancellable) {
                     val previousEngine = preferences.tunEngine.first()
                     preferences.setTunEngine(engine)
+                    com.rr.client.lab.AppRoutingDiagnostics.record(
+                        "引擎偏好已保存；原选择=$previousEngine；新选择=$engine；尚待运行结果")
                     try {
                         if (RRVpnService.isRunning.value || RRVpnService.isStarting.value) {
                             ContextCompat.startForegroundService(
@@ -112,14 +114,22 @@ fun SettingsScreen(
                                     action = RRVpnService.ACTION_RESTART_ACTIVE_ENGINE
                                 }
                             )
+                            com.rr.client.lab.AppRoutingDiagnostics.record(
+                                "引擎切换请求已交给服务；目标=$engine；原运行代次=${RRVpnService.currentRuntimeGeneration()}")
+                        } else {
+                            com.rr.client.lab.AppRoutingDiagnostics.record("引擎偏好等待下次连接；目标=$engine")
                         }
                     } catch (error: Exception) {
                         preferences.setTunEngine(previousEngine)
+                        com.rr.client.lab.AppRoutingDiagnostics.record(
+                            "引擎切换请求失败，偏好已恢复；恢复为=$previousEngine；失败目标=$engine；原因=${error.message.orEmpty().take(1000)}")
                         throw error
                     }
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
+                com.rr.client.lab.AppRoutingDiagnostics.record(
+                    "引擎选择失败；目标=$engine；异常=${error.javaClass.simpleName}；原因=${error.message.orEmpty().take(1000)}")
                 Toast.makeText(context, "切换引擎失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             } finally {
                 engineSwitchBusy = false
@@ -136,12 +146,16 @@ fun SettingsScreen(
         if (requestedEngine != null && result.resultCode == Activity.RESULT_OK) {
             commitTunEngine(requestedEngine)
         } else if (requestedEngine != null) {
+            com.rr.client.lab.AppRoutingDiagnostics.record(
+                "引擎切换未执行；目标=$requestedEngine；VPN 授权未通过，保留原设置")
             Toast.makeText(context, "VPN 授权未通过，保留当前引擎", Toast.LENGTH_LONG).show()
         }
     }
 
     fun switchTunEngine(engine: String) {
         if (engine == tunEngine || engineSwitchBusy || pendingTunEngine != null) return
+        com.rr.client.lab.AppRoutingDiagnostics.record(
+            "用户选择引擎；原选择=$tunEngine；目标=$engine；当前运行引擎=${RRVpnService.activeRuntimeEngine.value ?: "未连接"}")
         // Ask only for an explicit System/HEV target. Selecting Root must never prepare a VPN.
         if (engine != PreferencesManager.TUN_ENGINE_ROOT) {
             val permissionIntent = VpnService.prepare(context)
@@ -153,6 +167,8 @@ fun SettingsScreen(
                 } catch (error: Exception) {
                     onVpnPermissionPendingChanged(false)
                     pendingTunEngine = null
+                    com.rr.client.lab.AppRoutingDiagnostics.record(
+                        "引擎切换授权界面打开失败；目标=$engine；原因=${error.message.orEmpty().take(1000)}")
                     Toast.makeText(context, "无法打开 VPN 授权：${error.message}", Toast.LENGTH_LONG).show()
                 }
                 return
