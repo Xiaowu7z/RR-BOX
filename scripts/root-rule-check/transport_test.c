@@ -167,6 +167,20 @@ static void check(const char *name, int expected, bool cleanup, bool dump)
 }
 int main(void)
 {
+    /* Reject malformed cursor state without reading an unavailable header. */
+    assert(!rr_rule_message_fits(NULL, -1));
+    assert(!rr_rule_message_fits(NULL, 0));
+    assert(!rr_rule_message_fits(NULL, (int)sizeof(struct nlmsghdr) - 1));
+    struct nlmsghdr boundary = { .nlmsg_len = UINT32_MAX };
+    assert(!rr_rule_message_fits(&boundary, INT_MAX));
+    boundary.nlmsg_len = INT_MAX;
+    assert(!rr_rule_message_fits(&boundary, INT_MAX)); /* missing alignment */
+    boundary.nlmsg_len = NLMSG_LENGTH(3);
+    assert(!rr_rule_message_fits(&boundary, NLMSG_LENGTH(3))); /* missing pad byte */
+    assert(rr_rule_message_fits(&boundary, NLMSG_ALIGN(NLMSG_LENGTH(3))));
+    boundary.nlmsg_len = NLMSG_LENGTH(0);
+    assert(rr_rule_message_fits(&boundary, NLMSG_LENGTH(0)));
+    passed += 8;
     check("ack_success", 0, false, false);
     check("ack_success", 0, true, false);
     check("socket_denied", EPERM, false, false);

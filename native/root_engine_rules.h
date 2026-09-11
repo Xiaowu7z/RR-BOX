@@ -172,6 +172,18 @@ static bool rr_rule_observe(const struct nlmsghdr *header, struct rr_rule_snapsh
     return false;
 }
 
+/* Android and host NLMSG_OK macros compare signed lengths differently.
+ * Check the signed remainder before reading the header, then compare in size_t.
+ * The INT_MAX-bounded remainder also bounds alignment arithmetic; require the
+ * padding to fit before NLMSG_NEXT can advance or subtract from the remainder. */
+static bool rr_rule_message_fits(const struct nlmsghdr *header, int remaining)
+{
+    if (remaining < (int)sizeof(*header)) return false;
+    size_t length = header->nlmsg_len;
+    if (length < sizeof(*header) || length > (size_t)remaining) return false;
+    return NLMSG_ALIGN(length) <= (size_t)remaining;
+}
+
 /* One private socket per bounded operation: nothing survives fork or crosses
  * sessions. Accept replies only from the kernel and our exact sequence/port.
  * NLM_F_DUMP_INTR, truncation, invalid ACKs and timeout never mean success. */
@@ -220,11 +232,11 @@ static int rr_rule_exchange(struct rr_rule_request *request, bool cleanup, struc
          * Linux/NDK alignment macros can make a signed remainder negative. */
         int validated = (int)count;
         struct nlmsghdr *check = (struct nlmsghdr *)buffer.bytes;
-        for (; validated > 0 && NLMSG_OK(check, validated); check = NLMSG_NEXT(check, validated)) {}
+        for (; rr_rule_message_fits(check, validated); check = NLMSG_NEXT(check, validated)) {}
         if (validated != 0) break;
         int left = (int)count;
         struct nlmsghdr *header = (struct nlmsghdr *)buffer.bytes;
-        for (; left > 0 && NLMSG_OK(header, left); header = NLMSG_NEXT(header, left)) {
+        for (; rr_rule_message_fits(header, left); header = NLMSG_NEXT(header, left)) {
             if (header->nlmsg_seq != request->header.nlmsg_seq || header->nlmsg_pid != local.nl_pid ||
                 header->nlmsg_flags & NLM_F_DUMP_INTR) goto done;
             if (header->nlmsg_type == NLMSG_ERROR) {
