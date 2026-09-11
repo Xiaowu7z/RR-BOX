@@ -6,6 +6,7 @@ No Android device or host networking is modified by this harness.
 """
 import argparse
 import array
+import errno
 import json
 import os
 from pathlib import Path
@@ -131,7 +132,11 @@ def client(sock_name, events, replies, scenario):
             elif scenario == "dns_rule_kernel_rejected":
                 answer = request(control, "ACTIVATE")
                 assert answer.startswith("ERROR activation_failed "), answer
-                assert "stage=install_ipv4_dns_port_rule" in answer and "netlink_errno=22" in answer, answer
+                # Netlink attribute policy reports EINVAL or ERANGE for this
+                # deliberately short payload, depending on the kernel version.
+                fields = set(answer.split())
+                expected_errors = {f"netlink_errno={code}" for code in (errno.EINVAL, errno.ERANGE)}
+                assert "stage=install_ipv4_dns_port_rule" in fields and fields & expected_errors, answer
                 passed("kernel_dns_rule_rejection_fails_explicitly_without_whole_ip_fallback")
             else:
                 request(control, "ACTIVATE", "ACTIVE")
