@@ -8,6 +8,8 @@ import com.google.gson.JsonParser
 import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
+import com.rr.client.routing.AppNodeBinding
+import com.rr.client.routing.AppNodeRouting
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.DomesticRoutingPolicy
 import com.rr.client.routing.JarvisAppPolicy
@@ -39,13 +41,37 @@ object ConfigBuilder {
         selectedPackages: Set<String> = emptySet(),
         fastForwarding: Boolean = false,
         ruleSets: ChinaRuleSetManager.Paths? = null,
-        routingPolicy: RoutingPolicySnapshot = RoutingPolicySnapshot.bundled()
+        routingPolicy: RoutingPolicySnapshot = RoutingPolicySnapshot.bundled(),
+        appNodeBindings: List<AppNodeBinding> = emptyList()
     ): String {
         val proxy = buildSelectedOutbound(selectedNode)
             ?: throw IllegalArgumentException("节点「${selectedNode.tag}」缺少 sing-box 1.14 可用参数")
 
         proxy.addProperty("tag", TAG_PROXY)
         configureBootstrapResolver(proxy)
+
+        val bindings = AppNodeRouting.activeBindings(appNodeBindings, perAppMode, selectedPackages)
+        val extraOutbounds = linkedMapOf<String, JsonObject>()
+        val extraBootstrapHosts = linkedSetOf<String>()
+        if (bindings.isNotEmpty()) extraBootstrapHosts.add(primitiveString(proxy.get("server")))
+        val bindingOutlets = bindings.associate { binding ->
+            val outlet = if (binding.nodeId.isNotBlank() && binding.nodeId == selectedNode.id) TAG_PROXY else {
+                val node = allNodes.firstOrNull { it.id == binding.nodeId && it.id.isNotBlank() }
+                val outbound = node?.let { runCatching { buildSelectedOutbound(it) }.getOrNull() }
+                if (node == null || outbound == null || !hasUsableExtraOutbound(outbound)) null else {
+                    val tag = AppNodeRouting.nodeTag(node.id)
+                    outbound.addProperty("tag", tag)
+                    configureBootstrapResolver(outbound)
+                    extraOutbounds.putIfAbsent(tag, outbound)
+                    extraBootstrapHosts.add(node.server)
+                    extraBootstrapHosts.add(primitiveString(outbound.get("server")))
+                    tag
+                }
+            }
+            binding.packageName to outlet
+        }
+        val bootstrapHosts = (listOf(selectedNode.server, primitiveString(proxy.get("server"))) +
+            extraBootstrapHosts).toTypedArray()
 
         return gson.toJson(JsonObject().apply {
             add("log", JsonObject().apply {
@@ -55,7 +81,10 @@ object ConfigBuilder {
                 addProperty("timestamp", true)
             })
 
-            add("dns", buildDnsConfig(selectedNode, smartRouting, ruleSets, routingPolicy))
+            add("dns", buildDnsConfig(
+                selectedNode, smartRouting, ruleSets, routingPolicy,
+                bindingOutlets, extraOutbounds.keys, extraBootstrapHosts
+            ))
 
             add("inbounds", JsonArray().apply {
                 add(JsonObject().apply {
@@ -70,9 +99,10 @@ object ConfigBuilder {
                 })
             })
 
-            // Preserve the known-good 0.1.8 topology: selected proxy + direct only.
+            // With no app bindings this remains the original proxy + direct topology.
             add("outbounds", JsonArray().apply {
                 add(proxy)
+                extraOutbounds.values.forEach(::add)
                 add(JsonObject().apply {
                     addProperty("type", "direct")
                     addProperty("tag", TAG_DIRECT)
@@ -102,6 +132,22 @@ object ConfigBuilder {
                         })
                     }
 
+                    // An explicit app outlet is independent of smart routing. A removed
+                    // or malformed secondary node must never fall through to main/direct.
+                    bindingOutlets.forEach { (packageName, outlet) ->
+                        add(JsonObject().apply {
+                            add("package_name", JsonArray().apply { add(packageName) })
+                            addProperty("action", if (outlet == null) "reject" else "route")
+                            if (outlet != null) addProperty("outbound", outlet)
+                        })
+                    }
+                    if (bindingOutlets.isNotEmpty()) {
+                        // Once app outlets are active, an unidentified business socket
+                        // must not silently use the main node. DNS interception is above;
+                        // positively identified unbound apps still reach ordinary rules.
+                        add(AppNodeRouting.unknownOwnerGuard())
+                    }
+
                     if (smartRouting) {
                         // This explicit app-wide preference precedes domain recovery as
                         // well as terminal proxy policies. DNS interception remains first.
@@ -114,7 +160,7 @@ object ConfigBuilder {
                         // Root stop/start does not replace Android's active network. An app
                         // may keep an IP learned while capture was off. Recover only reviewed
                         // X hosts with a recognizable protocol, before remaining proxy package rules.
-                        addDestinationRecoveryRules(this, selectedNode, proxy, routingPolicy)
+                        addDestinationRecoveryRules(this, routingPolicy, bootstrapHosts)
                         // Package identity is available in System / Root. HEV still
                         // evaluates the shared domain policy when the owner is unavailable.
                         routingPolicy.proxyPackageGroups.forEach { packages ->
@@ -134,7 +180,7 @@ object ConfigBuilder {
                                 addProperty("outbound", TAG_PROXY)
                             })
                         }
-                        addDomainRoutingRules(this, selectedNode, proxy, routingPolicy)
+                        addDomainRoutingRules(this, routingPolicy, bootstrapHosts)
 
                         // Minimal observed-IP exceptions must never override known
                         // international services or app-identity guards above.
@@ -220,14 +266,14 @@ object ConfigBuilder {
     }
 
     private fun addDomainRoutingRules(
-        rules: JsonArray, selectedNode: ProxyNode, proxy: JsonObject, routingPolicy: RoutingPolicySnapshot
+        rules: JsonArray, routingPolicy: RoutingPolicySnapshot, bootstrapHosts: Array<String>
     ) {
         var directStarted = false
         routingPolicy.domainRules.forEach { policy ->
             if (!directStarted && policy.destination == DomesticRoutingPolicy.Destination.DIRECT) {
                 // Preserve the existing priority of every explicit proxy domain policy.
                 // Recovery must precede the ordinary DIRECT rule that would consume it.
-                addWeChatIpv6RecoveryRules(rules, selectedNode, proxy, routingPolicy)
+                addWeChatIpv6RecoveryRules(rules, routingPolicy, bootstrapHosts)
                 directStarted = true
             }
             rules.add(domainCondition(policy).apply {
@@ -240,11 +286,11 @@ object ConfigBuilder {
     }
 
     private fun addDestinationRecoveryRules(
-        rules: JsonArray, selectedNode: ProxyNode, proxy: JsonObject, routingPolicy: RoutingPolicySnapshot
+        rules: JsonArray, routingPolicy: RoutingPolicySnapshot, bootstrapHosts: Array<String>
     ) {
         // Imported native JSON can carry a different effective server from its display
         // model. Exclude both so recovery never rewrites either bootstrap identity.
-        val hosts = XDestinationRecoveryPolicy.hosts(routingPolicy, selectedNode.server, primitiveString(proxy.get("server")))
+        val hosts = XDestinationRecoveryPolicy.hosts(routingPolicy, *bootstrapHosts)
         if (hosts.isEmpty()) return
         for (host in hosts) {
             rules.add(destinationRecoveryCondition(listOf(host)).apply {
@@ -267,10 +313,10 @@ object ConfigBuilder {
     }
 
     private fun addWeChatIpv6RecoveryRules(
-        rules: JsonArray, selectedNode: ProxyNode, proxy: JsonObject, routingPolicy: RoutingPolicySnapshot
+        rules: JsonArray, routingPolicy: RoutingPolicySnapshot, bootstrapHosts: Array<String>
     ) {
         for (host in WeChatIpv6RecoveryPolicy.hosts(
-            routingPolicy, selectedNode.server, primitiveString(proxy.get("server"))
+            routingPolicy, *bootstrapHosts
         )) {
             rules.add(JsonObject().apply {
                 addProperty("type", "logical")
@@ -349,7 +395,10 @@ object ConfigBuilder {
         selectedNode: ProxyNode,
         smartRouting: Boolean,
         ruleSets: ChinaRuleSetManager.Paths?,
-        routingPolicy: RoutingPolicySnapshot
+        routingPolicy: RoutingPolicySnapshot,
+        bindingOutlets: Map<String, String?>,
+        extraOutletTags: Set<String>,
+        extraBootstrapHosts: Set<String>
     ): JsonObject = JsonObject().apply {
         add("servers", JsonArray().apply {
             add(JsonObject().apply {
@@ -369,6 +418,19 @@ object ConfigBuilder {
                     addProperty("server_name", "cloudflare-dns.com")
                 })
             })
+            extraOutletTags.forEach { tag ->
+                add(JsonObject().apply {
+                    addProperty("type", "tls")
+                    addProperty("tag", "dns-$tag")
+                    addProperty("server", "1.1.1.1")
+                    addProperty("server_port", 853)
+                    addProperty("detour", tag)
+                    add("tls", JsonObject().apply {
+                        addProperty("enabled", true)
+                        addProperty("server_name", "cloudflare-dns.com")
+                    })
+                })
+            }
         })
         add("rules", JsonArray().apply {
             if (!isIpLiteral(selectedNode.server)) {
@@ -376,6 +438,24 @@ object ConfigBuilder {
                     add("domain", JsonArray().apply { add(selectedNode.server) })
                     addProperty("action", "route")
                     addProperty("server", DNS_DIRECT)
+                })
+            }
+            extraBootstrapHosts.filter {
+                it.isNotBlank() && it != selectedNode.server && !isIpLiteral(it)
+            }.forEach { host ->
+                add(JsonObject().apply {
+                    add("domain", JsonArray().apply { add(host) })
+                    addProperty("action", "route")
+                    addProperty("server", DNS_DIRECT)
+                })
+            }
+            // Package DNS is honored where the original owner is available. Shared
+            // Android netd requests have no originating app identity and retain final.
+            bindingOutlets.forEach { (packageName, outlet) ->
+                add(JsonObject().apply {
+                    add("package_name", JsonArray().apply { add(packageName) })
+                    addProperty("action", if (outlet == null) "reject" else "route")
+                    if (outlet != null) addProperty("server", if (outlet == TAG_PROXY) DNS_REMOTE else "dns-$outlet")
                 })
             }
             if (smartRouting) {
@@ -403,6 +483,20 @@ object ConfigBuilder {
         // application-owned DoH/HTTPDNS and shared-IP ambiguity still need IP/default rules.
         // sing-box 1.14 isolates DNS caches by transport already; independent_cache is deprecated.
         addProperty("reverse_mapping", smartRouting)
+    }
+
+    /** Structural rejection here complements the runtime's authoritative libbox preflight. */
+    private fun hasUsableExtraOutbound(outbound: JsonObject): Boolean {
+        val type = primitiveString(outbound.get("type"))
+        if (type !in setOf("tor", "wireguard")) {
+            if (primitiveString(outbound.get("server")).isBlank()) return false
+            val port = primitiveString(outbound.get("server_port")).toIntOrNull()
+            val hopping = outbound.get("server_ports")
+            val hasHoppingPorts = type == "hysteria2" && hopping?.isJsonArray == true && hopping.asJsonArray.size() > 0
+            if ((port == null || port !in 1..65535) && !hasHoppingPorts) return false
+        }
+        if (type in setOf("vless", "vmess", "tuic") && primitiveString(outbound.get("uuid")).isBlank()) return false
+        return true
     }
 
     /**

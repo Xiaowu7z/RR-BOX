@@ -1,8 +1,8 @@
-name: RRBOX 1.0.5 Build & Release (arm64-v8a)
+name: RRBOX 1.0.6 Build & Release (arm64-v8a)
 
 on:
   push:
-    branches: ["main", "dev", "audit/stable-1.0.0", "audit/stable-1.0.1", "audit/stable-1.0.5", "feat/domestic-routing-wechat-douyin"]
+    branches: ["main", "dev", "audit/stable-1.0.0", "audit/stable-1.0.1", "audit/stable-1.0.6", "feat/domestic-routing-wechat-douyin"]
   workflow_dispatch:
 
 permissions:
@@ -21,13 +21,13 @@ env:
   GRADLE_VERSION: 8.10.2
   ANDROID_PLATFORM: android-35
   ANDROID_BUILD_TOOLS: 35.0.0
-  VERSION_CODE: "105"
-  VERSION_NAME: "1.0.5"
-  OUTPUT_APK_NAME: RRBOX-1.0.5-arm64-v8a.apk
+  VERSION_CODE: "106"
+  VERSION_NAME: "1.0.6"
+  OUTPUT_APK_NAME: RRBOX-1.0.6-arm64-v8a.apk
 
 jobs:
   build:
-    name: Test, lint and sign RRBOX 1.0.5
+    name: Test, lint and sign RRBOX 1.0.6
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -141,6 +141,8 @@ jobs:
             --report "$PWD/build-reports/ROOT-TCP-REPORT.json"
       - name: Verify domestic and overseas routing with real core
         run: python3 scripts/verify-routing.py --sing-box build-reports/sing-box-routing-check --fixtures app/build/routing-fixtures --report build-reports/ROUTING-CORE-REPORT.json
+      - name: Verify app-specific outlets, owner rules and isolated DNS
+        run: python3 scripts/verify-app-node-routing.py --sing-box build-reports/sing-box-routing-check --core-source sing-box-src --fixtures app/build/app-node-fixtures --report build-reports/APP-NODE-ROUTING-REPORT.json
       - name: Verify stale X destinations and QUIC reply addresses with real core
         run: |
           go build -o build-reports/routing-quic-fixture scripts/routing-quic-fixture/main.go
@@ -158,6 +160,8 @@ jobs:
           test "$(git -C hev-socks5-tunnel rev-parse HEAD)" = "$HEV_COMMIT"
           make -C hev-socks5-tunnel -j2 shared CFLAGS=-Wno-error=unused-result
           python3 scripts/verify-hev-native-dns.py --hev-library hev-socks5-tunnel/bin/libhev-socks5-tunnel.so --fixtures app/build/hev-dns-fixtures --report build-reports/HEV-NATIVE-DNS-REPORT.json
+      - name: Verify native HEV app outlet and UDP session isolation
+        run: python3 scripts/verify-hev-native-app-routing.py --hev-library hev-socks5-tunnel/bin/libhev-socks5-tunnel.so --fixtures app/build/hev-dns-fixtures --report build-reports/HEV-APP-ROUTING-REPORT.json
       - name: Verify APK, signer continuity and test reports
         run: bash scripts/ci-verify-apk.sh
       - name: Publish signed rules and advance manual update channel
@@ -171,36 +175,36 @@ jobs:
       - name: Upload signed build
         uses: actions/upload-artifact@v4
         with:
-          name: RRBOX-1.0.5-arm64-v8a
+          name: RRBOX-1.0.6-arm64-v8a
           path: dist/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
       - name: Create stable tag at tested source without moving prior releases
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.5') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.6') }}"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.5" --jq .object.sha > "$RUNNER_TEMP/rrbox-stable-tag-sha"; then
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.6" --jq .object.sha > "$RUNNER_TEMP/rrbox-stable-tag-sha"; then
             test "$(cat "$RUNNER_TEMP/rrbox-stable-tag-sha")" = "$GITHUB_SHA"
           else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v1.0.5" -f sha="$GITHUB_SHA"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v1.0.6" -f sha="$GITHUB_SHA"
           fi
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.5" --jq .object.sha)" = "$GITHUB_SHA"
-      - name: Publish audited RRBOX 1.0.5 stable release
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.5') }}"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v1.0.6" --jq .object.sha)" = "$GITHUB_SHA"
+      - name: Publish audited RRBOX 1.0.6 stable release
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.6') }}"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.5
+          tag_name: v1.0.6
           target_commitish: ${{ github.sha }}
-          name: RRBOX 1.0.5 正式版
+          name: RRBOX 1.0.6 正式版
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body_path: dist/RELEASE-NOTES.md
           files: |
-            dist/RRBOX-1.0.5-arm64-v8a.apk
+            dist/RRBOX-1.0.6-arm64-v8a.apk
             dist/SHA256SUMS.txt
             dist/BUILD-REPORT.md
             dist/SIGNATURE-REPORT.txt
@@ -208,6 +212,8 @@ jobs:
             dist/TEST-REPORT.json
             dist/SOURCE-AUDIT.json
             dist/ROUTING-CORE-REPORT.json
+            dist/APP-NODE-ROUTING-REPORT.json
+            dist/HEV-APP-ROUTING-REPORT.json
             dist/DESTINATION-RECOVERY-REPORT.json
             dist/WECHAT-IPV6-REPORT.json
             dist/HEV-DNS-REPORT.json
@@ -216,7 +222,7 @@ jobs:
             dist/ROOT-TCP-REPORT.json
             dist/obtainium.json
       - name: Verify published APK digest and update channel
-        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.5') }}"
+        if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: RRBOX 1.0.6') }}"
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -227,7 +233,7 @@ jobs:
             if python3 - <<'PY'
           import json, os, pathlib
           release=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'latest.json').read_text())
-          assert release['tag_name']=='v1.0.5' and not release['draft'] and not release['prerelease']
+          assert release['tag_name']=='v1.0.6' and not release['draft'] and not release['prerelease']
           assets=[a for a in release['assets'] if a['name']==os.environ['OUTPUT_APK_NAME']]
           assert len(assets)==1 and assets[0]['state']=='uploaded'
           digest=pathlib.Path('dist/SHA256SUMS.txt').read_text().split()[0]

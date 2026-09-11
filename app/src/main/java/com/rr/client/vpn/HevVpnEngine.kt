@@ -31,6 +31,7 @@ class HevVpnEngine(
     }
 
     private var tunPfd: ParcelFileDescriptor? = null
+    private var ownerRouter: HevConnectionOwnerRouter? = null
 
     @Volatile
     var lastError: String? = null
@@ -41,7 +42,8 @@ class HevVpnEngine(
 
     fun start(
         policy: ResolvedPerAppPolicy,
-        includeSelfForBenchmark: Boolean = false
+        includeSelfForBenchmark: Boolean = false,
+        appRouting: HevAppRoutingPlan = HevAppRoutingPlan()
     ): Boolean {
         stop()
         lastError = null
@@ -53,7 +55,18 @@ class HevVpnEngine(
             return fail("HEV native 库未包含在当前 APK 中")
         }
 
+        if (appRouting.enabled && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return fail("HEV 应用指定节点需要 Android 10 或更新系统，请改用稳定或 Root 模式")
+        }
+
         return runCatching {
+            require(!appRouting.enabled ||
+                (!appRouting.socksUsername.isNullOrBlank() && !appRouting.socksPassword.isNullOrBlank())) {
+                "HEV 应用线路缺少本地连接认证，请重新生成配置"
+            }
+            ownerRouter = if (appRouting.enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                HevConnectionOwnerRouter(vpnService, appRouting, onLog)
+            } else null
             val builder = vpnService.Builder()
                 .setSession(if (includeSelfForBenchmark) "RRBOX · HEV · A/B" else "RRBOX · HEV")
                 .setMtu(HevTunnelConfig.MTU)
@@ -74,9 +87,11 @@ class HevVpnEngine(
 
             workingDir.mkdirs()
             val configFile = File(workingDir, "hev-socks5-tunnel.yaml")
-            configFile.writeText(HevTunnelConfig.build(HevConfigAdapter.SOCKS_PORT))
+            configFile.writeText(HevTunnelConfig.build(
+                HevConfigAdapter.SOCKS_PORT, appRouting.socksUsername, appRouting.socksPassword
+            ))
 
-            check(HevTunnelNative.start(configFile.absolutePath, pfd.fd)) {
+            check(HevTunnelNative.start(configFile.absolutePath, pfd.fd, ownerRouter)) {
                 "HEV native 线程启动失败"
             }
 
@@ -90,6 +105,10 @@ class HevVpnEngine(
                     "HEV A/B：RRBOX UID 临时进入 TUN；127/8 保持系统 loopback；" +
                         "sing-box 远端 socket 继续由 protect(fd) 绕过 VPN"
                 )
+            }
+            if (appRouting.enabled) {
+                onLog("HEV 应用线路：已加载 ${appRouting.packagePorts.size} 个应用；未知归属连接将阻止")
+                onLog("HEV 应用线路：UDP 双向校验所属应用，防止端口复用后串线")
             }
             onLog("HEV 高性能握手：SOCKS5 pipeline=true；tcp-fastopen=true（best-effort）")
             onLog("HEV DNS：由 sing-box 统一解析真实地址；已停用临时合成地址映射")
@@ -106,6 +125,10 @@ class HevVpnEngine(
     fun stop() {
         runCatching { HevTunnelNative.stop() }
             .onFailure { Log.w(TAG, "Unable to stop HEV native worker", it) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ownerRouter?.close()
+        }
+        ownerRouter = null
         runCatching { tunPfd?.close() }
             .onFailure { Log.w(TAG, "Unable to close HEV TUN fd", it) }
         tunPfd = null

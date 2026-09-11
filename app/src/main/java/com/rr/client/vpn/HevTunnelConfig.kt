@@ -18,7 +18,15 @@ object HevTunnelConfig {
     const val DNS_ADDRESS = "198.18.0.2"
     const val SOCKS_HOST = "127.0.0.1"
 
-    fun build(socksPort: Int): String = buildString {
+    fun build(
+        socksPort: Int,
+        username: String? = null,
+        password: String? = null
+    ): String = buildString {
+        require(socksPort in 1..65535)
+        require((username == null) == (password == null))
+        require(username == null || username.matches(Regex("[A-Za-z0-9_-]{1,64}")))
+        require(password == null || password.matches(Regex("[A-Za-z0-9_-]{1,128}")))
         appendLine("tunnel:")
         appendLine("  mtu: $MTU")
         appendLine("  ipv4: $IPV4_CLIENT")
@@ -28,6 +36,10 @@ object HevTunnelConfig {
         appendLine("socks5:")
         appendLine("  port: $socksPort")
         appendLine("  address: $SOCKS_HOST")
+        if (username != null && password != null) {
+            appendLine("  username: '$username'")
+            appendLine("  password: '$password'")
+        }
         appendLine("  udp: 'udp'")
         // Validated in A/B v2.8. Pipeline removes a serialized SOCKS5 handshake turn. TFO is
         // best-effort and transparently falls back to ordinary TCP on kernels that do not support it.

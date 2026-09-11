@@ -20,4 +20,17 @@ class LocalNodeDeletionPolicyTest {
     @Test fun unknownRunningNodeFailsClosed() {
         assertFalse(LocalNodeDeletionPolicy.canDelete("node-b", null, true))
     }
+
+    @Test fun everyConcurrentExitIsProtectedButUnrelatedNodesRemainRemovable() {
+        val runtime = setOf("la-main", "hk-telegram")
+        assertFalse(LocalNodeDeletionPolicy.canDelete("la-main", runtime, true))
+        assertFalse(LocalNodeDeletionPolicy.canDelete("hk-telegram", runtime, true))
+        assertTrue(LocalNodeDeletionPolicy.canDelete("jp-unused", runtime, true))
+        assertTrue(LocalNodeDeletionPolicy.canDelete("hk-telegram", runtime, false))
+    }
+
+    @Test fun incompleteConcurrentExitIdentityFailsClosed() {
+        assertFalse(LocalNodeDeletionPolicy.canDelete("node-b", emptySet(), true))
+        assertFalse(LocalNodeDeletionPolicy.canDelete("node-b", setOf("la-main", ""), true))
+    }
 }

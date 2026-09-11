@@ -132,6 +132,22 @@ class ProfileNodeStoreTest {
         assertEquals(subscription.name, refreshed.name)
     }
 
+    @Test fun batchAvailabilityRequiresEveryConcurrentExitFromCurrentStorage() = runBlocking {
+        val dao = MemoryProfileDao(subscription.toEntity())
+        assertTrue(ProfileNodeStore.containsConnectableNodes(dao, setOf(first.id, second.id)))
+        ProfileNodeStore.remove(dao, subscription.id, setOf(second.id)) { true }
+        assertFalse(ProfileNodeStore.containsConnectableNodes(dao, setOf(first.id, second.id)))
+        assertTrue(ProfileNodeStore.containsConnectableNodes(dao, setOf(first.id)))
+    }
+
+    @Test fun batchAvailabilityRejectsEmptyIdentityAndDisplayOnlyNodes() = runBlocking {
+        val info = first.copy(id = "info", tag = "流量信息（勿选） 剩余无限", server = "127.0.0.1", serverPort = 9)
+        val dao = MemoryProfileDao(subscription.copy(nodes = listOf(first, info)).toEntity())
+        assertFalse(ProfileNodeStore.containsConnectableNodes(dao, emptySet()))
+        assertFalse(ProfileNodeStore.containsConnectableNodes(dao, setOf(first.id, "")))
+        assertFalse(ProfileNodeStore.containsConnectableNodes(dao, setOf(first.id, info.id)))
+    }
+
     private suspend fun refresh(dao: MemoryProfileDao): SubProfile {
         val stored = SubProfile.fromEntity(dao.entity(subscription.id))
         val incoming = listOf(first.copy(id = "incoming-1"), second.copy(id = "incoming-2"))

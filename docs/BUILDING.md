@@ -20,11 +20,11 @@ Release 签名只在 CI 中通过已有 Secrets 注入，不在源码中保存�
 
 ## 发布门槛
 
-只有 `main` 上以 `release: RRBOX 1.0.5` 开头的发布提交能更新 Stable Release；其他分支构建不发布正式 APK。发布前运行单元测试、Lint、原生核心收发回归及 APK 签名与版本校验，发布后核对远端 APK digest 与本地产物 SHA-256，并确认 `v1.0.5` 的 Git tag 指向构建源码。
+只有 `main` 上以 `release: RRBOX 1.0.6` 开头的发布提交能更新 Stable Release；其他分支构建不发布正式 APK。发布前运行单元测试、Lint、原生核心收发回归及 APK 签名与版本校验，发布后核对远端 APK digest 与本地产物 SHA-256，并确认 `v1.0.6` 的 Git tag 指向构建源码。
 
-首次发布创建 `v1.0.5`；重跑时只允许同一 tag 已经指向当前准确提交，否则停止发布。已有 `v1.0.0`、`v1.0.1`、`v1.0.2`、`v1.0.3`、`v1.0.4` 及其他历史 tag 不移动。
+首次发布创建 `v1.0.6`；重跑时只允许同一 tag 已经指向当前准确提交，否则停止发布。已有 `v1.0.0`、`v1.0.1`、`v1.0.2`、`v1.0.3`、`v1.0.4`、`v1.0.5` 及其他历史 tag 不移动。
 
-`RRBOX-1.0.5-arm64-v8a.apk`、`SHA256SUMS.txt`、`BUILD-REPORT.md`、`TEST-REPORT.json`、`SIGNATURE-REPORT.txt` 和 `PACKAGE-REPORT.txt` 随 Release 发布。正式资产还包含源码、核心路由、X 地址恢复、微信 IPv6 回退、HEV DNS / 原生 DNS 及 Root 接管 / TCP 收发报告。CI artifact 另含详细测试和 Lint 报告。原生测试在隔离环境中验证实现边界，不能代替 Android 实机业务验收。
+`RRBOX-1.0.6-arm64-v8a.apk`、`SHA256SUMS.txt`、`BUILD-REPORT.md`、`TEST-REPORT.json`、`SIGNATURE-REPORT.txt` 和 `PACKAGE-REPORT.txt` 随 Release 发布。正式资产还包含源码、核心路由、X 地址恢复、微信 IPv6 回退、HEV DNS / 原生 DNS 及 Root 接管 / TCP 收发报告。CI artifact 另含详细测试和 Lint 报告。原生测试在隔离环境中验证实现边界，不能代替 Android 实机业务验收。
 
 预期正式签名证书 SHA-256：
 
@@ -32,7 +32,7 @@ Release 签名只在 CI 中通过已有 Secrets 注入，不在源码中保存�
 fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16e8cf66e180d816
 ```
 
-本次版本为 **1.0.5 / 105**，高于此前 **1.0.4 / 104**；App 内版本比较可检测本次升级，正式 APK 命名符合 App 与 Obtainium 的资产过滤规则。包名及正式签名保持一致，允许保留数据覆盖安装。构建追溯仍以源码提交、构建报告及 APK 哈希为准。
+本次版本为 **1.0.6 / 106**，高于此前 **1.0.5 / 105**；App 内版本比较可检测本次升级，正式 APK 命名符合 App 与 Obtainium 的资产过滤规则。包名及正式签名保持一致，允许保留数据覆盖安装。构建追溯仍以源码提交、构建报告及 APK 哈希为准。
 
 1.0.4 增加 `ALLOW_LIST + smartRouting=false` 三引擎配置及快捷重连回归，确认谷歌后台推送组件在推荐名单内。Root 物理 DNS 规则要求系统 `ip rule` 和内核支持 `ipproto` / `dport`；不支持时启动失败并回滚，不回退到整地址接管。原生隔离测试检查未选 UID 对同一 DNS 服务器非 53 端口的连接保持直连。
 
@@ -43,3 +43,5 @@ fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16e8cf66e180d816
 ## GitHub About 简介
 
 README 与 GitHub 仓库 `description` 是两个独立字段。期望元数据保存在 `.github/repository-metadata.json`。`scripts/sync_repository_metadata.sh` 只通过正常 GitHub 管理权限更新，并在无权限时失败退出；普通 Actions `GITHUB_TOKEN` 的 contents:write 不等于 Administration:write，不会把 403 当成功。脚本不会保存或输出令牌。
+
+1.0.6 增加应用指定节点与多出口验证。主节点保持默认出口；有效绑定优先于智能分流，缺失或无效的辅助节点只拒绝绑定应用。System / Root 的未知应用身份连接和 HEV 转换前的未知身份会话均拒绝，避免落入主线。HEV 此项能力要求 Android 10 以上，其 UDP 会话检查含身份/出口变化，启用时存在额外身份查询开销。原始应用身份的 Android 成功率与真实业务性能需要实机验收。

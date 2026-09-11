@@ -6,6 +6,7 @@ git clone https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
 git -C hev-socks5-tunnel checkout --detach "$HEV_COMMIT"
 git -C hev-socks5-tunnel submodule update --init --recursive
 test "$(git -C hev-socks5-tunnel rev-parse HEAD)" = "$HEV_COMMIT"
+python3 scripts/apply-hev-app-routing.py hev-socks5-tunnel
 pushd hev-socks5-tunnel
 "$ANDROID_NDK_HOME/ndk-build" \
   NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=arm64-v8a APP_PLATFORM=android-26 \

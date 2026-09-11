@@ -11,8 +11,8 @@ aapt2="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
 "$apksigner" verify --verbose --print-certs "$output_apk" | tee dist/SIGNATURE-REPORT.txt
 "$aapt2" dump badging "$output_apk" | tee dist/PACKAGE-REPORT.txt
 grep -q "package: name='com.rr.client'" dist/PACKAGE-REPORT.txt
-grep -q "versionCode='105'" dist/PACKAGE-REPORT.txt
-grep -q "versionName='1.0.5'" dist/PACKAGE-REPORT.txt
+grep -q "versionCode='106'" dist/PACKAGE-REPORT.txt
+grep -q "versionName='1.0.6'" dist/PACKAGE-REPORT.txt
 grep -q "application-label:'RRBOX'" dist/PACKAGE-REPORT.txt
 unzip -Z1 "$output_apk" | tee dist/APK-FILE-LIST.txt
 grep -q '^lib/arm64-v8a/libbox\.so$' dist/APK-FILE-LIST.txt
@@ -31,6 +31,8 @@ test "$certificate_sha256" = "fe1368cf16ee9e8b56199655d0b1e2606a6ec9b8f3d4ac5e16
 python3 scripts/collect_reports.py
 cp build-reports/SOURCE-AUDIT.json dist/SOURCE-AUDIT.json
 cp build-reports/ROUTING-CORE-REPORT.json dist/ROUTING-CORE-REPORT.json
+cp build-reports/APP-NODE-ROUTING-REPORT.json dist/APP-NODE-ROUTING-REPORT.json
+cp build-reports/HEV-APP-ROUTING-REPORT.json dist/HEV-APP-ROUTING-REPORT.json
 cp build-reports/DESTINATION-RECOVERY-REPORT.json dist/DESTINATION-RECOVERY-REPORT.json
 cp build-reports/WECHAT-IPV6-REPORT.json dist/WECHAT-IPV6-REPORT.json
 cp build-reports/HEV-DNS-REPORT.json dist/HEV-DNS-REPORT.json
@@ -38,12 +40,12 @@ cp build-reports/HEV-NATIVE-DNS-REPORT.json dist/HEV-NATIVE-DNS-REPORT.json
 cp build-reports/ROOT-ENGINE-REPORT.json dist/ROOT-ENGINE-REPORT.json
 cp build-reports/ROOT-TCP-REPORT.json dist/ROOT-TCP-REPORT.json
 cat > dist/BUILD-REPORT.md <<EOF
-# RRBOX 1.0.5 Build Report
+# RRBOX 1.0.6 Build Report
 
 - Source commit: $(git rev-parse HEAD)
 - Package: com.rr.client
-- Version code: 105
-- Version name: 1.0.5
+- Version code: 106
+- Version name: 1.0.6
 - ABI: arm64-v8a
 - APK: ${OUTPUT_APK_NAME}
 - APK size: ${apk_size} bytes
@@ -57,6 +59,8 @@ cat > dist/BUILD-REPORT.md <<EOF
 - Network continuity: event-driven physical path tracking + validated runtime recovery
 - Quick Settings: current persisted config checked before cache reuse
 - Routing: shared domestic DNS/route policy, WeChat / Douyin / TikTok separation
+- App-specific nodes: main outlet retained, explicit app bindings independent of smart routing, failed auxiliary nodes reject their bound apps
+- App outlet verification: pinned core rule metadata plus isolated TCP/UDP/DNS exit observers; HEV native original-tuple sessions; Android owner lookup and device performance still require acceptance
 - Routing verification: pinned host core TCP/UDP/DNS fixtures including BIGO login domain precedence and exact-domain boundaries (device acceptance still required)
 - Destination recovery verification: System/HEV/Root production rules, actual observed destination, trusted DNS cache and QUIC original reply addresses; all fixture traffic terminates on loopback
 - WeChat IPv6 verification: enabled candidate rules with the real direct outbound, IPv4 TCP recovery, AAAA-only answers and dual-stack TCP fallback, unchanged UDP; Root physical-family gating is separate and Android/WeChat business acceptance remains required

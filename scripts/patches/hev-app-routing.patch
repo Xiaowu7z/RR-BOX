@@ -1,0 +1,196 @@
+--- a/src/hev-jni.c
++++ b/src/hev-jni.c
+@@ -23,0 +24 @@
++#include "rr-app-routing.h"
+@@ -51,0 +53,30 @@
++static jclass route_class;
++static jmethodID route_method;
++static void native_set_app_routing(JNIEnv *env, jobject thiz, jboolean enabled) {
++    /* Kotlin serializes this with start/stop and only changes it after worker join. */
++    rr_app_route_set_enabled(enabled == JNI_TRUE);
++}
++int64_t rr_jni_resolve_route(int protocol, const char *source, int source_port,
++                             const char *destination, int destination_port) {
++    JNIEnv *env = pthread_getspecific(current_jni_env);
++    jstring src, dst;
++    jlong token = -1;
++    if (!env) {
++        if ((*java_vm)->AttachCurrentThread(java_vm, &env, NULL) != JNI_OK) return -1;
++        pthread_setspecific(current_jni_env, env);
++    }
++    src = (*env)->NewStringUTF(env, source);
++    if (!src) goto fail;
++    dst = (*env)->NewStringUTF(env, destination);
++    if (!dst) { (*env)->DeleteLocalRef(env, src); goto fail; }
++    token = (*env)->CallStaticLongMethod(env, route_class, route_method,
++                                        protocol, src, source_port, dst, destination_port);
++    (*env)->DeleteLocalRef(env, src);
++    (*env)->DeleteLocalRef(env, dst);
++fail:
++    if ((*env)->ExceptionCheck(env)) {
++        (*env)->ExceptionClear(env);
++        return -1;
++    }
++    return token;
++}
+@@ -59,0 +91 @@
++    { "TProxySetAppRouting", "(Z)V", (void *)native_set_app_routing },
+@@ -87,0 +120,5 @@
++    route_method = (*env)->GetStaticMethodID(env, klass, "resolveRoute",
++        "(ILjava/lang/String;ILjava/lang/String;I)J");
++    if (!route_method) { (*env)->DeleteLocalRef(env, klass); return JNI_ERR; }
++    route_class = (*env)->NewGlobalRef(env, klass);
++    if (!route_class) { (*env)->DeleteLocalRef(env, klass); return JNI_ERR; }
+--- a/src/hev-socks5-session-udp.c
++++ b/src/hev-socks5-session-udp.c
+@@ -30,0 +31 @@
++#include "rr-app-routing.h"
+@@ -65,0 +67,20 @@
++/* Request and response checks use the immutable original 5-tuple. A different UID,
++ * generation or outlet invalidates the association, including delayed replies. */
++static int
++rr_udp_route_current(HevSocks5SessionUDP *self)
++{
++    int64_t token;
++    if (!self->data.route_token) return 1;
++    if (!self->pcb) return 0;
++    token = rr_app_route_lookup(17, &self->pcb->remote_ip, self->pcb->remote_port,
++                                  &self->pcb->local_ip, self->pcb->local_port);
++    if (token > 0 && token == self->data.route_token) return 1;
++    /* This function runs on the one cooperative HEV worker. Removing the PCB here
++     * prevents a recycled source port from joining the old SOCKS association. */
++    udp_recv(self->pcb, NULL, NULL);
++    udp_remove(self->pcb);
++    self->pcb = NULL;
++    hev_socks5_session_terminate(HEV_SOCKS5_SESSION(self));
++    return 0;
++}
++
+@@ -77,0 +99,2 @@
++    /* Recheck after a potentially slow SOCKS handshake, before sending queued data. */
++    if (!rr_udp_route_current(self)) return -1;
+@@ -137,0 +161 @@
++        if (!rr_udp_route_current(self)) return -1;
+@@ -180,0 +205,4 @@
++    if (!rr_udp_route_current(self)) {
++        pbuf_free(p);
++        return;
++    }
+--- a/src/hev-socks5-session.c
++++ b/src/hev-socks5-session.c
+@@ -12,0 +13 @@
++#include "hev-compiler.h"
+@@ -23,0 +25,2 @@
++    HevSocks5SessionData *data;
++    unsigned int port;
+@@ -28,0 +32,3 @@
++    data = container_of (hev_socks5_session_get_node(self), HevSocks5SessionData, node);
++    if (data->route_token < 0) return;
++    port = data->route_token > 0 ? (data->route_token & 65535) : srv->port;
+@@ -30,2 +36 @@
+-    res = hev_socks5_client_connect (HEV_SOCKS5_CLIENT (self), srv->addr,
+-                                     srv->port);
++    res = hev_socks5_client_connect (HEV_SOCKS5_CLIENT (self), srv->addr, port);
+--- a/src/hev-socks5-session.h
++++ b/src/hev-socks5-session.h
+@@ -13,0 +14 @@
++#include <stdint.h>
+@@ -29,0 +31 @@
++    int64_t route_token;
+--- a/src/hev-socks5-tunnel.c
++++ b/src/hev-socks5-tunnel.c
+@@ -38,0 +39 @@
++#include "rr-app-routing.h"
+@@ -185,0 +187,3 @@
++    int64_t route_token = rr_app_route_lookup(6, &pcb->remote_ip, pcb->remote_port,
++                                                &pcb->local_ip, pcb->local_port);
++    if (route_token < 0) return ERR_RST;
+@@ -196,0 +201 @@
++    tcp->data.route_token = route_token;
+@@ -260,0 +266,12 @@
++    /* This initial callback receives the packet DESTINATION in addr/port; pcb local
++     * address is not set by lwIP until its second callback. Never look up that empty tuple. */
++    int64_t route_token = rr_app_route_lookup(17, &pcb->remote_ip, pcb->remote_port, addr, port);
++    if (route_token < 0) {
++        udp_remove(pcb);
++        return;
++    }
++    if (rr_app_route_enabled()) {
++        ip_addr_set_ipaddr(&pcb->local_ip, addr);
++        pcb->local_port = port;
++        pcb->rr_full_tuple = 1;
++    }
+@@ -273,0 +291 @@
++    udp->data.route_token = route_token;
+--- /dev/null
++++ b/src/rr-app-routing.c
+@@ -0,0 +1,28 @@
++/* RRBOX: original-socket ownership, resolved before loopback SOCKS conversion. */
++#include <stdatomic.h>
++#include "rr-app-routing.h"
++static atomic_int routing_enabled;
++static RRAppOwnerCallback owner_callback;
++void rr_app_route_set_enabled(int enabled) {
++    atomic_store_explicit(&routing_enabled, enabled != 0, memory_order_release);
++}
++void rr_app_route_set_callback(RRAppOwnerCallback callback) { owner_callback = callback; }
++int rr_app_route_enabled(void) {
++    return atomic_load_explicit(&routing_enabled, memory_order_acquire);
++}
++int64_t rr_app_route_lookup(int protocol, const ip_addr_t *source, int source_port,
++                           const ip_addr_t *destination, int destination_port) {
++    char src[48], dst[48];
++    int64_t token;
++    if (!rr_app_route_enabled()) return 0;
++    if (!ipaddr_ntoa_r(source, src, sizeof(src)) ||
++        !ipaddr_ntoa_r(destination, dst, sizeof(dst))) return -1;
++#ifdef ANDROID
++    token = rr_jni_resolve_route(protocol, src, source_port, dst, destination_port);
++#else
++    if (!owner_callback) return -1;
++    token = owner_callback(protocol, src, source_port, dst, destination_port);
++#endif
++    /* Zero is only valid on the disabled legacy path. Java/JNI failure closes the flow. */
++    return token > 0 && (token & 65535) ? token : -1;
++}
+--- /dev/null
++++ b/src/rr-app-routing.h
+@@ -0,0 +1,15 @@
++#ifndef RR_APP_ROUTING_H
++#define RR_APP_ROUTING_H
++#include <stdint.h>
++#include <lwip/ip_addr.h>
++typedef int64_t (*RRAppOwnerCallback)(int, const char *, int, const char *, int);
++void rr_app_route_set_enabled(int enabled);
++void rr_app_route_set_callback(RRAppOwnerCallback callback);
++int rr_app_route_enabled(void);
++int64_t rr_app_route_lookup(int protocol, const ip_addr_t *source, int source_port,
++                           const ip_addr_t *destination, int destination_port);
++#ifdef ANDROID
++int64_t rr_jni_resolve_route(int protocol, const char *source, int source_port,
++                             const char *destination, int destination_port);
++#endif
++#endif
+--- a/third-part/lwip/src/core/udp.c
++++ b/third-part/lwip/src/core/udp.c
+@@ -263 +263,3 @@
+-      if ((pcb->remote_port == src) && ip_addr_cmp(&pcb->remote_ip, ip_current_src_addr())) {
++      if ((pcb->remote_port == src) && ip_addr_cmp(&pcb->remote_ip, ip_current_src_addr()) &&
++          (!pcb->rr_full_tuple || ((pcb->local_port == dest) &&
++                                  ip_addr_cmp(&pcb->local_ip, ip_current_dest_addr())))) {
+@@ -458,0 +461,10 @@
++          /* A rejected owner removes the just-created PCB. Avoid recreating it forever
++           * on this same packet; no dereference of the possibly freed npcb is permitted. */
++          struct udp_pcb *retained;
++          for (retained = udp_pcbs; retained != NULL; retained = retained->next) {
++            if (retained == npcb) break;
++          }
++          if (retained == NULL) {
++            pbuf_free(p);
++            goto end;
++          }
+--- a/third-part/lwip/src/include/lwip/udp.h
++++ b/third-part/lwip/src/include/lwip/udp.h
+@@ -90,0 +91,2 @@
++  /* RRBOX: independent SOCKS association for each original destination. */
++  u8_t rr_full_tuple;

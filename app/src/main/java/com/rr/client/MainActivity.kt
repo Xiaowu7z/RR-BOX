@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.rr.client.core.ConfigBuilder
+import com.rr.client.core.AppNodeRuntimeValidation
 import kotlinx.coroutines.CancellationException
 import com.rr.client.subscription.ImportLimits
 import com.rr.client.subscription.SubscriptionNodeReconciler
@@ -59,6 +60,9 @@ import com.rr.client.core.model.AppRouteConfig
 import com.rr.client.core.model.ProtocolType
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.routing.AppManager
+import com.rr.client.routing.AppNodeBinding
+import com.rr.client.routing.AppNodeRouting
+import com.rr.client.routing.AppNodeBindingRevision
 import com.rr.client.routing.ChinaRuleSetManager
 import com.rr.client.routing.PerAppPolicyResolver
 import com.rr.client.routing.AutoProxySelectionPolicy
@@ -73,6 +77,7 @@ import com.rr.client.ui.components.NodeEditDialog
 import com.rr.client.ui.components.PinSetupDialog
 import com.rr.client.ui.components.PinUnlockScreen
 import com.rr.client.ui.screens.AppRoutingScreen
+import com.rr.client.ui.screens.AppNodeRoutingScreen
 import com.rr.client.ui.screens.DashboardScreen
 import com.rr.client.ui.screens.NodeGroupUi
 import com.rr.client.ui.screens.NodeListScreen
@@ -87,6 +92,7 @@ import com.rr.client.vpn.RRVpnService
 import io.nekohasekai.libbox.Libbox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
@@ -94,6 +100,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -115,6 +122,7 @@ class MainActivity : ComponentActivity() {
     // the PIN screen removing and recreating MainApp's composition.
     private var refreshingIds by mutableStateOf<Set<String>>(emptySet())
     private var removingNodeProfileIds by mutableStateOf<Set<String>>(emptySet())
+    private var savingAppNodeBindings by mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -146,6 +154,7 @@ class MainActivity : ComponentActivity() {
     private var pendingConfigJson: String? = null
     private var pendingNodeTag: String? = null
     private var pendingNodeId: String? = null
+    private var pendingBindingRevision: Long? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -273,6 +282,10 @@ class MainActivity : ComponentActivity() {
         var bypassSelectedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
         var addingProfile by remember { mutableStateOf(false) }
         var apps by remember { mutableStateOf<List<AppRouteConfig>>(emptyList()) }
+        var appNodeBindings by remember { mutableStateOf<List<AppNodeBinding>>(emptyList()) }
+        var appNodeBindingsLoaded by remember { mutableStateOf(false) }
+        var appNodeBindingsLoadError by remember { mutableStateOf<String?>(null) }
+        var showAppNodeRouting by rememberSaveable { mutableStateOf(false) }
         var routingSelectionReady by remember { mutableStateOf(false) }
         var selectingAutomatically by remember { mutableStateOf(false) }
         var latencyStates by remember { mutableStateOf<Map<String, NodeLatencyState>>(emptyMap()) }
@@ -286,6 +299,7 @@ class MainActivity : ComponentActivity() {
             if (goHome) {
                 editingNode = null
                 showPinSetup = false
+                showAppNodeRouting = false
                 selectedTab = 0
                 dashboardRequested.value = false
             }
@@ -330,6 +344,22 @@ class MainActivity : ComponentActivity() {
             PerAppPolicyResolver.MODE_ALLOW_LIST -> proxySelectedPackages
             PerAppPolicyResolver.MODE_DISALLOW_LIST -> bypassSelectedPackages
             else -> emptySet()
+        }
+
+        LaunchedEffect(prefs) {
+            prefs.appNodeBindings.retryWhen { error, attempt ->
+                if (error is CancellationException) throw error
+                appNodeBindingsLoaded = false
+                appNodeBindingsLoadError = "已保存的应用指定节点规则无法读取，请重置此模块后重新添加。"
+                if (attempt == 0L) Toast.makeText(this@MainActivity,
+                    "应用指定节点设置读取失败，连接前需要恢复有效设置", Toast.LENGTH_LONG).show()
+                delay(1_000L)
+                true
+            }.collect { saved ->
+                appNodeBindings = saved
+                appNodeBindingsLoaded = true
+                appNodeBindingsLoadError = null
+            }
         }
 
         LaunchedEffect(lastVpnError) {
@@ -466,7 +496,7 @@ class MainActivity : ComponentActivity() {
             val profile = subProfiles.firstOrNull { it.id == profileId } ?: return
             fun canRemove(ids: Set<String>): Boolean {
                 val busy = RRVpnService.isRunning.value || RRVpnService.isStarting.value
-                val active = RRVpnService.activeRuntimeNodeId.value
+                val active = RRVpnService.activeRuntimeNodeIds.value
                 return ids.all { LocalNodeDeletionPolicy.canDelete(it, active, busy) }
             }
             val candidates = profile.nodes.filter { nodeIds == null || it.id in nodeIds }
@@ -595,7 +625,8 @@ class MainActivity : ComponentActivity() {
                             runtimeGeneration, RRVpnService.currentRuntimeGeneration()
                         )) return@launch
                     result.onSuccess { config ->
-                        sendRestartVpn(config, node.tag, node.id, runtimeGeneration, ruleUpdate)
+                        sendRestartVpn(config.configJson, node.tag, node.id, runtimeGeneration,
+                            ruleUpdate, config.bindingRevision)
                         dispatched = true
                     }.onFailure { error ->
                         toast("分流配置失败：${error.message ?: error.javaClass.simpleName}")
@@ -817,6 +848,10 @@ class MainActivity : ComponentActivity() {
                                 isVpnRunning -> sendStopVpn()
                                 isVpnStarting -> toast("VPN 正在启动，请稍候")
                                 else -> {
+                                    if (!routingSelectionReady || !appNodeBindingsLoaded) {
+                                        toast("应用代理设置尚未加载，请稍后重试")
+                                        return@onToggle
+                                    }
                                     val targetNode = currentTargetNode()
                                     if (targetNode == null) {
                                         toast("还没有任何节点：可在「节点」页 + 号单独添加，或到「订阅」页添加订阅")
@@ -841,8 +876,9 @@ class MainActivity : ComponentActivity() {
                                             perAppMode,
                                             activePackages,
                                             fastForwarding
-                                        ).onSuccess { configJson ->
-                                            startVpnWithPermissionCheck(configJson, targetNode.tag, targetNode.id)
+                                        ).onSuccess { config ->
+                                            startVpnWithPermissionCheck(config.configJson, targetNode.tag,
+                                                targetNode.id, config.bindingRevision)
                                         }.onFailure { error ->
                                             toast("配置校验失败：${error.message ?: error.javaClass.simpleName}")
                                         }
@@ -885,7 +921,64 @@ class MainActivity : ComponentActivity() {
 
                     2 -> {
                         val activePackages = packagesFor(perAppMode)
-                        AppRoutingScreen(
+                        if (showAppNodeRouting) AppNodeRoutingScreen(
+                            apps = apps,
+                            nodes = selectableNodes,
+                            bindings = appNodeBindings,
+                            mainNodeId = if (isVpnRunning || isVpnStarting)
+                                activeRuntimeNodeId ?: selectedNodeId else selectedNodeId,
+                            perAppMode = perAppMode,
+                            selectedPackages = activePackages,
+                            isLoading = !routingSelectionReady || !appNodeBindingsLoaded,
+                            isApplying = applyingRouting || savingAppNodeBindings || isVpnStarting,
+                            loadError = appNodeBindingsLoadError,
+                            onResetInvalidBindings = {
+                                if (!savingAppNodeBindings && appNodeBindingsLoadError != null) {
+                                    savingAppNodeBindings = true
+                                    lifecycleScope.launch {
+                                        try {
+                                            persistAndApplyAppNodeBindings(emptyList())
+                                            appNodeBindings = emptyList()
+                                            appNodeBindingsLoadError = null
+                                            appNodeBindingsLoaded = true
+                                            toast("应用指定节点规则已重置，可重新添加")
+                                        } catch (error: CancellationException) {
+                                            throw error
+                                        } catch (_: Exception) {
+                                            toast("重置失败，请重试")
+                                        } finally {
+                                            savingAppNodeBindings = false
+                                        }
+                                    }
+                                }
+                            },
+                            onBindingsChange = onBindingsChange@{ updated ->
+                                if (savingAppNodeBindings || !appNodeBindingsLoaded) return@onBindingsChange
+                                savingAppNodeBindings = true
+                                lifecycleScope.launch {
+                                    try {
+                                        withContext(Dispatchers.IO) {
+                                            AppNodeRuntimeValidation.validateSharedUidTargets(
+                                                this@MainActivity, updated, perAppMode, packagesFor(perAppMode),
+                                                RRVpnService.activeRuntimeNodeId.value ?: selectedNodeId
+                                            )
+                                        }
+                                        // Commit the complete set before one runtime update.
+                                        persistAndApplyAppNodeBindings(updated)
+                                        appNodeBindings = updated
+                                        toast(if (RRVpnService.isRunning.value || RRVpnService.isStarting.value)
+                                            "应用指定节点已保存，正在重新应用连接" else "应用指定节点已保存")
+                                    } catch (error: CancellationException) {
+                                        throw error
+                                    } catch (error: Exception) {
+                                        toast("应用指定节点保存失败：${error.message ?: "请重试"}")
+                                    } finally {
+                                        savingAppNodeBindings = false
+                                    }
+                                }
+                            },
+                            onBack = { showAppNodeRouting = false }
+                        ) else AppRoutingScreen(
                             apps = apps,
                             perAppMode = perAppMode,
                             smartRouting = smartRouting,
@@ -893,6 +986,10 @@ class MainActivity : ComponentActivity() {
                             applyingRouting = applyingRouting,
                             loadingApps = !routingSelectionReady,
                             selectingAutomatically = selectingAutomatically,
+                            onOpenAppNodeRouting = { showAppNodeRouting = true },
+                            activeAppNodeBindingCount = AppNodeRouting.activeBindings(
+                                appNodeBindings, perAppMode, activePackages
+                            ).size,
                             onModeChanged = { mode ->
                                 if (mode == perAppMode) return@AppRoutingScreen
                                 perAppMode = mode
@@ -1164,6 +1261,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private data class PreparedUiRuntime(val configJson: String, val bindingRevision: Long)
+
+    /** A committed binding change must survive Activity rotation before service dispatch. */
+    private suspend fun persistAndApplyAppNodeBindings(bindings: List<AppNodeBinding>) =
+        withContext(NonCancellable + Dispatchers.Main.immediate) {
+            RRApplication.instance.preferencesManager.setAppNodeBindings(bindings)
+            val mainNodeId = RRVpnService.activeRuntimeNodeId.value
+            if ((RRVpnService.isRunning.value || RRVpnService.isStarting.value) &&
+                !mainNodeId.isNullOrBlank() &&
+                com.rr.client.vpn.VpnConnectionIntentStore.isDesiredRunning(this@MainActivity)
+            ) {
+                // No config payload: the Service rebuilds from persisted settings in its
+                // own scope, while generation and node identity protect a newer session.
+                ContextCompat.startForegroundService(this@MainActivity,
+                    Intent(this@MainActivity, RRVpnService::class.java).apply {
+                        action = RRNotificationManager.ACTION_RESTART_VPN
+                        putExtra(RRVpnService.EXTRA_NODE_ID, mainNodeId)
+                        putExtra(RRVpnService.EXTRA_ROUTING_UPDATE_GENERATION,
+                            RRVpnService.currentRuntimeGeneration())
+                        putExtra(RRVpnService.EXTRA_APP_BINDING_REVISION, AppNodeBindingRevision.current())
+                    }
+                )
+            }
+        }
+
     private suspend fun buildRuntimeConfig(
         targetNode: ProxyNode,
         allNodes: List<ProxyNode>,
@@ -1173,22 +1295,31 @@ class MainActivity : ComponentActivity() {
         selectedPackages: Set<String>,
         fastForwarding: Boolean,
         preparedRules: ChinaRuleSetManager.Paths? = null
-    ): Result<String> = withContext(Dispatchers.IO) {
+    ): Result<PreparedUiRuntime> = withContext(Dispatchers.IO) {
         runCatching {
+            val bindingRevision = AppNodeBindingRevision.current()
             val ruleSets = if (smartRouting) preparedRules ?: ChinaRuleSetManager.ensureBundled(this@MainActivity).getOrThrow() else null
+            val bindings = RRApplication.instance.preferencesManager.appNodeBindings.first()
+            val usableNodes = AppNodeRuntimeValidation.filterUsableNodes(
+                this@MainActivity, targetNode, allNodes, bindings, perAppMode, selectedPackages
+            )
             val configJson = ConfigBuilder.buildSingBoxConfig(
                 selectedNode = targetNode,
-                allNodes = allNodes,
+                allNodes = usableNodes,
                 appRoutes = apps,
                 smartRouting = smartRouting,
                 perAppMode = perAppMode,
                 selectedPackages = selectedPackages,
                 fastForwarding = fastForwarding,
                 ruleSets = ruleSets,
-                routingPolicy = ruleSets?.policy ?: com.rr.client.routing.RoutingPolicySnapshot.bundled()
+                routingPolicy = ruleSets?.policy ?: com.rr.client.routing.RoutingPolicySnapshot.bundled(),
+                appNodeBindings = bindings
             )
             Libbox.checkConfig(configJson)
-            configJson
+            check(bindingRevision == AppNodeBindingRevision.current()) {
+                "应用指定节点设置已变化，请重新连接"
+            }
+            PreparedUiRuntime(configJson, bindingRevision)
         }
     }
 
@@ -1276,10 +1407,12 @@ class MainActivity : ComponentActivity() {
         backgroundOptimizationExempt.value = isIgnoringBatteryOptimizations()
     }
 
-    private fun startVpnWithPermissionCheck(configJson: String, nodeTag: String, nodeId: String) {
+    private fun startVpnWithPermissionCheck(configJson: String, nodeTag: String, nodeId: String,
+        bindingRevision: Long) {
         pendingConfigJson = configJson
         pendingNodeTag = nodeTag
         pendingNodeId = nodeId
+        pendingBindingRevision = bindingRevision
 
         lifecycleScope.launch {
             if (rootModeSelectedOrActive()) {
@@ -1311,23 +1444,34 @@ class MainActivity : ComponentActivity() {
         val config = pendingConfigJson ?: return
         val tag = pendingNodeTag ?: "Node"
         val id = pendingNodeId ?: ""
+        val bindingRevision = pendingBindingRevision ?: return
 
         val available = try {
-            ProfileNodeStore.containsConnectableNode(RRApplication.instance.database, id)
+            ProfileNodeStore.containsConnectableNodes(
+                RRApplication.instance.database, AppNodeRouting.requiredNodeIds(config, id)
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
             false
         }
         // A later user start may have replaced the pending permission request.
-        if (pendingNodeId != id || pendingConfigJson != config) return
+        if (pendingNodeId != id || pendingConfigJson != config || pendingBindingRevision != bindingRevision) return
         if (!available) {
             clearPendingVpn()
             Toast.makeText(this, "节点已删除或不可用，请重新选择节点", Toast.LENGTH_LONG).show()
             return
         }
 
-        val serviceIntent = vpnIntent(null, config, tag, id)
+        if (bindingRevision != AppNodeBindingRevision.current()) {
+            clearPendingVpn()
+            Toast.makeText(this, "应用指定节点设置已变化，请重新连接", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val serviceIntent = vpnIntent(null, config, tag, id).apply {
+            putExtra(RRVpnService.EXTRA_APP_BINDING_REVISION, bindingRevision)
+        }
         runCatching { ContextCompat.startForegroundService(this, serviceIntent) }
             .onFailure { error ->
                 Toast.makeText(
@@ -1340,11 +1484,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendRestartVpn(config: String, nodeTag: String, nodeId: String, runtimeGeneration: Long,
-        ruleUpdate: ChinaRuleSetManager.UpdateResult? = null) {
+        ruleUpdate: ChinaRuleSetManager.UpdateResult? = null, bindingRevision: Long) {
         ContextCompat.startForegroundService(
             this,
             vpnIntent(RRNotificationManager.ACTION_RESTART_VPN, config, nodeTag, nodeId).apply {
                 putExtra(RRVpnService.EXTRA_ROUTING_UPDATE_GENERATION, runtimeGeneration)
+                putExtra(RRVpnService.EXTRA_APP_BINDING_REVISION, bindingRevision)
                 ruleUpdate?.let {
                     putExtra(RRVpnService.EXTRA_RULE_UPDATE_CANDIDATE_GENERATION, it.generation)
                     putExtra(RRVpnService.EXTRA_RULE_UPDATE_BASE_GENERATION, it.baseGeneration)
@@ -1374,6 +1519,7 @@ class MainActivity : ComponentActivity() {
         pendingConfigJson = null
         pendingNodeTag = null
         pendingNodeId = null
+        pendingBindingRevision = null
     }
 
     private fun clearOwnApplicationData() {

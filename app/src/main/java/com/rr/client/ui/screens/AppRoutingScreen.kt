@@ -10,14 +10,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -58,7 +63,9 @@ fun AppRoutingScreen(
     selectingAutomatically: Boolean,
     onModeChanged: (String) -> Unit,
     onAutoSelect: () -> Unit,
-    onAppSelectionChanged: (String, Boolean) -> Unit
+    onAppSelectionChanged: (String, Boolean) -> Unit,
+    onOpenAppNodeRouting: () -> Unit = {},
+    activeAppNodeBindingCount: Int = 0
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var showDetails by rememberSaveable { mutableStateOf(false) }
@@ -105,13 +112,23 @@ fun AppRoutingScreen(
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                color = TextPrimary
+                color = TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             TextButton(
-                onClick = { showDetails = !showDetails },
+                onClick = onOpenAppNodeRouting,
+                modifier = Modifier.heightIn(min = 48.dp),
                 colors = ButtonDefaults.textButtonColors(contentColor = CyanPrimary)
             ) {
-                Text(if (showDetails) "收起说明" else "使用说明")
+                Text(if (activeAppNodeBindingCount > 0) "指定节点 · $activeAppNodeBindingCount" else "指定节点")
+            }
+            IconButton(onClick = { showDetails = !showDetails }) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = if (showDetails) "收起使用说明" else "展开使用说明",
+                    tint = if (showDetails) CyanPrimary else TextSecondary
+                )
             }
         }
 
@@ -342,6 +359,11 @@ private fun AppRoutingDetails(
             )
             Text(
                 "修改选择后自动保存，已连接时会重新应用一次。已选应用自动置顶。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Text(
+                "指定节点可为接管范围内的应用单独选择出口，其他应用继续使用主节点。该设置独立于智能分流。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )

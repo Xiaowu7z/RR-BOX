@@ -12,6 +12,8 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.rr.client.core.model.ProxyNode
 import com.rr.client.core.NodeOverridePatcher
+import com.rr.client.routing.AppNodeBinding
+import com.rr.client.routing.AppNodeBindingRevision
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -37,6 +39,7 @@ class PreferencesManager(private val context: Context) {
         val BYPASS_SELECTED_PACKAGES = stringSetPreferencesKey("bypass_selected_packages")
 
         val NODE_OVERRIDES_JSON = stringPreferencesKey("node_overrides_json")
+        val APP_NODE_BINDINGS_JSON = stringPreferencesKey("app_node_bindings_json")
         val BACKGROUND_GUIDE_SHOWN = booleanPreferencesKey("background_guide_shown")
         val CHINA_RULESET_LAST_UPDATED = longPreferencesKey("china_ruleset_last_updated")
 
@@ -102,6 +105,16 @@ class PreferencesManager(private val context: Context) {
 
     val nodeOverrides: Flow<Map<String, ProxyNode>> = context.dataStore.data.map { preferences ->
         decodeNodeOverrides(preferences[NODE_OVERRIDES_JSON])
+    }
+
+    val appNodeBindings: Flow<List<AppNodeBinding>> = context.dataStore.data.map { preferences ->
+        AppNodeBindingsCodec.decode(preferences[APP_NODE_BINDINGS_JSON])
+    }
+
+    suspend fun setAppNodeBindings(bindings: List<AppNodeBinding>) {
+        val encoded = AppNodeBindingsCodec.encode(bindings)
+        context.dataStore.edit { it[APP_NODE_BINDINGS_JSON] = encoded }
+        AppNodeBindingRevision.changed()
     }
 
     suspend fun setSelectedNodeId(id: String?) {

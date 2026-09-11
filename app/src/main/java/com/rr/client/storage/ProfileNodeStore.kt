@@ -8,13 +8,20 @@ import com.rr.client.subscription.TrafficInfoNode
 object ProfileNodeStore {
     /** Check again after asynchronous preparation, before dispatching a user start. */
     suspend fun containsConnectableNode(database: AppDatabase, nodeId: String): Boolean =
+        containsConnectableNodes(database, setOf(nodeId))
+
+    suspend fun containsConnectableNodes(database: AppDatabase, nodeIds: Set<String>): Boolean =
         database.withTransaction {
-            nodeId.isNotBlank() && database.profileDao().getAllProfiles().any { entity ->
-                SubProfile.fromEntity(entity).nodes.any {
-                    it.id == nodeId && !TrafficInfoNode.isInfoNode(it)
-                }
-            }
+            containsConnectableNodes(database.profileDao(), nodeIds)
         }
+
+    internal suspend fun containsConnectableNodes(dao: ProfileDao, nodeIds: Set<String>): Boolean {
+        if (nodeIds.isEmpty() || nodeIds.any(String::isBlank)) return false
+        val availableIds = dao.getAllProfiles().asSequence()
+            .flatMap { SubProfile.fromEntity(it).nodes.asSequence() }
+            .filterNot(TrafficInfoNode::isInfoNode).map { it.id }.toSet()
+        return availableIds.containsAll(nodeIds)
+    }
 
     suspend fun remove(
         database: AppDatabase,
